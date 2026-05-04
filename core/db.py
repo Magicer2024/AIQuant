@@ -354,6 +354,76 @@ CREATE TABLE IF NOT EXISTS stock_mgmt_holding (
 );
 CREATE INDEX IF NOT EXISTS idx_mh_date ON stock_mgmt_holding(trade_date);
 CREATE INDEX IF NOT EXISTS idx_mh_code ON stock_mgmt_holding(code);
+
+-- 风控事件记录表
+CREATE TABLE IF NOT EXISTS risk_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id   TEXT,
+    rule_name     TEXT    NOT NULL,
+    category      TEXT    NOT NULL,
+    level         TEXT    NOT NULL,
+    message       TEXT    NOT NULL,
+    metric_value  REAL,
+    threshold     REAL,
+    suggestion    TEXT,
+    created_at    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_risk_events_time ON risk_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_risk_events_level ON risk_events(level);
+
+-- 风控状态快照表
+CREATE TABLE IF NOT EXISTS risk_status (
+    account_id        TEXT PRIMARY KEY,
+    overall_level     TEXT    NOT NULL,
+    active_rules      TEXT,
+    current_drawdown  REAL DEFAULT 0,
+    current_positions INTEGER DEFAULT 0,
+    total_exposure    REAL DEFAULT 0,
+    available_capital REAL DEFAULT 0,
+    last_check        TEXT    NOT NULL,
+    block_reason      TEXT,
+    updated_at        TEXT
+);
+
+-- 黑名单表
+CREATE TABLE IF NOT EXISTS blacklist (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code    TEXT    NOT NULL,
+    reason        TEXT    NOT NULL,
+    created_by    TEXT    DEFAULT 'system',
+    created_at    TEXT    NOT NULL,
+    expiry_date   TEXT,
+    removed_at    TEXT,
+    UNIQUE(stock_code)
+);
+CREATE INDEX IF NOT EXISTS idx_blacklist_expiry ON blacklist(expiry_date);
+
+-- 风控豁免表
+CREATE TABLE IF NOT EXISTS risk_overrides (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_name     TEXT    NOT NULL,
+    reason        TEXT,
+    operator      TEXT,
+    approver      TEXT,
+    status        TEXT    DEFAULT 'pending',
+    created_at    TEXT    NOT NULL,
+    expires_at    TEXT,
+    approved_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_override_status ON risk_overrides(status);
+CREATE INDEX IF NOT EXISTS idx_override_expires ON risk_overrides(expires_at);
+
+-- 审计日志表
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT,
+    action      TEXT NOT NULL,
+    resource    TEXT,
+    detail      TEXT,
+    ip_address  TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
         """)
 
         # ── 2. 迁移：为旧版 daily_price 补充策略评分列 ────────────

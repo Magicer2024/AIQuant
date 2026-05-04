@@ -18,9 +18,47 @@ from agents.base import BaseAgent, AgentContext
 
 
 class ReportAgent(BaseAgent):
-    """报告生成器：整合输出，生成HTML报告和微信推送"""
+    """报告生成器（尚书省·礼部·报表官）：整合输出，生成HTML报告和微信推送"""
 
     name = "ReportAgent"
+    governance_role = "尚书省·报表官"
+
+    # 风险标记中文映射
+    RISK_FLAG_CN = {
+        "no_data": "无数据",
+        "limit_up_3d": "连续3日涨停",
+        "heavy_drop_with_volume": "放量大跌",
+        "near_20d_low": "接近20日低点",
+        "rsi_overbought": "RSI超买",
+        "screen_error": "筛查异常",
+    }
+
+    # 市场趋势中文映射
+    TREND_CN = {
+        "bull": "牛市",
+        "neutral": "震荡",
+        "bear": "熊市",
+        "unknown": "未知",
+    }
+
+    # 风险等级中文映射
+    RISK_LEVEL_CN = {
+        "low": "低风险",
+        "medium": "中等风险",
+        "high": "高风险",
+    }
+
+    def _translate_flags(self, flags: list[str]) -> list[str]:
+        """将风险标记翻译为中文"""
+        return [self.RISK_FLAG_CN.get(f, f) for f in flags]
+
+    def _translate_trend(self, trend: str) -> str:
+        """将市场趋势翻译为中文"""
+        return self.TREND_CN.get(trend, trend)
+
+    def _translate_risk_level(self, level: str) -> str:
+        """将风险等级翻译为中文"""
+        return self.RISK_LEVEL_CN.get(level, level)
 
     def _execute(self, ctx: AgentContext) -> dict:
         today = date.today().strftime("%Y-%m-%d")
@@ -56,6 +94,10 @@ class ReportAgent(BaseAgent):
         signal_data = ctx.get_result("SignalAgent")
         risk_data = ctx.get_result("RiskAgent")
         backtest_data = ctx.get_result("BacktestAgent")
+
+        # 非交易日时使用最近交易日数据
+        effective_trade_date = ctx.get("effective_trade_date") or today
+        is_trading_day = ctx.get("is_trading_day", True)
 
         fusion_top = signal_data.data.get("fusion_top", []) if signal_data else []
         v4_top = signal_data.data.get("v4_top", []) if signal_data else []
@@ -117,6 +159,8 @@ class ReportAgent(BaseAgent):
 
         return {
             "date": today,
+            "effective_trade_date": effective_trade_date,
+            "is_trading_day": is_trading_day,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "summary": {
                 "fusion_hits": signal_data.data.get("fusion_hits", 0) if signal_data else 0,
@@ -132,18 +176,28 @@ class ReportAgent(BaseAgent):
     def _build_wechat_msg(self, report: dict) -> str:
         """生成微信推送文本"""
         today = report["date"]
+        effective_date = report.get("effective_trade_date", today)
+        is_trading_day = report.get("is_trading_day", True)
         recs = report["recommendations"][:3]
         risk = report.get("risk", {})
 
+        # 非交易日标注
+        date_note = ""
+        if not is_trading_day and effective_date != today:
+            date_note = f"（非交易日，数据日期: {effective_date}）\n"
+
+        market_trend_cn = self._translate_trend(risk.get('market_trend', 'unknown'))
+        overall_risk_cn = self._translate_risk_level(risk.get('overall_risk', 'medium'))
+
         if not recs:
-            msg = f"A股小波段【{today}】\n\n"
+            msg = f"A股小波段【{today}】\n{date_note}\n"
             msg += "今日无符合条件股票，空仓观望\n"
-            msg += f"市场环境: {risk.get('market_trend', 'unknown')}\n"
+            msg += f"市场环境: {market_trend_cn}\n"
             msg += "(仅供参考，投资有风险)"
             return msg
 
-        msg = f"A股小波段【{today}】交易计划\n\n"
-        msg += f"市场环境: {risk.get('market_trend', 'unknown')} | 风险: {risk.get('overall_risk', 'medium')}\n"
+        msg = f"A股小波段【{today}】交易计划\n{date_note}\n"
+        msg += f"市场环境: {market_trend_cn} | 风险: {overall_risk_cn}\n"
         msg += f"建议仓位: {risk.get('position_advice', {}).get('suggested_position', 0.5) * 100:.0f}%\n\n"
 
         for i, rec in enumerate(recs):
@@ -163,8 +217,9 @@ class ReportAgent(BaseAgent):
 
             # 风险提示
             risk_flags = rec.get("risk", {}).get("flags", [])
-            if risk_flags:
-                msg += f"   ⚠️ 风险: {','.join(risk_flags)}\n"
+            risk_flags_cn = self._translate_flags(risk_flags)
+            if risk_flags_cn:
+                msg += f"   ⚠️ 风险: {'、'.join(risk_flags_cn)}\n"
             msg += "\n"
 
         msg += "(仅供参考，投资有风险)"
@@ -197,14 +252,25 @@ class ReportAgent(BaseAgent):
     def _render_html(self, report: dict) -> str:
         """渲染HTML报告"""
         today = report["date"]
+        effective_date = report.get("effective_trade_date", today)
+        is_trading_day = report.get("is_trading_day", True)
         recs = report["recommendations"]
         risk = report.get("risk", {})
         summary = report.get("summary", {})
+
+        # 非交易日提示
+        non_trading_banner = ""
+        if not is_trading_day and effective_date != today:
+            non_trading_banner = f'<div style="background:#fff7e6;border:1px solid #ffd591;border-radius:4px;padding:8px 12px;margin-bottom:16px;color:#d46b08;font-size:13px;">⚠️ 非交易日，以下数据基于最近交易日 <b>{effective_date}</b> 的行情</div>'
 
         # 风险等级颜色
         risk_color = {"low": "#52c41a", "medium": "#faad14", "high": "#f5222d"}.get(
             risk.get("overall_risk", "medium"), "#faad14"
         )
+
+        # 中文翻译后的值
+        market_trend_cn = self._translate_trend(risk.get("market_trend", "unknown"))
+        overall_risk_cn = self._translate_risk_level(risk.get("overall_risk", "medium"))
 
         rows = ""
         for rec in recs:
@@ -215,7 +281,8 @@ class ReportAgent(BaseAgent):
             wr = bt.get("win_rate", 0)
             avg_ret = bt.get("avg_return", 0)
             risk_flags = rec.get("risk", {}).get("flags", [])
-            warning = "⚠️ " + ",".join(risk_flags) if risk_flags else "✅ 正常"
+            risk_flags_cn = self._translate_flags(risk_flags)
+            warning = "⚠️ " + "、".join(risk_flags_cn) if risk_flags_cn else "✅ 正常"
 
             rows += f"""
             <tr>
@@ -267,6 +334,7 @@ class ReportAgent(BaseAgent):
 <div class="container">
     <h1>每日交易计划 <span style="font-size:16px;color:#666;">{today}</span></h1>
     <div class="subtitle">生成时间: {report.get('generated_at', '')}</div>
+    {non_trading_banner}
 
     <div class="summary">
         <div class="card">
@@ -283,7 +351,7 @@ class ReportAgent(BaseAgent):
         </div>
         <div class="card">
             <h3>市场环境</h3>
-            <div class="value risk-{risk.get('overall_risk', 'medium')}">{risk.get('market_trend', 'unknown')}</div>
+            <div class="value risk-{risk.get('overall_risk', 'medium')}">{market_trend_cn}</div>
         </div>
         <div class="card">
             <h3>建议仓位</h3>

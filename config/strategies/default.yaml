@@ -1,0 +1,131 @@
+# AIQuant 策略配置
+# 修改此文件无需重启服务，配置会自动热加载
+
+version: "1.0"
+last_modified: "2026-05-01"
+
+# ── 5策略融合权重 ──────────────────────────────
+# 顺序：[放量突破, 均线粘合, 量价背离, 抄底, 主力建仓]
+fusion_weights:
+  default: [0.30, 0.15, 0.20, 0.20, 0.15]
+  pure_bottom: [0.00, 0.00, 0.00, 1.00, 0.00]
+  conservative: [0.25, 0.20, 0.25, 0.15, 0.15]
+  aggressive: [0.35, 0.10, 0.15, 0.25, 0.15]
+
+# ── 策略1：放量突破 ────────────────────────────
+volume_breakout:
+  enabled: true
+  name: "放量突破"
+  description: "成交量显著放大，价格突破近期高点"
+  params:
+    vol_factor: 1.5      # 放量倍数（相对于20日均量）
+    rise_3d: 0.02        # 近3日累计涨幅最小值
+    score_min: 1.0       # 触发所需最少条件数
+  scoring:
+    vol_factor_weight: 0.6
+    rise_3d_weight: 0.4
+
+# ── 策略2：均线粘合 ────────────────────────────
+ma_convergence:
+  enabled: true
+  name: "均线粘合"
+  description: "MA5/MA10/MA20 相互靠拢，即将选择方向"
+  params:
+    ma_diff_pct: 0.03    # 三条均线最大偏差比例
+    score_min: 1.0
+  scoring:
+    ma_diff_weight: 1.0
+
+# ── 策略3：量价背离 ────────────────────────────
+price_volume_divergence:
+  enabled: true
+  name: "量价背离"
+  description: "价格创新低但成交量萎缩，或价格新高量缩"
+  params:
+    lookback: 20         # 回溯检查天数
+    score_min: 1.0
+  scoring:
+    divergence_strength_weight: 1.0
+
+# ── 策略4：抄底 ────────────────────────────────
+bottom_fishing:
+  enabled: true
+  name: "超跌抄底"
+  description: "短期大幅下跌后出现反弹信号"
+  params:
+    drop_5d: -0.08       # 5日跌幅阈值
+    rsi_threshold: 30    # RSI 超卖线
+    score_min: 1.0
+  scoring:
+    drop_weight: 0.5
+    rsi_weight: 0.5
+
+# ── 策略5：主力建仓 ────────────────────────────
+whale_accumulation:
+  enabled: true
+  name: "主力建仓"
+  description: "成交量温和放大，价格小幅上涨，疑似主力吸筹"
+  params:
+    volume_spike: 2.0    # 成交量突增倍数
+    score_min: 1.0
+  scoring:
+    volume_spike_weight: 1.0
+
+# ── 融合评分阈值 ───────────────────────────────
+fusion:
+  threshold: 20.0        # 融合分触发门槛（0-50）
+  threshold_min: 15.0    # 最低有效门槛
+
+# ── 单股止损止盈 ───────────────────────────────
+trade:
+  stop_loss: -0.06       # 默认止损 -6%
+  take_profit: 0.20      # 默认止盈 +20%
+
+# ── 回测默认参数 ───────────────────────────────
+backtest:
+  initial_capital: 100000.0
+  commission_rate: 0.0003    # 万三手续费（双向）
+  stamp_tax: 0.001            # 印花税（卖出单向）
+  slippage_rate: 0.001        # 滑点率千分之一
+  position_pct: 1.0           # 单笔仓位比例
+  max_holding_days: 40        # 最大持仓天数
+
+# ── v4 超跌反弹策略 ────────────────────────────
+oversold_rebound_v4:
+  enabled: true
+  name: "超跌反弹 v4"
+  params:
+    score_threshold: 1.8
+    stop_loss: -0.06
+    trailing_pct: 0.10
+    single_pos_ratio: 0.40
+    use_market_timing: true
+    use_trailing_stop: true
+
+# ── v4 参数扫描网格 ────────────────────────────
+param_grid:
+  - name: "v4 tr10% pos30% sl=-5%"
+    score_threshold: 1.8
+    stop_loss: -0.05
+    trailing_pct: 0.10
+    single_pos_ratio: 0.30
+  - name: "v4 tr10% pos40% sl=-5%"
+    score_threshold: 1.8
+    stop_loss: -0.05
+    trailing_pct: 0.10
+    single_pos_ratio: 0.40
+  - name: "v4 tr12% pos40% sl=-5%"
+    score_threshold: 1.8
+    stop_loss: -0.05
+    trailing_pct: 0.12
+    single_pos_ratio: 0.40
+  - name: "v4 tr15% pos40% sl=-5%"
+    score_threshold: 1.8
+    stop_loss: -0.05
+    trailing_pct: 0.15
+    single_pos_ratio: 0.40
+  - name: "v4 tr10% pos50% sl=-5%"
+    score_threshold: 1.8
+    stop_loss: -0.05
+    trailing_pct: 0.10
+    single_pos_ratio: 0.50

@@ -30,3 +30,4 @@ data_cache/
 .sync_cache/
 reports/
 *.html
+config/llm_config.yaml

@@ -23,9 +23,10 @@ from core.sync import (
 
 
 class DataAgent(BaseAgent):
-    """数据管家：每日数据同步与质量检查"""
+    """数据管家（太子院·数据官）：每日数据同步与质量检查"""
 
     name = "DataAgent"
+    governance_role = "太子院·数据官"
 
     def _execute(self, ctx: AgentContext) -> dict:
         today = date.today().strftime("%Y-%m-%d")
@@ -33,6 +34,8 @@ class DataAgent(BaseAgent):
 
         # 1. 交易日判断
         if not is_trading_day(today):
+            init_db()
+            latest_in_db = get_latest_date_all()
             weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
             wday = date.today().weekday()
             msg = (
@@ -44,6 +47,7 @@ class DataAgent(BaseAgent):
                 "trading_day": False,
                 "skip_reason": msg,
                 "today": today,
+                "latest_in_db": latest_in_db,
             }
 
         init_db()

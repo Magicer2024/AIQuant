@@ -39,9 +39,10 @@ POSITION_NUM = 3
 
 
 class SignalAgent(BaseAgent):
-    """信号猎手：运行全部策略，生成候选列表"""
+    """信号猎手（中书省·策略官）：运行全部策略，生成候选列表"""
 
     name = "SignalAgent"
+    governance_role = "中书省·策略官"
 
     def _execute(self, ctx: AgentContext) -> dict:
         stocks_df = get_all_stocks()

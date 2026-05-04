@@ -1,5 +1,5 @@
 """
-routes/agents.py —— 多Agent流水线API
+routes/agents.py —— 三省六部制流水线API
 
 路由：
   GET  /api/agents/status      → 当前流水线状态
@@ -7,10 +7,12 @@ routes/agents.py —— 多Agent流水线API
   POST /api/agents/run/<name>  → 手动触发单个Agent
   GET  /api/agents/history     → 最近执行历史
   GET  /api/agents/report      → 查看最新报告
+  GET  /api/agents/governance  → 三省六部制架构信息
 """
 
 from flask import Blueprint, jsonify, request
 from agents.orchestrator import get_orchestrator
+from agents.governance_mapping import get_pipeline_flow, get_governance_role, format_agent_display
 from scheduler.state import PIPELINE_STATUS
 import os
 
@@ -93,3 +95,33 @@ def get_latest_report():
         return jsonify({"success": True, "date": today, "data": data})
 
     return jsonify({"success": False, "error": "今日报告尚未生成", "date": today})
+
+
+@agents_bp.route("/governance", methods=["GET"])
+def get_governance_info():
+    """获取三省六部制架构信息"""
+    flow = get_pipeline_flow()
+    
+    # 获取各Agent的三省六部角色
+    agents_info = []
+    for agent_name in ["DataAgent", "SignalAgent", "BacktestAgent", "RiskAgent", "ReportAgent"]:
+        role = get_governance_role(agent_name)
+        if role:
+            agents_info.append({
+                "agent_name": agent_name,
+                "province": role.province,
+                "ministry": role.ministry,
+                "role": role.role,
+                "display_name": f"{role.province}·{role.role}",
+                "description": role.description,
+            })
+
+    return jsonify({
+        "success": True,
+        "governance": {
+            "flow": flow,
+            "agents": agents_info,
+            "provinces": ["太子院", "中书省", "门下省", "尚书省"],
+            "ministries": ["吏部", "户部", "礼部", "兵部", "刑部", "工部"],
+        }
+    })

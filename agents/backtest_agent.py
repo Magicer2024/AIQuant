@@ -29,9 +29,10 @@ from core.db import get_daily_price
 
 
 class BacktestAgent(BaseAgent):
-    """回测验证器：对候选信号做历史回测验证"""
+    """回测验证器（尚书省·回测官）：对候选信号做历史回测验证"""
 
     name = "BacktestAgent"
+    governance_role = "尚书省·回测官"
 
     def _execute(self, ctx: AgentContext) -> dict:
         fusion_candidates = ctx.get("fusion_candidates", [])

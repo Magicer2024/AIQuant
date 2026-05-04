@@ -1,15 +1,18 @@
 """
-agents/orchestrator.py —— 流水线编排器
+agents/orchestrator.py —— 三省六部制流水线编排器
 
 职责：
-  1. 管理Agent执行顺序和依赖关系
+  1. 管理三省六部执行顺序和依赖关系
   2. 支持串行和并行执行
   3. 错误处理和重试机制
   4. 状态持久化（供API查询）
   5. 定时触发集成
 
-执行图：
-    DataAgent → SignalAgent → [BacktestAgent, RiskAgent] → ReportAgent
+执行图（三省六部制）：
+    太子院(DataAgent) → 中书省(SignalAgent) → [尚书省(BacktestAgent), 门下省(RiskAgent)] → 尚书省(ReportAgent)
+    
+    门下省一票否决：
+        如果 RiskAgent 风控结果为 BLOCK，则拦截流水线，跳过 ReportAgent
 """
 
 from __future__ import annotations
@@ -24,13 +27,14 @@ from datetime import date, datetime
 from typing import Callable
 
 from agents.base import AgentContext, AgentResult
+from agents.governance_mapping import get_governance_role, format_agent_display, get_pipeline_flow
 
 # 延迟导入Agent类，避免缺失外部依赖（如baostock）影响编排器加载
 # 各Agent在 _run_agent 中按需实例化
 
 
 class PipelineOrchestrator:
-    """流水线编排器"""
+    """三省六部制流水线编排器"""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -105,31 +109,47 @@ class PipelineOrchestrator:
         print(f"{'='*60}")
 
         try:
-            # Stage 1: DataAgent（串行，必须先完成）
+            # ── Stage 1: 太子院·数据官（串行，必须先完成）──
             self._run_agent("DataAgent", ctx, on_agent_start, on_agent_finish)
 
             data_result = ctx.get_result("DataAgent")
             if not data_result or not data_result.success:
-                print(f"[Orchestrator] DataAgent 失败，流水线中止")
+                print(f"[Orchestrator] 太子院·数据官 失败，流水线中止")
                 return ctx
 
-            # 如果非交易日，提前结束
+            # 非交易日处理：如有历史数据，继续执行（使用最近交易日数据）
             if not data_result.data.get("trading_day", True):
-                print(f"[Orchestrator] 非交易日，跳过后续阶段")
-                return ctx
+                latest_in_db = data_result.data.get("latest_in_db")
+                if latest_in_db:
+                    print(f"[Orchestrator] {data_result.data.get('skip_reason')}，使用最近交易日数据: {latest_in_db}，继续执行流水线")
+                    ctx.set("effective_trade_date", latest_in_db)
+                    ctx.set("is_trading_day", False)
+                    # 继续执行，不 return
+                else:
+                    print(f"[Orchestrator] 非交易日且数据库无历史数据，跳过后续阶段")
+                    return ctx
 
-            # Stage 2: SignalAgent（依赖DataAgent）
+            # ── Stage 2: 中书省·策略官（依赖太子院）──
             self._run_agent("SignalAgent", ctx, on_agent_start, on_agent_finish)
 
             signal_result = ctx.get_result("SignalAgent")
             if not signal_result or not signal_result.success:
-                print(f"[Orchestrator] SignalAgent 失败，流水线中止")
+                print(f"[Orchestrator] 中书省·策略官 失败，流水线中止")
                 return ctx
 
-            # Stage 3: BacktestAgent + RiskAgent（并行）
+            # ── Stage 3: 门下省·风控官 + 尚书省·回测官（并行）──
             self._run_parallel(["BacktestAgent", "RiskAgent"], ctx, on_agent_start, on_agent_finish)
 
-            # Stage 4: ReportAgent（依赖前面所有）
+            # ── 门下省一票否决（风控拦截点）──
+            risk_status = ctx.get("risk_status")
+            if risk_status and risk_status.overall_level.value == "block":
+                print(f"[Orchestrator] ⚠️ 门下省风控拦截: {risk_status.block_reason}")
+                print(f"[Orchestrator] 流水线中止，跳过尚书省·报表官")
+                # 记录风控拦截事件到上下文
+                ctx.set("pipeline_interrupted_by_risk", True)
+                return ctx
+
+            # ── Stage 4: 尚书省·报表官（依赖前面所有）──
             self._run_agent("ReportAgent", ctx, on_agent_start, on_agent_finish)
 
         except Exception as e:
@@ -170,15 +190,18 @@ class PipelineOrchestrator:
             raise ValueError(f"未知Agent: {agent_name}")
         agent_cls = self._get_agent_class(agent_name)
 
+        # 获取三省六部制角色名称
+        display_name = format_agent_display(agent_name)
+
         if on_start:
             on_start(agent_name)
-        print(f"[Orchestrator] → 启动 {agent_name}")
+        print(f"[Orchestrator] → 启动 {display_name}")
 
         agent = agent_cls()
         result = agent.run(ctx)
 
         status = "✅ 成功" if result.success else "❌ 失败"
-        print(f"[Orchestrator] ← {agent_name} 完成  {status}  耗时={result.elapsed_sec:.1f}s")
+        print(f"[Orchestrator] ← {display_name} 完成  {status}  耗时={result.elapsed_sec:.1f}s")
         if result.error:
             print(f"  错误: {result.error[:200]}")
 

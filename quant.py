@@ -19,7 +19,6 @@ import schedule
 import threading
 import math
 from datetime import datetime, date, timedelta
-import requests
 
 from core.db import init_db, get_all_stocks, get_daily_price, save_signals, save_scan_signals, db_stats, get_stock_count_in_db, get_conn, get_index_daily
 from core.db import get_north_money
@@ -51,42 +50,8 @@ FUSION_THRESHOLD   = 28.0    # 原20.0
 # 历史回填 stock_signal 的融合分门槛（低于回测阈值，以便面板显示更丰富）
 SIG_BACKFILL_THRESHOLD = 15.0
 
-# ======================
-# 微信机器人 KEY（必填！）
-# ======================
-WX_PUSH_KEY = "把你的微信机器人key填在这里"
-
-# 扫描截止时间：15:00 前完成才推送微信
-SCAN_DEADLINE_HOUR   = 15
-SCAN_DEADLINE_MINUTE = 0
-
-
-# ─────────────────────────────────────────────
-# 微信推送
-# ─────────────────────────────────────────────
-
-def send_wechat(msg: str):
-    """发送企业微信群机器人消息"""
-    try:
-        url  = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WX_PUSH_KEY}"
-        data = {"msgtype": "text", "text": {"content": msg}}
-        resp = requests.post(url, json=data, timeout=10)
-        if resp.status_code == 200:
-            print(f"[{_now()}] 微信推送成功")
-        else:
-            print(f"[{_now()}] 微信推送失败，状态码: {resp.status_code}")
-    except Exception as e:
-        print(f"[{_now()}] 微信推送异常: {e}")
-
-
 def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
-
-
-def _is_before_deadline() -> bool:
-    """当前时间是否在 15:00 之前"""
-    now = datetime.now()
-    return (now.hour, now.minute) < (SCAN_DEADLINE_HOUR, SCAN_DEADLINE_MINUTE)
 
 
 # ─────────────────────────────────────────────
@@ -506,9 +471,6 @@ def scan_job(force_recalc: bool = False, use_v4: bool = True):
         save_scan_signals(all_hits[:sig_limit], sent_wechat=False)
         print(f"[{_now()}] stock_signal 面板数据已保存: {len(all_hits[:sig_limit])} 条")
 
-    # 判断是否在截止时间前完成
-    should_push = _is_before_deadline()
-
     if not buy_list:
         msg = f"A股小波段扫描【{dt}】（{strategy_name}）\n\n"
         msg += "今日无符合条件股票，空仓观望\n"
@@ -519,8 +481,6 @@ def scan_job(force_recalc: bool = False, use_v4: bool = True):
             msg += "5策略：放量突破·均线粘合·量价背离·抄底·主力建仓\n"
             msg += f"融合阈值>={FUSION_THRESHOLD}/50触发"
         save_signals([], sent_wechat=False)
-        if should_push:
-            send_wechat(msg)
         print(msg)
         return
 
@@ -533,7 +493,7 @@ def scan_job(force_recalc: bool = False, use_v4: bool = True):
         sig_count = _backfill_stock_signal_progress()
         print(f"[Force Recalc] stock_signal 回填完成: {sig_count} 条")
 
-    save_scan_signals(buy_list, sent_wechat=should_push)
+    save_scan_signals(buy_list, sent_wechat=False)
 
     if use_v4:
         # ── v4 超跌反弹消息 ───────────────────────────────
@@ -579,14 +539,9 @@ def scan_job(force_recalc: bool = False, use_v4: bool = True):
     msg += "(仅供参考，投资有风险)"
 
     # 保存到数据库
-    save_signals(buy_list, sent_wechat=should_push)
+    save_signals(buy_list, sent_wechat=False)
 
-    if should_push:
-        send_wechat(msg)
-        print(f"[{_now()}] 扫描完成，已推送微信")
-    else:
-        print(f"[{_now()}] 扫描完成（超过15:00），仅本地保存，不推送微信")
-
+    print(f"[{_now()}] 扫描完成，结果已保存到数据库")
     print("\n" + msg)
 
 
@@ -655,9 +610,6 @@ if __name__ == "__main__":
     print("    07:00  数据同步")
     print("    09:00  策略扫描")
     print("=" * 55)
-
-    if WX_PUSH_KEY == "把你的微信机器人key填在这里":
-        print("\n[警告] 未填写微信机器人 KEY，推送功能不可用")
 
     # 3. 后台初始化（不阻塞）
     init_thread = threading.Thread(target=_bg_init, daemon=True)
