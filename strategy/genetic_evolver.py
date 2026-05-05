@@ -29,9 +29,7 @@ from backtest.backtest import Backtester
 # 常量定义
 # ═══════════════════════════════════════════════════════
 
-FUNCTIONS = ["AND", "OR"]
 TERMINAL_OPS = ["<", ">"]
-MAX_DEPTH = 5
 MAX_CONDITIONS = 7
 
 FACTOR_RANGES = {
@@ -66,74 +64,63 @@ DEFAULT_ELITE_COUNT = 5
 # 1. 编码 / 解码
 # ═══════════════════════════════════════════════════════
 
-def encode_rule(conditions: List[RuleCondition]) -> str:
-    """将条件列表编码为前缀表达式字符串。
+def encode_rule(conditions: List[RuleCondition]) -> list:
+    """将条件列表编码为前缀表达式列表。
 
-    示例: [RSI_6 > 0.5, KDJ_K < 0.3] -> "AND > RSI_6 0.5 < KDJ_K 0.3"
+    示例: [RSI_6 > 0.5, KDJ_K < 0.3] -> ["AND", ">", "RSI_6", 0.5, "<", "KDJ_K", 0.3]
     """
     if not conditions:
-        return "NONE"
+        return ["NONE"]
     if len(conditions) == 1:
         c = conditions[0]
-        return f"{c.operator} {c.factor} {c.threshold:.4f}"
-    # 多个条件全部 AND 连接
-    parts = []
+        return [c.operator, c.factor, c.threshold]
+    result: list = ["AND"]
     for c in conditions:
-        parts.append(f"{c.operator} {c.factor} {c.threshold:.4f}")
-    return "AND " + " ".join(parts)
+        result.extend([c.operator, c.factor, c.threshold])
+    return result
 
 
-def decode_rule(encoded: str) -> List[RuleCondition]:
+def decode_rule(encoded) -> List[RuleCondition]:
     """将前缀表达式解码为条件列表。
 
-    示例: "AND > RSI_6 0.5 < KDJ_K 0.3" -> [RuleCondition("RSI_6", ">", 0.5), ...]
+    支持列表和旧版字符串两种格式:
+    - 列表: ["AND", ">", "RSI_6", 0.5, "<", "KDJ_K", 0.3]
+    - 字符串: "AND > RSI_6 0.5 < KDJ_K 0.3"
+
+    Returns:
+        RuleCondition 列表
     """
-    if not encoded or encoded == "NONE":
+    if not encoded or encoded == "NONE" or encoded == ["NONE"]:
         return []
-    tokens = encoded.split()
-    conds = []
+
+    # 兼容旧版字符串格式
+    if isinstance(encoded, list):
+        tokens = encoded
+    else:
+        tokens = encoded.split()
+
+    conds: List[RuleCondition] = []
     i = 0
 
-    def _parse_node(idx: int) -> Tuple[Optional[RuleCondition], int]:
-        nonlocal conds
-        if idx >= len(tokens):
-            return None, idx
-        tok = tokens[idx]
-        if tok in ("AND", "OR"):
-            idx += 1
-            while idx < len(tokens) and len(conds) < MAX_CONDITIONS:
-                if tokens[idx] in ("AND", "OR"):
-                    idx += 1
-                    continue
-                if tokens[idx] in (">", "<"):
-                    op = tokens[idx]
-                    if idx + 2 >= len(tokens):
-                        break
-                    factor = tokens[idx + 1]
-                    try:
-                        threshold = float(tokens[idx + 2])
-                    except ValueError:
-                        break
-                    cond = RuleCondition(factor=factor, operator=op, threshold=threshold)
-                    conds.append(cond)
-                    idx += 3
-                else:
-                    idx += 1
-            return None, idx
-        elif tok in (">", "<"):
-            if idx + 2 < len(tokens):
-                factor = tokens[idx + 1]
-                try:
-                    threshold = float(tokens[idx + 2])
-                except ValueError:
-                    return None, idx + 3
-                cond = RuleCondition(factor=factor, operator=tok, threshold=threshold)
-                conds.append(cond)
-                return cond, idx + 3
-            return None, idx + len(tokens)
-        return None, idx
+    # 跳过开头的 "AND" 连接符
+    if i < len(tokens) and tokens[i] == "AND":
+        i += 1
 
-    _parse_node(0)
+    while i + 2 < len(tokens) and len(conds) < MAX_CONDITIONS:
+        op = tokens[i]
+        if op in (">", "<"):
+            factor = str(tokens[i + 1])
+            try:
+                threshold = float(tokens[i + 2])
+            except (ValueError, TypeError):
+                i += 3
+                continue
+            conds.append(RuleCondition(factor=factor, operator=str(op), threshold=threshold))
+            i += 3
+        else:
+            # 跳过不识别的 token（如嵌套的 AND/OR 等）
+            i += 1
+
     return conds[:MAX_CONDITIONS]
 
 
@@ -523,7 +510,7 @@ def _composite_score(perf: dict) -> float:
     """计算复合回测评分。
 
     composite = 0.3 * annual_return/100 + 0.3 * win_rate/100
-              + 0.25 * sharpe - 0.15 * |max_drawdown|/100 - 0.1 * turnover_rate
+              + 0.25 * sharpe - 0.15 * |max_drawdown|/100
 
     Args:
         perf: evaluate_rule 返回的性能字典
@@ -535,9 +522,9 @@ def _composite_score(perf: dict) -> float:
     wr = perf.get("win_rate", 0) / 100.0
     sr = perf.get("sharpe_ratio", 0)
     md = abs(perf.get("max_drawdown", 0)) / 100.0
-    # turnover_rate: 用 total_trades / 样本天数估算，如没有则 0
-    turnover = perf.get("turnover_rate", 0)
-    return 0.3 * ar + 0.3 * wr + 0.25 * sr - 0.15 * md - 0.1 * turnover
+    # NOTE: turnover_rate 的 -0.1 惩罚项已移除，因为 RuleMiner.evaluate_rule()
+    # 目前不返回 turnover_rate，该项始终为 0。待 evaluate_rule 支持换手率后可恢复。
+    return 0.3 * ar + 0.3 * wr + 0.25 * sr - 0.15 * md
 
 
 def _stability_penalty(
@@ -586,14 +573,14 @@ def compute_fitness(
     """计算完整的多目标适应度。
 
     fitness = composite_score x novelty_bonus x simplicity_penalty
-            x stability_penalty x legality_penalty
+            x legality_penalty
 
     Args:
         perf: 回测性能字典（来自 evaluate_rule 或 quick_backtest）
         rule: 策略规则
         existing_rules: 已有规则列表（用于新颖性计算）
         factor_df: 因子 DataFrame（用于信号重叠计算）
-        train_perf, valid_perf, test_perf: 三段性能（用于稳定性）
+        train_perf, valid_perf, test_perf: 预留参数，用于未来稳定性惩罚
 
     Returns:
         适应度评分
@@ -609,13 +596,15 @@ def compute_fitness(
     # 简洁性
     sp = simplicity_penalty(len(rule.conditions))
 
-    # 稳定性
-    stp = _stability_penalty(train_perf, valid_perf, test_perf)
-
     # 合法性
     lp = legality_check(rule)
 
-    return cs * nb * sp * stp * lp
+    # NOTE: 稳定性惩罚 (_stability_penalty) 暂未启用。
+    # run_evolution 当前不传递 train_perf/valid_perf/test_perf，
+    # 导致惩罚始终为 1.0。待呼方提供三段性能数据后可恢复：
+    #   stp = _stability_penalty(train_perf, valid_perf, test_perf)
+    #   return cs * nb * sp * stp * lp
+    return cs * nb * sp * lp
 
 
 # ═══════════════════════════════════════════════════════
@@ -660,10 +649,10 @@ class GeneticEvolver:
         self.seed = seed
 
         # 遗传算子概率（累加区间）
-        # elite: 0.05, crossover: 0.35, subtree: 0.15, threshold: 0.20,
+        # reproduction: 0.05, crossover: 0.35, subtree: 0.15, threshold: 0.20,
         # factor_swap: 0.15, random_reset: 0.10
         self._op_probs = [
-            (ELITE_PROB, "elite"),
+            (ELITE_PROB, "reproduction"),
             (ELITE_PROB + CROSSOVER_PROB, "crossover"),
             (ELITE_PROB + CROSSOVER_PROB + SUBTREE_MUTATE_PROB, "subtree_mutate"),
             (ELITE_PROB + CROSSOVER_PROB + SUBTREE_MUTATE_PROB + THRESHOLD_MUTATE_PROB,
@@ -687,7 +676,7 @@ class GeneticEvolver:
         """按概率选择遗传算子。
 
         Returns:
-            算子名称: "elite" | "crossover" | "subtree_mutate" | "threshold_mutate"
+            算子名称: "reproduction" | "crossover" | "subtree_mutate" | "threshold_mutate"
                       | "factor_swap" | "random_reset"
         """
         r = random.random()
@@ -749,11 +738,10 @@ class GeneticEvolver:
         while len(new_population) < self.population_size:
             op = self._select_operator()
 
-            if op == "elite":
-                # 精英已保留完毕，跳过
-                if len(new_population) < self.population_size:
-                    pick = tournament_select(population, tournament_size=3)
-                    new_population.append(_copy_rule(pick))
+            if op == "reproduction":
+                # 锦标赛选择并复制一个个体
+                pick = tournament_select(population, tournament_size=3)
+                new_population.append(_copy_rule(pick))
 
             elif op == "crossover":
                 p1 = tournament_select(population, tournament_size=3)
@@ -782,11 +770,7 @@ class GeneticEvolver:
                 new_population.append(child)
 
             elif op == "random_reset":
-                # 对适应度最低的 5 个体重置
-                sorted_pop = sorted(population, key=lambda x: x[1])
-                bottom_count = min(5, len(sorted_pop))
-                # 随机选择 bottom 中一个替换
-                victim = random.choice(sorted_pop[:bottom_count])
+                # 生成全新随机规则注入种群
                 new_population.append(random_rule(depth=random.randint(2, 4)))
 
         return new_population[:self.population_size]
@@ -904,7 +888,7 @@ class GeneticEvolver:
             rule_dict = {
                 "rule_name": rule.name,
                 "rule_type": rule.rule_type,
-                "encoding": encode_rule(rule.conditions),
+                "encoding": json.dumps(encode_rule(rule.conditions)),
                 "conditions": json.dumps([c.to_dict() for c in rule.conditions]),
                 "sell_conditions": json.dumps(
                     [c.to_dict() for c in rule.sell_conditions]
@@ -927,6 +911,7 @@ class GeneticEvolver:
                     "rule_id": rule_id,
                     "rule": rule,
                     "fitness": fitness,
+                    "perf": perf,
                     "generation": 2,
                 })
                 inserted += 1
@@ -964,11 +949,12 @@ def feedback_to_phase1(
     count = 0
     for item in top:
         rule: StrategyRule = item["rule"]
+        perf: dict = item.get("perf", {})
         try:
             rule_dict = {
                 "rule_name": rule.name,
                 "rule_type": rule.rule_type,
-                "encoding": encode_rule(rule.conditions),
+                "encoding": json.dumps(encode_rule(rule.conditions)),
                 "conditions": json.dumps([c.to_dict() for c in rule.conditions]),
                 "sell_conditions": json.dumps(
                     [c.to_dict() for c in rule.sell_conditions]
@@ -978,11 +964,11 @@ def feedback_to_phase1(
                 "source": "template",  # 以模板身份回流
                 "generation": 1,
                 "fitness": item.get("fitness", 0),
-                "annual_return": 0,
-                "win_rate": 0,
-                "sharpe_ratio": 0,
-                "max_drawdown": 0,
-                "total_trades": 0,
+                "annual_return": perf.get("annual_return", 0),
+                "win_rate": perf.get("win_rate", 0),
+                "sharpe_ratio": perf.get("sharpe_ratio", 0),
+                "max_drawdown": perf.get("max_drawdown", 0),
+                "total_trades": perf.get("total_trades", 0),
             }
             upsert_strategy_rule(rule_dict)
             count += 1
