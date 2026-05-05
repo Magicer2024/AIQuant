@@ -1,9 +1,9 @@
 """
 技术指标计算模块
 包含适合中线交易的主要技术指标：
-- 趋势类：MA、EMA、MACD、DMI
+- 趋势类：MA、EMA、MACD、DMI、DPO
 - 震荡类：RSI、KDJ、CCI
-- 波动类：布林带、ATR
+- 波动类：布林带、ATR、历史波动率
 - 成交量：OBV、VWAP、资金流向
 """
 import pandas as pd
@@ -56,7 +56,7 @@ def calc_rsi(close: pd.Series, periods: list = [6, 14, 24]) -> pd.DataFrame:
         avg_gain = gain.ewm(com=p - 1, adjust=False).mean()
         avg_loss = loss.ewm(com=p - 1, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
-        result[f"RSI{p}"] = 100 - (100 / (1 + rs))
+        result[f"RSI_{p}"] = 100 - (100 / (1 + rs))
     return result
 
 
@@ -240,4 +240,72 @@ if __name__ == "__main__":
     from data_fetcher import get_stock_history
     df = get_stock_history("000001", start_date="20230101")
     df_ind = calc_all_indicators(df)
-    print(df_ind[["close", "MA20", "MACD_DIF", "RSI14", "KDJ_K", "BOLL_MID"]].tail(10))
+    print(df_ind[["close", "MA20", "MACD_DIF", "RSI_14", "KDJ_K", "BOLL_MID"]].tail(10))
+
+
+def calc_kdj(high: pd.Series, low: pd.Series, close: pd.Series,
+             n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataFrame:
+    """KDJ 指标"""
+    lowest_low = low.rolling(window=n).min()
+    highest_high = high.rolling(window=n).max()
+    rsv = ((close - lowest_low) / (highest_high - lowest_low).clip(lower=1e-9)) * 100
+    k = rsv.ewm(span=m1, adjust=False).mean()
+    d = k.ewm(span=m2, adjust=False).mean()
+    j = 3 * k - 2 * d
+    return pd.DataFrame({"KDJ_K": k, "KDJ_D": d, "KDJ_J": j}, index=close.index)
+
+
+def calc_cci(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.DataFrame:
+    """CCI 商品通道指数"""
+    tp = (high + low + close) / 3
+    ma_tp = tp.rolling(window=n).mean()
+    md = tp.rolling(window=n).apply(lambda x: np.abs(x - x.mean()).mean())
+    cci = (tp - ma_tp) / (0.015 * md.clip(lower=1e-9))
+    return pd.DataFrame({"CCI": cci}, index=close.index)
+
+
+def calc_dpo(close: pd.Series, n: int = 20) -> pd.DataFrame:
+    """DPO 去价格趋势震荡"""
+    ma = close.rolling(window=n).mean()
+    dpo = close - ma.shift(int(n / 2) + 1)
+    return pd.DataFrame({"DPO": dpo}, index=close.index)
+
+
+def calc_obv(close: pd.Series, volume: pd.Series) -> pd.DataFrame:
+    """OBV 能量潮"""
+    direction = np.where(close.diff() > 0, 1, np.where(close.diff() < 0, -1, 0))
+    obv = (volume * direction).cumsum()
+    return pd.DataFrame({"OBV": obv}, index=close.index)
+
+
+def calc_atr(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.DataFrame:
+    """ATR 平均真实波幅（标准化为百分比）"""
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=n).mean()
+    atr_pct = atr / close.clip(lower=1e-9)
+    return pd.DataFrame({"ATR": atr, "ATR_PCT": atr_pct}, index=close.index)
+
+
+def calc_bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFrame:
+    """布林带"""
+    ma = close.rolling(window=n).mean()
+    std = close.rolling(window=n).std()
+    upper = ma + k * std
+    lower = ma - k * std
+    pct_b = (close - lower) / (upper - lower).clip(lower=1e-9)
+    bandwidth = (upper - lower) / ma.clip(lower=1e-9)
+    return pd.DataFrame({
+        "BB_UPPER": upper, "BB_LOWER": lower, "BB_MA": ma,
+        "BB_PCT_B": pct_b, "BB_BANDWIDTH": bandwidth,
+    }, index=close.index)
+
+
+def calc_historical_volatility(close: pd.Series, n: int = 20) -> pd.DataFrame:
+    """历史波动率（年化）"""
+    log_ret = np.log(close / close.shift(1))
+    hv = log_ret.rolling(window=n).std() * np.sqrt(252)
+    return pd.DataFrame({f"HV_{n}": hv}, index=close.index)
