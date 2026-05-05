@@ -14,7 +14,7 @@ import math
 from datetime import date
 
 from agents.base import BaseAgent, AgentContext
-from core.db import get_all_stocks, save_scan_signals
+from core.db import save_scan_signals
 from strategy.strategies import (
     strategy_volume_breakout,
     strategy_ma_convergence,
@@ -23,19 +23,14 @@ from strategy.strategies import (
     strategy_whale_accumulation,
     strategy_oversold_rebound,
     fuse_signals,
+    fuse_with_phase34,
     DEFAULT_WEIGHTS,
 )
-from core.db import get_daily_price
-
-# 策略参数（与 quant.py 保持一致）
-START_CAPITAL = 10000
-POSITION_PER_STOCK = 0.5
-STOP_LOSS = -0.06
-TAKE_PROFIT = 0.20
-V4_SCORE_THRESHOLD = 1.8
-FUSION_THRESHOLD = 28.0
-SIG_BACKFILL_THRESHOLD = 15.0
-POSITION_NUM = 3
+from ministries.rites.data_source_manager import get_data_source_manager
+from config import (
+    FUSION_THRESHOLD, V4_SCORE_THRESHOLD, SIG_BACKFILL_THRESHOLD,
+    START_CAPITAL, POSITION_PER_STOCK, STOP_LOSS, TAKE_PROFIT, POSITION_NUM,
+)
 
 
 class SignalAgent(BaseAgent):
@@ -45,7 +40,7 @@ class SignalAgent(BaseAgent):
     governance_role = "中书省·策略官"
 
     def _execute(self, ctx: AgentContext) -> dict:
-        stocks_df = get_all_stocks()
+        stocks_df = get_data_source_manager().get_stock_list_df()
         if stocks_df.empty:
             return {"status": "no_stocks", "hits_fusion": [], "hits_v4": []}
 
@@ -111,7 +106,7 @@ class SignalAgent(BaseAgent):
         """5策略融合分析"""
         try:
             import pandas as pd
-            df = get_daily_price(code)
+            df = get_data_source_manager().get_daily_price_df(code)
             if df.empty or len(df) < 30:
                 return None
 
@@ -131,9 +126,27 @@ class SignalAgent(BaseAgent):
             s4_sc = last_score(s4)
             s5_sc = last_score(s5)
 
-            fused = fuse_signals([s1, s2, s3, s4, s5], weights=DEFAULT_WEIGHTS)
+            # Try Phase 3/4 dynamic scoring
+            phase34_score = None
+            try:
+                from strategy.dynamic_selector import generate_daily_signals
+                from strategy.factor_lib import compute_all_factors
+                factor_df = compute_all_factors(df)
+                signals = generate_daily_signals(
+                    {code: (df, factor_df)}, {}, index_df=None)
+                if signals and signals[0].get("fusion_score", 0) > 0:
+                    phase34_score = signals[0]
+            except Exception:
+                pass  # Silent degradation when Phase 3/4 unavailable
+
+            fused = fuse_with_phase34(
+                [s1, s2, s3, s4, s5],
+                weights=DEFAULT_WEIGHTS,
+                phase34_signals=phase34_score,
+            )
             last = fused.iloc[-1]
             fusion_score = round(float(last.get("FUSION_SCORE", 0)), 2)
+            fusion_score = max(0.0, min(50.0, fusion_score))
 
             if fusion_score < FUSION_THRESHOLD:
                 return None
@@ -175,7 +188,7 @@ class SignalAgent(BaseAgent):
         """v4超跌反弹策略分析"""
         try:
             import pandas as pd
-            df = get_daily_price(code)
+            df = get_data_source_manager().get_daily_price_df(code)
             if df.empty or len(df) < 30:
                 return None
 
