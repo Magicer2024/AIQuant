@@ -12,13 +12,13 @@ lgbm_ranker.py —— Phase 3: LightGBM 排序学习二次筛选与融合
 import json
 import pandas as pd
 import numpy as np
+import threading
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 
-from strategy.factor_lib import FACTOR_REGISTRY
 from core.db import (
-    get_active_rules, save_strategy_signal, get_signals_for_training,
-    update_signal_labels, degrade_rule, get_conn,
+    get_active_rules, get_signals_for_training,
+    degrade_rule, get_conn,
 )
 
 
@@ -117,8 +117,7 @@ class LGBMRanker:
             return None
         lo, hi = df["label"].quantile(0.01), df["label"].quantile(0.99)
         df["label"] = df["label"].clip(lo, hi)
-        df["group"] = df.apply(
-            lambda r: f"{r['trade_date']}_{hash(str(r.get('code',''))) % 20}", axis=1)
+        df["group"] = df["trade_date"].astype(str)
         feature_cols = [c for c in df.columns
                         if c not in ("label", "trade_date", "code", "group",
                                      "rule_id", "rule_type_hash")]
@@ -137,15 +136,29 @@ class LGBMRanker:
             return False
         X, y, groups, feature_names = result
         self.feature_names = feature_names
-        split_idx = int(len(X) * 0.7)
-        X_train, X_valid = X.iloc[:split_idx], X.iloc[split_idx:]
-        y_train, y_valid = y.iloc[:split_idx], y.iloc[split_idx:]
-        train_groups = groups[:split_idx]
-        train_groups_set = sorted(set(train_groups))
-        train_group_sizes = [train_groups.count(g) for g in train_groups_set]
+
+        from sklearn.model_selection import TimeSeriesSplit
+        tscv = TimeSeriesSplit(n_splits=3)
+        splits = list(tscv.split(X))
+        train_idx, valid_idx = splits[-1]  # use last split: most recent data for validation
+        X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
+        y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
+        from collections import Counter
+
+        groups_arr = np.array(groups)
+        train_groups = groups_arr[train_idx].tolist()
+        train_group_counts = Counter(train_groups)
+        train_groups_set = sorted(train_group_counts)
+        train_group_sizes = [train_group_counts[g] for g in train_groups_set]
         train_data = lgb.Dataset(X_train, label=y_train,
                                  group=train_group_sizes if train_group_sizes else None)
+
+        valid_groups = groups_arr[valid_idx].tolist()
+        valid_group_counts = Counter(valid_groups)
+        valid_groups_set = sorted(valid_group_counts)
+        valid_group_sizes = [valid_group_counts[g] for g in valid_groups_set]
         valid_data = lgb.Dataset(X_valid, label=y_valid,
+                                 group=valid_group_sizes if valid_group_sizes else None,
                                  reference=train_data)
         params = {
             "objective": "lambdarank", "metric": "ndcg",
@@ -193,14 +206,17 @@ class LGBMRanker:
 
 
 _ranker_instance: Optional[LGBMRanker] = None
+_lock = threading.Lock()
 
 
 def get_ranker() -> LGBMRanker:
     global _ranker_instance
     if _ranker_instance is None:
-        _ranker_instance = LGBMRanker()
-        if not _ranker_instance.load_model():
-            pass  # Will use fallback, needs training
+        with _lock:
+            if _ranker_instance is None:  # double-check
+                _ranker_instance = LGBMRanker()
+                if not _ranker_instance.load_model():
+                    pass  # Will use fallback, needs training
     return _ranker_instance
 
 
@@ -212,7 +228,7 @@ def fuse_stock_signals(code: str, signals: List[dict]) -> float:
     """
     if not signals:
         return 0.0
-    confidences = np.array([s.get("confidence", 25) for s in signals])
+    confidences = np.array([s.get("confidence", 50) for s in signals])
     exp_weights = np.exp(confidences / 30)
     weights = exp_weights / exp_weights.sum()
     fused = np.sum(confidences * weights)
@@ -222,8 +238,8 @@ def fuse_stock_signals(code: str, signals: List[dict]) -> float:
 def degrade_low_performance_rules():
     """淘汰低分规则：置信度均值<30 且持仓期间连续亏损"""
     rules = get_active_rules(limit=500)
-    for r in rules:
-        with get_conn() as conn:
+    with get_conn() as conn:
+        for r in rules:
             signals = conn.execute("""
                 SELECT AVG(confidence) as avg_conf,
                        AVG(label_return) as avg_label,
