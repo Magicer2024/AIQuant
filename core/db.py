@@ -413,29 +413,6 @@ CREATE TABLE IF NOT EXISTS risk_overrides (
 CREATE INDEX IF NOT EXISTS idx_override_status ON risk_overrides(status);
 CREATE INDEX IF NOT EXISTS idx_override_expires ON risk_overrides(expires_at);
 
--- 策略优化记录表
-CREATE TABLE IF NOT EXISTS strategy_optimization (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id          TEXT NOT NULL,
-    iteration       INTEGER NOT NULL DEFAULT 0,
-    strategy_name   TEXT NOT NULL,
-    params          TEXT NOT NULL,
-    win_rate        REAL,
-    total_return    REAL,
-    annual_return   REAL,
-    max_drawdown    REAL,
-    sharpe          REAL,
-    total_trades    INTEGER,
-    target_win_rate REAL,
-    target_return   REAL,
-    llm_advice      TEXT,
-    is_best         INTEGER DEFAULT 0,
-    status          TEXT DEFAULT 'running',
-    created_at      TEXT DEFAULT (datetime('now','localtime'))
-);
-CREATE INDEX IF NOT EXISTS idx_opt_job ON strategy_optimization(job_id);
-CREATE INDEX IF NOT EXISTS idx_opt_job_iter ON strategy_optimization(job_id, iteration);
-
 -- 审计日志表
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1287,70 +1264,6 @@ from core.repository.lhb_repo import (
 from core.repository.mgmt_repo import (
     upsert_mgmt_holding, get_mgmt_holding, get_latest_mgmt_holding_date,
 )
-
-
-# ─────────────────────────────────────────────
-# 策略优化记录
-# ─────────────────────────────────────────────
-
-def insert_optimization_record(job_id: str, iteration: int, strategy_name: str,
-                                params: dict, metrics: dict, target_win_rate: float,
-                                target_return: float, llm_advice: str = "",
-                                is_best: bool = False, status: str = "running"):
-    with get_conn() as conn:
-        conn.execute("""
-            INSERT INTO strategy_optimization
-                (job_id, iteration, strategy_name, params, win_rate, total_return,
-                 annual_return, max_drawdown, sharpe, total_trades,
-                 target_win_rate, target_return, llm_advice, is_best, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            job_id, iteration, strategy_name, json.dumps(params, ensure_ascii=False),
-            metrics.get("win_rate"), metrics.get("total_return"),
-            metrics.get("annual_return"), metrics.get("max_drawdown"),
-            metrics.get("sharpe"), metrics.get("total_trades"),
-            target_win_rate, target_return, llm_advice,
-            1 if is_best else 0, status,
-        ))
-
-
-def get_optimization_job(job_id: str) -> list[dict]:
-    """获取某次优化任务的所有迭代记录"""
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM strategy_optimization WHERE job_id=? ORDER BY iteration",
-            (job_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_optimization_jobs(limit: int = 20) -> list[dict]:
-    """获取最近的优化任务列表"""
-    with get_conn() as conn:
-        rows = conn.execute("""
-            SELECT job_id, strategy_name,
-                   COUNT(*) as iterations,
-                   MAX(iteration) as max_iter,
-                   MAX(total_return) as best_return,
-                   MAX(win_rate) as best_win_rate,
-                   MIN(created_at) as started_at,
-                   MAX(created_at) as updated_at,
-                   MAX(CASE WHEN status='running' THEN 1 ELSE 0 END) as is_running
-            FROM strategy_optimization
-            GROUP BY job_id
-            ORDER BY started_at DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
-        return [dict(r) for r in rows]
-
-
-def update_optimization_status(job_id: str, status: str):
-    """更新某次优化任务所有记录的状态"""
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE strategy_optimization SET status=? WHERE job_id=?",
-            (status, job_id)
-        )
 
 
 # ─────────────────────────────────────────────
