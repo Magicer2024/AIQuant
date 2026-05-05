@@ -112,7 +112,7 @@ class LGBMRanker:
                 rows.append(feats)
             except (json.JSONDecodeError, KeyError):
                 continue
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows).sort_values("trade_date").reset_index(drop=True)
         if "label" not in df.columns or df["label"].isna().sum() > len(df) * 0.8:
             return None
         lo, hi = df["label"].quantile(0.01), df["label"].quantile(0.99)

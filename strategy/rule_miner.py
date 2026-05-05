@@ -10,19 +10,18 @@ rule_miner.py —— Phase 1: 模板穷举规则生成
 """
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 from itertools import combinations
 import json
 import random
 
 from strategy.factor_lib import (
-    FACTOR_REGISTRY, calc_all_ic,
-    filter_by_ic, get_factor_names_by_category,
+    FACTOR_REGISTRY, calc_all_ic, filter_by_ic,
 )
 from config.strategy_params import PHASE1_CONFIG, CROSS_PAIRS
 from core.db import upsert_strategy_rule, get_active_rules
-from backtest.backtest import Backtester, BacktestResult
+from backtest.backtest import Backtester
 
 
 @dataclass
