@@ -12,7 +12,7 @@ import numpy as np
 from typing import Dict, List, Optional, Callable
 from strategy.indicators import (
     calc_ma, calc_macd, calc_rsi, calc_kdj, calc_cci, calc_dpo,
-    calc_obv, calc_atr, calc_bollinger, calc_historical_volatility,
+    calc_obv, calc_atr, calc_bollinger, calc_historical_volatility, calc_dmi,
 )
 
 
@@ -24,7 +24,11 @@ def _norm_price_factor(values: pd.Series, factor_name: str) -> pd.Series:
         return (values / 100.0).clip(0, 1)
     if "CCI" in factor_name:
         return ((values + 200) / 400).clip(0, 1)
-    return values.clip(lower=values.quantile(0.01), upper=values.quantile(0.99))
+    lo, hi = values.quantile(0.01), values.quantile(0.99)
+    clipped = values.clip(lower=lo, upper=hi)
+    if hi - lo < 1e-9:
+        return pd.Series(0.5, index=values.index)
+    return ((clipped - lo) / (hi - lo)).clip(0, 1)
 
 
 def _norm_fundamental_factor(values: pd.Series) -> pd.Series:
@@ -215,15 +219,15 @@ def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
     dpo = calc_dpo(close)
     result["DPO"] = dpo["DPO"] / close.clip(lower=1e-9)
 
-    # Set ADX/PDI/MDI to neutral values (DMI not implemented yet)
-    result["ADX"] = 0.25
-    result["PDI"] = 0.5
-    result["MDI"] = 0.5
+    dmi = calc_dmi(high, low, close)
+    result["ADX"] = dmi["DMI_ADX"] / 100.0
+    result["PDI"] = dmi["DMI_PDI"] / 100.0
+    result["MDI"] = dmi["DMI_MDI"] / 100.0
 
     # ── 动量类 ──
+    rsi_all = calc_rsi(close, periods=[6, 9, 14, 21])
     for p in [6, 9, 14, 21]:
-        rsi = calc_rsi(close, periods=[p])
-        result[f"RSI_{p}"] = rsi[f"RSI{p}"]
+        result[f"RSI_{p}"] = rsi_all[f"RSI{p}"]
 
     for p in [6, 12, 24]:
         ma_p = close.rolling(p).mean()
@@ -258,7 +262,8 @@ def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
 
     obv = calc_obv(close, volume)
     obv_ma = obv.rolling(20).mean()
-    result["OBV_偏离度"] = (obv - obv_ma) / obv_ma.clip(lower=1e-9)
+    obv_range = obv.rolling(20).max() - obv.rolling(20).min()
+    result["OBV_偏离度"] = ((obv - obv_ma) / obv_range.clip(lower=1e-9)).clip(-1, 1)
 
     result["VOL_波动率"] = volume.rolling(20).std() / volume.rolling(20).mean().clip(lower=1e-9)
 
