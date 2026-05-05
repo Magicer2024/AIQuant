@@ -413,6 +413,29 @@ CREATE TABLE IF NOT EXISTS risk_overrides (
 CREATE INDEX IF NOT EXISTS idx_override_status ON risk_overrides(status);
 CREATE INDEX IF NOT EXISTS idx_override_expires ON risk_overrides(expires_at);
 
+-- 策略优化记录表
+CREATE TABLE IF NOT EXISTS strategy_optimization (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id          TEXT NOT NULL,
+    iteration       INTEGER NOT NULL DEFAULT 0,
+    strategy_name   TEXT NOT NULL,
+    params          TEXT NOT NULL,
+    win_rate        REAL,
+    total_return    REAL,
+    annual_return   REAL,
+    max_drawdown    REAL,
+    sharpe          REAL,
+    total_trades    INTEGER,
+    target_win_rate REAL,
+    target_return   REAL,
+    llm_advice      TEXT,
+    is_best         INTEGER DEFAULT 0,
+    status          TEXT DEFAULT 'running',
+    created_at      TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_opt_job ON strategy_optimization(job_id);
+CREATE INDEX IF NOT EXISTS idx_opt_job_iter ON strategy_optimization(job_id, iteration);
+
 -- 审计日志表
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -424,6 +447,72 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
+
+-- 策略规则库
+CREATE TABLE IF NOT EXISTS strategy_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_name       TEXT NOT NULL UNIQUE,
+    rule_type       TEXT NOT NULL,
+    encoding        TEXT NOT NULL,
+    conditions      TEXT,
+    sell_conditions TEXT,
+    holding_min     INTEGER DEFAULT 3,
+    holding_max     INTEGER DEFAULT 20,
+    source          TEXT DEFAULT 'template',
+    generation      INTEGER DEFAULT 0,
+    fitness         REAL DEFAULT 0,
+    annual_return   REAL DEFAULT 0,
+    win_rate        REAL DEFAULT 0,
+    sharpe_ratio    REAL DEFAULT 0,
+    max_drawdown    REAL DEFAULT 0,
+    total_trades    INTEGER DEFAULT 0,
+    signal_overlap  REAL DEFAULT 0,
+    is_active       INTEGER DEFAULT 1,
+    degraded_at     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_rules_type ON strategy_rules(rule_type);
+CREATE INDEX IF NOT EXISTS idx_rules_active ON strategy_rules(is_active);
+CREATE INDEX IF NOT EXISTS idx_rules_fitness ON strategy_rules(fitness DESC);
+
+-- 每日信号触发日志
+CREATE TABLE IF NOT EXISTS strategy_signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date      TEXT NOT NULL,
+    code            TEXT NOT NULL,
+    rule_id         INTEGER NOT NULL,
+    rule_name       TEXT,
+    confidence      REAL,
+    raw_score       REAL,
+    features_json   TEXT,
+    label_return    REAL,
+    is_win          INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (rule_id) REFERENCES strategy_rules(id)
+);
+CREATE INDEX IF NOT EXISTS idx_signals_date ON strategy_signals(trade_date);
+CREATE INDEX IF NOT EXISTS idx_signals_code ON strategy_signals(code);
+CREATE INDEX IF NOT EXISTS idx_signals_rule ON strategy_signals(rule_id);
+CREATE INDEX IF NOT EXISTS idx_signals_date_code ON strategy_signals(trade_date, code);
+
+-- 当期活跃策略
+CREATE TABLE IF NOT EXISTS active_strategies (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    select_date     TEXT NOT NULL,
+    rule_id         INTEGER NOT NULL,
+    rule_name       TEXT,
+    window_60_score REAL,
+    window_120_score REAL,
+    final_score     REAL,
+    rank            INTEGER,
+    is_emergency    INTEGER DEFAULT 0,
+    valid_until     TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (rule_id) REFERENCES strategy_rules(id)
+);
+CREATE INDEX IF NOT EXISTS idx_active_date ON active_strategies(select_date);
+CREATE INDEX IF NOT EXISTS idx_active_valid ON active_strategies(valid_until);
         """)
 
         # ── 2. 迁移：为旧版 daily_price 补充策略评分列 ────────────
@@ -1198,6 +1287,186 @@ from core.repository.lhb_repo import (
 from core.repository.mgmt_repo import (
     upsert_mgmt_holding, get_mgmt_holding, get_latest_mgmt_holding_date,
 )
+
+
+# ─────────────────────────────────────────────
+# 策略优化记录
+# ─────────────────────────────────────────────
+
+def insert_optimization_record(job_id: str, iteration: int, strategy_name: str,
+                                params: dict, metrics: dict, target_win_rate: float,
+                                target_return: float, llm_advice: str = "",
+                                is_best: bool = False, status: str = "running"):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO strategy_optimization
+                (job_id, iteration, strategy_name, params, win_rate, total_return,
+                 annual_return, max_drawdown, sharpe, total_trades,
+                 target_win_rate, target_return, llm_advice, is_best, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id, iteration, strategy_name, json.dumps(params, ensure_ascii=False),
+            metrics.get("win_rate"), metrics.get("total_return"),
+            metrics.get("annual_return"), metrics.get("max_drawdown"),
+            metrics.get("sharpe"), metrics.get("total_trades"),
+            target_win_rate, target_return, llm_advice,
+            1 if is_best else 0, status,
+        ))
+
+
+def get_optimization_job(job_id: str) -> list[dict]:
+    """获取某次优化任务的所有迭代记录"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM strategy_optimization WHERE job_id=? ORDER BY iteration",
+            (job_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_optimization_jobs(limit: int = 20) -> list[dict]:
+    """获取最近的优化任务列表"""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT job_id, strategy_name,
+                   COUNT(*) as iterations,
+                   MAX(iteration) as max_iter,
+                   MAX(total_return) as best_return,
+                   MAX(win_rate) as best_win_rate,
+                   MIN(created_at) as started_at,
+                   MAX(created_at) as updated_at,
+                   MAX(CASE WHEN status='running' THEN 1 ELSE 0 END) as is_running
+            FROM strategy_optimization
+            GROUP BY job_id
+            ORDER BY started_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_optimization_status(job_id: str, status: str):
+    """更新某次优化任务所有记录的状态"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE strategy_optimization SET status=? WHERE job_id=?",
+            (status, job_id)
+        )
+
+
+# ─────────────────────────────────────────────
+# 策略规则/信号/活跃策略 — Phase 1-4 自动策略生成
+# ─────────────────────────────────────────────
+
+
+def upsert_strategy_rule(rule: dict) -> int:
+    """插入或更新策略规则，返回 rule_id"""
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO strategy_rules
+                (rule_name, rule_type, encoding, conditions, sell_conditions,
+                 holding_min, holding_max, source, generation, fitness,
+                 annual_return, win_rate, sharpe_ratio, max_drawdown,
+                 total_trades, signal_overlap, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(rule_name) DO UPDATE SET
+                encoding=excluded.encoding, conditions=excluded.conditions,
+                sell_conditions=excluded.sell_conditions, fitness=excluded.fitness,
+                annual_return=excluded.annual_return, win_rate=excluded.win_rate,
+                sharpe_ratio=excluded.sharpe_ratio, max_drawdown=excluded.max_drawdown,
+                total_trades=excluded.total_trades, signal_overlap=excluded.signal_overlap,
+                updated_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        """, (
+            rule["rule_name"], rule["rule_type"], rule.get("encoding", "[]"),
+            rule.get("conditions", "[]"), rule.get("sell_conditions", "[]"),
+            rule.get("holding_min", 3), rule.get("holding_max", 20),
+            rule.get("source", "template"), rule.get("generation", 0),
+            rule.get("fitness", 0), rule.get("annual_return", 0),
+            rule.get("win_rate", 0), rule.get("sharpe_ratio", 0),
+            rule.get("max_drawdown", 0), rule.get("total_trades", 0),
+            rule.get("signal_overlap", 0),
+        ))
+        return cur.lastrowid
+
+
+def get_active_rules(rule_type: str = None, min_fitness: float = 0.0, limit: int = 200) -> list:
+    """获取活跃策略规则列表"""
+    with get_conn() as conn:
+        sql = "SELECT * FROM strategy_rules WHERE is_active=1"
+        params = []
+        if rule_type:
+            sql += " AND rule_type=?"
+            params.append(rule_type)
+        if min_fitness > 0:
+            sql += " AND fitness>=?"
+            params.append(min_fitness)
+        sql += " ORDER BY fitness DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def degrade_rule(rule_id: int):
+    """降级策略规则"""
+    with get_conn() as conn:
+        conn.execute("""
+            UPDATE strategy_rules SET is_active=0, degraded_at=?
+            WHERE id=?
+        """, (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), rule_id))
+
+
+def save_strategy_signal(signal: dict):
+    """保存单条信号触发记录"""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO strategy_signals
+                (trade_date, code, rule_id, rule_name, confidence,
+                 raw_score, features_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            signal["trade_date"], signal["code"], signal["rule_id"],
+            signal.get("rule_name", ""), signal.get("confidence"),
+            signal.get("raw_score"), signal.get("features_json", "{}"),
+        ))
+
+
+def get_signals_for_training(start_date: str, end_date: str) -> list:
+    """获取带标注的信号用于 LightGBM 训练"""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT * FROM strategy_signals
+            WHERE trade_date BETWEEN ? AND ? AND label_return IS NOT NULL
+            ORDER BY trade_date
+        """, (start_date, end_date)).fetchall()]
+
+
+def update_signal_labels(updates: list):
+    """批量更新信号的事后标注（未来20日超额收益）"""
+    with get_conn() as conn:
+        conn.executemany("""
+            UPDATE strategy_signals SET label_return=?, is_win=?
+            WHERE id=?
+        """, updates)
+
+
+def upsert_active_strategies(selections: list):
+    """保存当期活跃策略选择结果"""
+    with get_conn() as conn:
+        conn.executemany("""
+            INSERT INTO active_strategies
+                (select_date, rule_id, rule_name, window_60_score,
+                 window_120_score, final_score, rank, valid_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, selections)
+
+
+def get_current_active_strategies() -> list:
+    """获取当前有效的活跃策略"""
+    with get_conn() as conn:
+        today = datetime.now().strftime('%Y-%m-%d')
+        return [dict(r) for r in conn.execute("""
+            SELECT * FROM active_strategies
+            WHERE valid_until >= ? AND is_emergency=0
+            ORDER BY rank
+        """, (today,)).fetchall()]
 
 
 # ─────────────────────────────────────────────
