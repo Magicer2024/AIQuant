@@ -62,6 +62,26 @@ V4_PARAM_GRID = [
 ]
 
 
+# ── Phase 1: 模板穷举配置 ──
+PHASE1_CONFIG = {
+    "ic_min_abs": 0.02,           # IC 过滤阈值
+    "top_per_cluster": 3,         # 每类因子保留数
+    "thresholds": [0.2, 0.35, 0.5, 0.65, 0.8],
+    "sample_stocks": 200,         # 快速回测采样数
+    "min_trades": 20,             # 最少交易次数
+    "top_n_rules": 50,            # 入库数量
+    "backtest_start": "20220101",
+}
+
+# 交叉信号预定义对 (Phase 1 T3 模板)
+CROSS_PAIRS = [
+    ("MACD_DIF", "MACD_DEA"),
+    ("KDJ_K", "KDJ_D"),
+    ("MA5_偏离", "MA20_偏离"),
+    ("PDI", "MDI"),
+]
+
+
 def get_strategy_params(name: str) -> Dict[str, Any]:
     """按名称获取策略参数"""
     mapping = {
