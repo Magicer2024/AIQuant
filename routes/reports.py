@@ -14,7 +14,7 @@ from datetime import datetime
 
 from flask import Blueprint, jsonify, request, Response
 
-from ministries.libu.report_generator import get_report_generator
+from ministries.rites.report_generator import get_report_generator
 from ministries.war.order_manager import get_order_manager, OrderStatus
 from ministries.rites.data_source_manager import get_data_source_manager
 

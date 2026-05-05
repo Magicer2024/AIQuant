@@ -17,9 +17,9 @@ import numpy as np
 from datetime import date, timedelta
 
 from agents.base import BaseAgent, AgentContext
-from core.db import get_index_daily, get_all_stocks, get_daily_price
-from risk.engine import RiskEngine
-from risk.models import RiskLevel
+from ministries.rites.data_source_manager import get_data_source_manager
+from ministries.justice.risk_facade import get_risk_engine, RiskLevel
+from ministries.revenue.capital_tracker import get_capital_tracker
 
 
 class RiskAgent(BaseAgent):
@@ -49,9 +49,9 @@ class RiskAgent(BaseAgent):
         # 5. 综合风险等级（原有功能）
         overall_risk = self._overall_risk(market_risk, volatility)
 
-        # 6. 系统化风控检查（新增：接入 risk/ 模块）
+        # 6. 系统化风控检查（委托给刑部·风控引擎）
         account_state = self._build_account_state(ctx, market_risk)
-        engine = RiskEngine()
+        engine = get_risk_engine()
         risk_status = engine.check_and_record(
             account_state,
             pipeline_id=ctx.pipeline_id
@@ -96,29 +96,14 @@ class RiskAgent(BaseAgent):
         }
 
     def _build_account_state(self, ctx: AgentContext, market_risk: dict) -> dict:
-        """构建账户状态供风控引擎使用"""
-        ma5 = market_risk.get("ma5", None)
-        ma20 = market_risk.get("ma20", None)
-
-        # 尝试从上下文获取账户信息，否则使用默认值
-        return {
-            "account_id": "default",
-            "current_drawdown": abs(market_risk.get("drawdown_from_peak", 0)),
-            "positions": [],
-            "total_value": 100000.0,
-            "total_exposure": 0.0,
-            "available_capital": 100000.0,
-            "consecutive_losses": 0,
-            "daily_open_count": 0,
-            "index_ma5": float(ma5) if ma5 is not None else None,
-            "index_ma20": float(ma20) if ma20 is not None else None,
-        }
+        """构建账户状态供风控引擎使用（委托给户部·资金追踪器）"""
+        return get_capital_tracker().build_account_state(market_risk)
 
     def _assess_market(self, today: str) -> dict:
-        """大盘趋势评估"""
+        """大盘趋势评估（沪深300）"""
         try:
             start = (date.today() - timedelta(days=90)).strftime("%Y-%m-%d")
-            df = get_index_daily("000300", start_date=start, end_date=today)
+            df = get_data_source_manager().get_index_daily_df("000300", start_date=start, end_date=today)
             if df is None or df.empty:
                 return {"status": "no_data", "trend": "unknown"}
 
@@ -153,10 +138,10 @@ class RiskAgent(BaseAgent):
             return {"status": "error", "error": str(e)[:200]}
 
     def _assess_volatility(self, today: str) -> dict:
-        """市场波动率评估"""
+        """市场波动率评估（沪深300）"""
         try:
             start = (date.today() - timedelta(days=40)).strftime("%Y-%m-%d")
-            df = get_index_daily("000300", start_date=start, end_date=today)
+            df = get_data_source_manager().get_index_daily_df("000300", start_date=start, end_date=today)
             if df is None or len(df) < 20:
                 return {"status": "insufficient_data", "level": "medium"}
 
@@ -184,7 +169,7 @@ class RiskAgent(BaseAgent):
             risk = {"code": code, "name": item.get("name", ""), "risk_flags": []}
 
             try:
-                df = get_daily_price(code)
+                df = get_data_source_manager().get_daily_price_df(code)
                 if df is None or df.empty:
                     risk["risk_flags"].append("no_data")
                     results.append(risk)

@@ -15,6 +15,7 @@ import os
 from datetime import date, datetime
 
 from agents.base import BaseAgent, AgentContext
+from ministries.rites.report_generator import get_report_generator
 
 
 class ReportAgent(BaseAgent):
@@ -250,142 +251,8 @@ class ReportAgent(BaseAgent):
         return path
 
     def _render_html(self, report: dict) -> str:
-        """渲染HTML报告"""
-        today = report["date"]
-        effective_date = report.get("effective_trade_date", today)
-        is_trading_day = report.get("is_trading_day", True)
-        recs = report["recommendations"]
-        risk = report.get("risk", {})
-        summary = report.get("summary", {})
-
-        # 非交易日提示
-        non_trading_banner = ""
-        if not is_trading_day and effective_date != today:
-            non_trading_banner = f'<div style="background:#fff7e6;border:1px solid #ffd591;border-radius:4px;padding:8px 12px;margin-bottom:16px;color:#d46b08;font-size:13px;">⚠️ 非交易日，以下数据基于最近交易日 <b>{effective_date}</b> 的行情</div>'
-
-        # 风险等级颜色
-        risk_color = {"low": "#52c41a", "medium": "#faad14", "high": "#f5222d"}.get(
-            risk.get("overall_risk", "medium"), "#faad14"
-        )
-
-        # 中文翻译后的值
-        market_trend_cn = self._translate_trend(risk.get("market_trend", "unknown"))
-        overall_risk_cn = self._translate_risk_level(risk.get("overall_risk", "medium"))
-
-        rows = ""
-        for rec in recs:
-            strategy_badge = "融合" if rec.get("strategy") == "fusion" else "v4超跌"
-            score = rec.get("score", 0)
-            trigger = "·".join(rec.get("trigger_list", [])) or "-"
-            bt = rec.get("backtest", {})
-            wr = bt.get("win_rate", 0)
-            avg_ret = bt.get("avg_return", 0)
-            risk_flags = rec.get("risk", {}).get("flags", [])
-            risk_flags_cn = self._translate_flags(risk_flags)
-            warning = "⚠️ " + "、".join(risk_flags_cn) if risk_flags_cn else "✅ 正常"
-
-            rows += f"""
-            <tr>
-                <td><b>{rec['code']}</b><br><small>{rec['name']}</small></td>
-                <td><span class="badge">{strategy_badge}</span></td>
-                <td><b>{score:.1f}</b></td>
-                <td>{rec['price']}</td>
-                <td>{trigger}</td>
-                <td>{rec['stop_loss']} / {rec['take_profit']}</td>
-                <td>{wr*100:.1f}%</td>
-                <td>{avg_ret*100:.2f}%</td>
-                <td class="{'warning' if risk_flags else 'ok'}">{warning}</td>
-            </tr>
-            """
-
-        if not rows:
-            rows = '<tr><td colspan="9" style="text-align:center;color:#999;">今日无推荐</td></tr>'
-
-        pos = risk.get("position_advice", {})
-
-        return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>每日交易计划 - {today}</title>
-<style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
-    .container {{ max-width: 1200px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-    h1 {{ margin: 0 0 8px; font-size: 22px; }}
-    .subtitle {{ color: #888; font-size: 14px; margin-bottom: 20px; }}
-    .summary {{ display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }}
-    .card {{ background: #fafafa; border-radius: 8px; padding: 16px; flex: 1; min-width: 180px; }}
-    .card h3 {{ margin: 0 0 8px; font-size: 13px; color: #666; text-transform: uppercase; }}
-    .card .value {{ font-size: 24px; font-weight: 700; }}
-    .risk-low {{ color: #52c41a; }}
-    .risk-medium {{ color: #faad14; }}
-    .risk-high {{ color: #f5222d; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }}
-    th {{ background: #f0f0f0; padding: 10px; text-align: left; font-weight: 600; }}
-    td {{ padding: 10px; border-bottom: 1px solid #eee; }}
-    tr:hover {{ background: #fafafa; }}
-    .badge {{ background: #1890ff; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
-    .warning {{ color: #f5222d; }}
-    .ok {{ color: #52c41a; }}
-    .footer {{ margin-top: 24px; padding-top: 16px; border-top: 1px solid #eee; color: #999; font-size: 12px; text-align: center; }}
-</style>
-</head>
-<body>
-<div class="container">
-    <h1>每日交易计划 <span style="font-size:16px;color:#666;">{today}</span></h1>
-    <div class="subtitle">生成时间: {report.get('generated_at', '')}</div>
-    {non_trading_banner}
-
-    <div class="summary">
-        <div class="card">
-            <h3>融合策略命中</h3>
-            <div class="value">{summary.get('fusion_hits', 0)}</div>
-        </div>
-        <div class="card">
-            <h3>v4超跌命中</h3>
-            <div class="value">{summary.get('v4_hits', 0)}</div>
-        </div>
-        <div class="card">
-            <h3>精选推荐</h3>
-            <div class="value">{summary.get('recommendations_count', 0)}</div>
-        </div>
-        <div class="card">
-            <h3>市场环境</h3>
-            <div class="value risk-{risk.get('overall_risk', 'medium')}">{market_trend_cn}</div>
-        </div>
-        <div class="card">
-            <h3>建议仓位</h3>
-            <div class="value">{pos.get('suggested_position', 0.5)*100:.0f}%</div>
-        </div>
-    </div>
-
-    <h2>推荐列表</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>股票</th>
-                <th>策略</th>
-                <th>评分</th>
-                <th>现价</th>
-                <th>触发条件</th>
-                <th>止损/止盈</th>
-                <th>历史胜率</th>
-                <th>平均收益</th>
-                <th>风险状态</th>
-            </tr>
-        </thead>
-        <tbody>
-            {rows}
-        </tbody>
-    </table>
-
-    <div class="footer">
-        由多Agent协作Alpha流水线自动生成 | 仅供参考，投资有风险
-    </div>
-</div>
-</body>
-</html>
-"""
+        """渲染HTML报告（委托给礼部·ReportGenerator）"""
+        return get_report_generator().generate_pipeline_report(report)
 
 
 # 兼容旧接口

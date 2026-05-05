@@ -77,7 +77,7 @@ start http://localhost:5000/dashboard
 
 echo ========================================
 echo  Service starting... Do NOT close this window.
-echo  三省六部制架构已启用
+echo  Three Provinces ^& Six Ministries governance enabled
 echo ========================================
 echo.
 

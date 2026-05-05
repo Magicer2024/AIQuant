@@ -152,3 +152,44 @@ def get_pipeline_flow() -> list[dict]:
             "parallel": False,
         },
     ]
+
+
+# Agent → Ministry 委托关系
+# 三省六部不再是字符串标签——每个 Agent 委托给对应的部来执行领域操作。
+MINISTRY_DELEGATION: dict[str, dict] = {
+    "DataAgent": {
+        "ministry": "rites",
+        "factory": "get_data_source_manager",
+        "description": "数据查询委托给礼部·数据源管理器",
+    },
+    "SignalAgent": {
+        "ministry": "rites",
+        "factory": "get_data_source_manager",
+        "description": "行情数据查询委托给礼部·数据源管理器",
+    },
+    "RiskAgent": {
+        "ministry": "justice",
+        "factory": "get_risk_engine",
+        "secondary": {
+            "ministry": "revenue",
+            "factory": "get_capital_tracker",
+            "description": "账户状态查询委托给户部·资金追踪器",
+        },
+        "description": "风控检查委托给刑部·风控引擎",
+    },
+    "BacktestAgent": {
+        "ministry": "rites",
+        "factory": "get_data_source_manager",
+        "description": "历史行情数据委托给礼部·数据源管理器",
+    },
+    "ReportAgent": {
+        "ministry": "rites",
+        "factory": "get_report_generator",
+        "description": "HTML报告渲染委托给礼部·报表生成器",
+    },
+}
+
+
+def get_ministry_delegation(agent_name: str) -> dict:
+    """获取 Agent 委托的 Ministry 和工厂函数"""
+    return MINISTRY_DELEGATION.get(agent_name, {})

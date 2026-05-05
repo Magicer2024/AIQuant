@@ -243,11 +243,25 @@ class PipelineOrchestrator:
 
     def run_single(self, agent_name: str) -> AgentResult:
         """单独执行一个Agent（用于调试/手动触发）"""
+        with self._lock:
+            if self._running:
+                raise RuntimeError("流水线已在运行中")
+            self._running = True
+
         ctx = AgentContext(
             pipeline_id=f"single-{agent_name}-{uuid.uuid4().hex[:6]}",
             run_date=date.today().strftime("%Y-%m-%d"),
         )
-        return self._run_agent(agent_name, ctx)
+        self._current_ctx = ctx
+
+        try:
+            result = self._run_agent(agent_name, ctx)
+            self._history.append(ctx.summary())
+            if len(self._history) > 30:
+                self._history = self._history[-30:]
+            return result
+        finally:
+            self._running = False
 
 
 # 全局单例

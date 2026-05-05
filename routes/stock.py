@@ -58,10 +58,11 @@ def analyze():
     if not symbol:
         return jsonify({"error": "缺少股票代码"}), 400
     try:
-        return jsonify(analyze_stock(symbol, start_date=start_date, strategy_name=strategy_name))
+        data = analyze_stock(symbol, start_date=start_date, strategy_name=strategy_name)
+        return jsonify({"success": True, "data": data})
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @stock_bp.route("/info", methods=["GET"])
@@ -81,7 +82,8 @@ def backtest():
     if not symbol:
         return jsonify({"error": "缺少股票代码"}), 400
     try:
-        return jsonify(run_single_backtest(symbol, start_date, strategy_name, capital))
+        data = run_single_backtest(symbol, start_date, strategy_name, capital)
+        return jsonify({"success": True, "data": data})
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500

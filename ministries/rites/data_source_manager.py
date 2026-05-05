@@ -176,6 +176,34 @@ class DataSourceManager:
 
         return []
 
+    def get_daily_price_df(self, code: str, start_date: str = None, end_date: str = None,
+                           source_type: DataSourceType = None):
+        """获取日线数据，返回 pd.DataFrame 格式（供 Agent 使用）"""
+        import pandas as pd
+        data = self.get_daily_price(code, start_date, end_date, source_type)
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            df = df.set_index("trade_date").sort_index()
+        return df
+
+    def get_stock_list_df(self):
+        """获取股票列表，返回 pd.DataFrame 格式"""
+        import pandas as pd
+        source = self.get_source()
+        if source:
+            data = source.get_stock_list()
+            if data:
+                return pd.DataFrame(data)
+        return pd.DataFrame()
+
+    def get_index_daily_df(self, code: str = "000300", start_date: str = None, end_date: str = None):
+        """获取指数日线数据，返回 pd.DataFrame 格式"""
+        from core.db import get_index_daily
+        return get_index_daily(code, start_date=start_date, end_date=end_date)
+
 
 # 全局单例
 _data_source_manager: DataSourceManager | None = None

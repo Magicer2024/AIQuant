@@ -138,9 +138,40 @@ class DecisionEngine:
 
     def get_current_status(self) -> dict:
         """获取当前决策状态"""
+        def _serialize_intent(i):
+            if i is None:
+                return None
+            return {
+                "intent_id": i.intent_id,
+                "created_at": i.created_at,
+                "stance": i.stance.value,
+                "risk_appetite": i.risk_appetite.value,
+                "target_sectors": i.target_sectors,
+                "exclude_sectors": i.exclude_sectors,
+                "max_positions": i.max_positions,
+                "single_position_ratio": i.single_position_ratio,
+                "notes": i.notes,
+            }
+
+        def _serialize_plan(p):
+            if p is None:
+                return None
+            return {
+                "plan_id": p.plan_id,
+                "intent_id": p.intent_id,
+                "created_at": p.created_at,
+                "fusion_weights": p.fusion_weights,
+                "score_threshold": p.score_threshold,
+                "stop_loss": p.stop_loss,
+                "take_profit": p.take_profit,
+                "trailing_stop": p.trailing_stop,
+                "market_timing": p.market_timing,
+                "max_daily_trades": p.max_daily_trades,
+            }
+
         return {
-            "intent": self.current_intent.__dict__ if self.current_intent else None,
-            "plan": self.current_plan.__dict__ if self.current_plan else None,
+            "intent": _serialize_intent(self.current_intent),
+            "plan": _serialize_plan(self.current_plan),
         }
 
 

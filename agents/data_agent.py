@@ -15,11 +15,12 @@ import pandas as pd
 from datetime import date, datetime
 
 from agents.base import BaseAgent, AgentContext
-from core.db import init_db, get_all_stocks, get_latest_date_all, get_stock_count_in_db, db_stats
+from core.db import init_db, get_latest_date_all, db_stats
 from core.sync import (
     daily_sync, sync_one_stock, sync_all_indices, sync_strategy_score,
     is_trading_day, is_after_market_close,
 )
+from ministries.rites.data_source_manager import get_data_source_manager
 
 
 class DataAgent(BaseAgent):
@@ -88,7 +89,7 @@ class DataAgent(BaseAgent):
     def _run_sync(self, today: str, full: bool) -> dict:
         """执行数据同步，返回统计"""
         if full:
-            stocks = get_all_stocks()
+            stocks = get_data_source_manager().get_stock_list_df()
             success_n, fail_n = 0, 0
             total = len(stocks)
             for i, row in stocks.iterrows():
@@ -122,21 +123,20 @@ class DataAgent(BaseAgent):
     def _check_quality(self) -> dict:
         """数据质量检查：缺失率、停牌检测"""
         try:
-            stocks = get_all_stocks()
+            stocks = get_data_source_manager().get_stock_list_df()
             total = len(stocks)
             if total == 0:
                 return {"status": "no_data", "missing_ratio": 1.0}
 
             # 随机抽查100只股票，检查最新数据日期
             sample = stocks.sample(min(100, total)) if total > 100 else stocks
-            from core.db import get_daily_price
             missing_count = 0
             stale_count = 0
             today = date.today().strftime("%Y-%m-%d")
 
             for _, row in sample.iterrows():
                 try:
-                    df = get_daily_price(row["code"])
+                    df = get_data_source_manager().get_daily_price_df(row["code"])
                     if df is None or df.empty:
                         missing_count += 1
                         continue

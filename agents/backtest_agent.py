@@ -25,7 +25,7 @@ from strategy.strategies import (
     fuse_signals,
     DEFAULT_WEIGHTS,
 )
-from core.db import get_daily_price
+from ministries.rites.data_source_manager import get_data_source_manager
 
 
 class BacktestAgent(BaseAgent):
@@ -113,7 +113,7 @@ class BacktestAgent(BaseAgent):
                 }
             else:
                 # 5策略融合回测（简化版）
-                df = get_daily_price(code)
+                df = get_data_source_manager().get_daily_price_df(code)
                 if df is None or df.empty:
                     return self._empty_report(code, name, strategy)
 

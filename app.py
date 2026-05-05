@@ -2,7 +2,7 @@
 Flask 后端 API
 提供数据接口给前端可视化界面
 """
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, redirect
 from flask_cors import CORS
 from flask_sock import Sock
 
@@ -35,6 +35,7 @@ from routes.broker import broker_bp
 from routes.llm import llm_bp
 from routes.deployment import deployment_bp
 from routes.data_fetch import data_fetch_bp
+from routes.chart import chart_bp
 
 app = Flask(__name__)
 CORS(app)
@@ -70,6 +71,7 @@ app.register_blueprint(broker_bp)
 app.register_blueprint(llm_bp)
 app.register_blueprint(deployment_bp)
 app.register_blueprint(data_fetch_bp)
+app.register_blueprint(chart_bp)
 
 # 注册 WebSocket 路由
 register_ws_routes(sock)
@@ -93,14 +95,14 @@ def old_dashboard():
 
 @app.route("/agent")
 def agent_dashboard():
-    """多Agent流水线控制台"""
-    return send_from_directory(".", "agent-dashboard.html")
+    """Agent流水线已合并到控制台"""
+    return redirect("/dashboard")
 
 
 @app.route("/agents")
 def agent_dashboard_alias():
-    """多Agent流水线控制台（别名）"""
-    return send_from_directory(".", "agent-dashboard.html")
+    """Agent流水线已合并到控制台（别名）"""
+    return redirect("/dashboard")
 
 
 @app.route("/governance")
@@ -113,6 +115,12 @@ def governance_dashboard():
 def market_dashboard():
     """实时行情监控页面"""
     return send_from_directory(".", "market.html")
+
+
+@app.route("/quant")
+def quant_page():
+    """量化选股页面"""
+    return send_from_directory(".", "quant.html")
 
 
 @app.route("/reports/<path:filename>")

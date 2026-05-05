@@ -45,7 +45,7 @@ def get_governance_status():
         },
         "ministries": {
             "rites": {
-                "sources": [s.name for s in get_data_source_manager().sources.values()],
+                "sources": [s.get_name() for s in get_data_source_manager().sources.values()],
                 "primary": get_data_source_manager().primary.value,
             },
             "war": {
