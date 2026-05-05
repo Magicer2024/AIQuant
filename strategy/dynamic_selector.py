@@ -18,10 +18,9 @@ from datetime import datetime, timedelta
 
 from strategy.rule_miner import RuleMiner, StrategyRule, RuleCondition, load_template_library
 from strategy.lgbm_ranker import get_ranker, fuse_stock_signals, build_meta_features
-from strategy.factor_lib import FACTOR_REGISTRY
 from core.db import (
     get_active_rules, upsert_active_strategies, get_current_active_strategies,
-    save_strategy_signal, degrade_rule, get_conn,
+    save_strategy_signal, get_conn,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,15 +105,19 @@ def apply_constraints(rule_perf: dict) -> Tuple[bool, str]:
     Returns (passed, reason).  If passed is False the rule should be excluded.
 
     Checks:
-        1. Minimum 5 trades in last 60 days
+        1. Minimum 3 trades per stock (normalized by sample_count)
         2. Max drawdown < 20 %
         3. 60-day return > -5 %
-        4. Max consecutive loss days <= 12
+        4. (Max consecutive loss days <= 12 — SKIPPED: evaluate_rule does
+           not return equity_curve data. Requires backtester upgrade.)
     """
-    # 1. Minimum trades
+    # 1. Minimum trades per stock — total_trades is the sum across all
+    #    sampled stocks, so normalize by sample_count for a fair threshold.
     total_trades = rule_perf.get("total_trades", 0) or 0
-    if total_trades < 5:
-        return False, f"insufficient_trades({total_trades}<5)"
+    sample_count = rule_perf.get("sample_count", 1) or 1
+    per_stock_trades = total_trades / max(sample_count, 1)
+    if per_stock_trades < 3:
+        return False, f"insufficient_trades({per_stock_trades:.1f}<3 per stock)"
 
     # 2. Max drawdown
     mdd = abs(rule_perf.get("max_drawdown", 0) or 0)
@@ -126,12 +129,9 @@ def apply_constraints(rule_perf: dict) -> Tuple[bool, str]:
     if ret_60 <= -5.0:
         return False, f"return_too_low({ret_60:.1f}%<=-5%)"
 
-    # 4. Max consecutive loss
-    equity = rule_perf.get("equity_curve")
-    if equity and len(equity) >= 2:
-        max_cl = _calc_max_consecutive_loss(equity)
-        if max_cl > 12:
-            return False, f"consecutive_loss_exceeded({max_cl}>12)"
+    # 4. Consecutive-loss check skipped — RuleMiner.evaluate_rule() does
+    #    not return equity_curve data. Requires backtester upgrade to
+    #    surface per-trade equity curves before this check can be enabled.
 
     return True, "ok"
 
@@ -139,16 +139,23 @@ def apply_constraints(rule_perf: dict) -> Tuple[bool, str]:
 def get_turnover_penalty(rule_perf: dict) -> float:
     """Return a multiplier (<= 1.0) for turnover penalty.
 
-    - turnover_rate > 1.2  → eliminated (return 0.0)
-    - 1.0 < turnover_rate <= 1.2 → score * 0.7
+    Estimates turnover from total_trades / sample_count since the backtester
+    does not yet surface turnover_rate directly.
+
+    - estimated turnover > 2.0  → eliminated (return 0.0)
+    - 1.5 < estimated turnover <= 2.0 → score * 0.7
     - otherwise → 1.0
     """
-    turnover = rule_perf.get("turnover_rate")
-    if turnover is None:
+    # NOTE: turnover_rate is not returned by RuleMiner.evaluate_rule().
+    # Estimate from trades-per-stock as a proxy until backtester is upgraded.
+    total_trades = rule_perf.get("total_trades", 0) or 0
+    sample_count = rule_perf.get("sample_count", 1) or 1
+    if sample_count < 1:
         return 1.0
-    if turnover > 1.2:
+    est_turnover = total_trades / sample_count
+    if est_turnover > 2.0:
         return 0.0
-    if 1.0 < turnover <= 1.2:
+    if 1.5 < est_turnover <= 2.0:
         return 0.7
     return 1.0
 
@@ -227,6 +234,42 @@ def _slice_stock_data(stock_data: Dict, window_days: int) -> Dict:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Shared deserialization helper
+# ═══════════════════════════════════════════════════════════════
+
+def _rule_from_db_row(row: dict) -> Optional[StrategyRule]:
+    """Deserialize a StrategyRule from a DB row (strategy_rules or active_strategies).
+
+    Handles JSON-decoding of conditions and sell_conditions fields.
+    Returns None on parse failure.
+    """
+    try:
+        conds_data = json.loads(row.get("conditions", "[]"))
+        conds = [RuleCondition(**c) for c in conds_data]
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return None
+
+    sell_conds: List[RuleCondition] = []
+    sell_raw = row.get("sell_conditions", "[]")
+    if sell_raw and sell_raw != "[]":
+        try:
+            sd = json.loads(sell_raw)
+            sell_conds = [RuleCondition(**s) for s in sd]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return StrategyRule(
+        name=row["rule_name"],
+        rule_type=row.get("rule_type", "T1"),
+        conditions=conds,
+        sell_conditions=sell_conds,
+        holding_min=row.get("holding_min", 3),
+        holding_max=row.get("holding_max", 20),
+        source=row.get("source", "template"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 # DynamicSelector
 # ═══════════════════════════════════════════════════════════════
 
@@ -265,26 +308,9 @@ class DynamicSelector:
         rules: List[StrategyRule] = []
         if db_rules:
             for row in db_rules:
-                try:
-                    conds_data = json.loads(row["conditions"])
-                    conds = [RuleCondition(**c) for c in conds_data]
-                    sell_conds = []
-                    sell_raw = row.get("sell_conditions", "[]")
-                    if sell_raw and sell_raw != "[]":
-                        try:
-                            sd = json.loads(sell_raw)
-                            sell_conds = [RuleCondition(**s) for s in sd]
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    rules.append(StrategyRule(
-                        name=row["rule_name"], rule_type=row["rule_type"],
-                        conditions=conds, sell_conditions=sell_conds,
-                        holding_min=row.get("holding_min", 3),
-                        holding_max=row.get("holding_max", 20),
-                        source=row.get("source", "template"),
-                    ))
-                except (json.JSONDecodeError, KeyError):
-                    continue
+                rule = _rule_from_db_row(row)
+                if rule is not None:
+                    rules.append(rule)
 
         # 2. L1 fallback
         if not rules:
@@ -369,6 +395,11 @@ class DynamicSelector:
                 valid_until,
             ))
         try:
+            # Deduplicate: remove any existing selections for this date
+            # (active_strategies has no UNIQUE constraint, so plain INSERT
+            # would accumulate duplicates on repeated runs.)
+            with get_conn() as conn:
+                conn.execute("DELETE FROM active_strategies WHERE select_date=?", (today,))
             upsert_active_strategies(selections)
             logger.info("Saved %d active strategies for week %s", len(selections), today)
         except Exception:
@@ -546,15 +577,9 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
     rule_map: Dict[int, Tuple[StrategyRule, dict]] = {}
     if active:
         for row in active:
-            try:
-                conds_data = json.loads(row.get("conditions", "[]"))
-                conds = [RuleCondition(**c) for c in conds_data]
-                rule_map[row["rule_id"]] = (StrategyRule(
-                    name=row["rule_name"], rule_type=row.get("rule_type", "T1"),
-                    conditions=conds, source=row.get("source", "template"),
-                ), dict(row))
-            except (json.JSONDecodeError, KeyError):
-                continue
+            rule = _rule_from_db_row(row)
+            if rule is not None:
+                rule_map[row["rule_id"]] = (rule, dict(row))
 
     # 2. Fallback: load template rules
     if not rule_map:
@@ -641,6 +666,15 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
             for sig in all_signals_flat:
                 sig["confidence"] = sig.get("signal_strength", 0.5) * 100.0
                 sig["raw_score"] = sig["confidence"]
+
+        # Apply bear-market discount to all confidence scores
+        if index_df is not None and is_bear_market(index_df):
+            bear_discount = 0.85
+            for sig in all_signals_flat:
+                sig["confidence"] = sig["confidence"] * bear_discount
+                sig["raw_score"] = sig.get("raw_score", 0) * bear_discount
+            logger.info("Bear-market regime detected — confidence discounted by %.0f%%",
+                        (1 - bear_discount) * 100)
 
     # 5. Per-stock fusion
     results = []
