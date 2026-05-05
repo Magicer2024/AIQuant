@@ -85,7 +85,7 @@ def strategy_macd(df: pd.DataFrame) -> pd.DataFrame:
     买入条件：
       - DIF 上穿 DEA（MACD金叉）
       - 金叉发生在零轴附近或零轴下方（更可靠）
-      - RSI_14 在 40~65 区间（不超买）
+      - RSI14 在 40~65 区间（不超买）
     卖出条件：
       - DIF 下穿 DEA（MACD死叉）
       - MACD柱状图连续收缩（顶背离迹象）
@@ -99,7 +99,7 @@ def strategy_macd(df: pd.DataFrame) -> pd.DataFrame:
     near_zero = d["MACD_DIF"].abs() < d["close"] * 0.005  # DIF绝对值小于股价的0.5%
 
     # RSI过滤
-    rsi_healthy = (d["RSI_14"] > 35) & (d["RSI_14"] < 68)
+    rsi_healthy = (d["RSI14"] > 35) & (d["RSI14"] < 68)
 
     # MACD柱状图由负转正（动能转换）
     hist_turn_positive = (d["MACD_HIST"] > 0) & (d["MACD_HIST"].shift(1) <= 0)
@@ -207,7 +207,7 @@ def strategy_composite(df_with_indicators: pd.DataFrame) -> pd.DataFrame:
     macd_golden = _cross_up(d["MACD_DIF"], d["MACD_DEA"])
     scores += macd_golden.astype(float) * 15
     # RSI健康区间 35~65 (10分)
-    rsi_ok = (d["RSI_14"] > 35) & (d["RSI_14"] < 65)
+    rsi_ok = (d["RSI14"] > 35) & (d["RSI14"] < 65)
     scores += rsi_ok.astype(float) * 10
     # KDJ金叉 (5分)
     kdj_golden = _cross_up(d["KDJ_K"], d["KDJ_D"])
@@ -295,18 +295,8 @@ def get_latest_signal(df_strategy: pd.DataFrame) -> dict:
     latest = df_strategy.iloc[-1]
     prev = df_strategy.iloc[-2] if len(df_strategy) > 1 else latest
 
-    def _safe(v, d=0.0, ndigits=2):
-        """安全取值，NaN → default"""
-        try:
-            f = float(v)
-            if np.isnan(f) or np.isinf(f):
-                return d
-            return round(f, ndigits)
-        except (TypeError, ValueError):
-            return d
-
     strategy = df_strategy.get("STRATEGY", pd.Series(["综合评分"])).iloc[-1]
-    score = _safe(latest.get("COMPOSITE_SCORE", 0), 0, 1)
+    score = float(latest.get("COMPOSITE_SCORE", 0))
 
     if score >= 80:
         action = "强烈买入"
@@ -329,21 +319,21 @@ def get_latest_signal(df_strategy: pd.DataFrame) -> dict:
 
     return {
         "date": str(df_strategy.index[-1].date()),
-        "close": _safe(latest["close"], 0),
+        "close": float(latest["close"]),
         "action": action,
         "color": color,
-        "score": _safe(score, 0, 1),
+        "score": round(score, 1),
         "buy_signal": bool(latest.get("BUY_SIGNAL", False)),
         "sell_signal": bool(latest.get("SELL_SIGNAL", False)),
         "strong_buy": bool(latest.get("STRONG_BUY", False)),
-        "stop_loss": _safe(latest.get("STOP_LOSS", 0), 0, 2),
-        "take_profit": _safe(latest.get("TAKE_PROFIT", 0), 0, 2),
-        "stop_pct": _safe(latest.get("STOP_PCT", 0), 0, 2),
-        "target_pct": _safe(latest.get("TARGET_PCT", 0), 0, 2),
-        "rsi14": _safe(latest.get("RSI_14", 50), 50, 1),
-        "macd_dif": _safe(latest.get("MACD_DIF", 0), 0, 4),
-        "kdj_k": _safe(latest.get("KDJ_K", 50), 50, 1),
-        "kdj_d": _safe(latest.get("KDJ_D", 50), 50, 1),
+        "stop_loss": round(float(latest.get("STOP_LOSS", 0)), 2),
+        "take_profit": round(float(latest.get("TAKE_PROFIT", 0)), 2),
+        "stop_pct": round(float(latest.get("STOP_PCT", 0)), 2),
+        "target_pct": round(float(latest.get("TARGET_PCT", 0)), 2),
+        "rsi14": round(float(latest.get("RSI14", 50)), 1),
+        "macd_dif": round(float(latest.get("MACD_DIF", 0)), 4),
+        "kdj_k": round(float(latest.get("KDJ_K", 50)), 1),
+        "kdj_d": round(float(latest.get("KDJ_D", 50)), 1),
     }
 
 

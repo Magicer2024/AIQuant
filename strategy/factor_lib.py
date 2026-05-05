@@ -210,8 +210,7 @@ def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
     result["MACD_HIST"] = macd["MACD_HIST"] / close
     result["MACD_金叉距离"] = (macd["MACD_DIF"] - macd["MACD_DEA"]).abs()
 
-    cci = calc_cci(high, low, close)
-    result["CCI"] = cci["CCI"]
+    result["CCI"] = calc_cci(high, low, close)
 
     dpo = calc_dpo(close)
     result["DPO"] = dpo["DPO"] / close.clip(lower=1e-9)
@@ -224,7 +223,7 @@ def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
     # ── 动量类 ──
     for p in [6, 9, 14, 21]:
         rsi = calc_rsi(close, periods=[p])
-        result[f"RSI_{p}"] = rsi[f"RSI_{p}"]
+        result[f"RSI_{p}"] = rsi[f"RSI{p}"]
 
     for p in [6, 12, 24]:
         ma_p = close.rolling(p).mean()
@@ -246,8 +245,8 @@ def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
     result["BB_PCT_B"] = bb["BB_PCT_B"]
     result["BB_BANDWIDTH"] = bb["BB_BANDWIDTH"]
 
-    atr = calc_atr(high, low, close)
-    result["ATR_PCT"] = atr["ATR_PCT"]
+    atr_series = calc_atr(high, low, close)
+    result["ATR_PCT"] = atr_series / close.clip(lower=1e-9)
 
     result["HV_10"] = calc_historical_volatility(close, 10)["HV_10"]
     result["HV_20"] = calc_historical_volatility(close, 20)["HV_20"]
@@ -258,8 +257,8 @@ def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
         result[f"VOL_RATIO_{p}"] = volume / vol_ma.clip(lower=1e-9)
 
     obv = calc_obv(close, volume)
-    obv_ma = obv["OBV"].rolling(20).mean()
-    result["OBV_偏离度"] = (obv["OBV"] - obv_ma) / obv_ma.clip(lower=1e-9)
+    obv_ma = obv.rolling(20).mean()
+    result["OBV_偏离度"] = (obv - obv_ma) / obv_ma.clip(lower=1e-9)
 
     result["VOL_波动率"] = volume.rolling(20).std() / volume.rolling(20).mean().clip(lower=1e-9)
 

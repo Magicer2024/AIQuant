@@ -117,7 +117,7 @@ def analyze_stock(symbol: str, start_date: str = "", strategy_name: str = "compo
         "kline": kline,
         "ma": df_to_json_safe(df_s, ["MA5", "MA10", "MA20", "MA60"]),
         "macd": df_to_json_safe(df_s, ["MACD_DIF", "MACD_DEA", "MACD_HIST"]),
-        "rsi": df_to_json_safe(df_s, ["RSI_6", "RSI_14", "RSI_24"]),
+        "rsi": df_to_json_safe(df_s, ["RSI6", "RSI14", "RSI24"]),
         "kdj": df_to_json_safe(df_s, ["KDJ_K", "KDJ_D", "KDJ_J"]),
         "boll": df_to_json_safe(df_s, ["BOLL_UPPER", "BOLL_MID", "BOLL_LOWER"]),
         "score": score_data,
@@ -168,20 +168,10 @@ def run_single_backtest(symbol: str, start_date: str = "20220101",
             "pnl": t.pnl,
             "pnl_pct": t.pnl_pct,
             "holding_days": t.holding_days,
-            "trigger_strategy": strategy_label,
         })
-
-    # 获取股票名称
-    try:
-        info = get_stock_info(symbol)
-        stock_name = info.get("name", symbol) if isinstance(info, dict) else symbol
-    except Exception:
-        stock_name = symbol
 
     return {
         "symbol": symbol,
-        "stock_code": symbol,
-        "stock_name": stock_name,
         "summary": summary,
         "metrics": {
             "total_return": result.total_return,
@@ -194,16 +184,6 @@ def run_single_backtest(symbol: str, start_date: str = "20220101",
             "benchmark_return": result.benchmark_return,
             "alpha": result.alpha,
             "avg_holding_days": result.avg_holding_days,
-        },
-        "result": {
-            "total_return": result.total_return,
-            "annual_return": result.annual_return,
-            "max_drawdown": result.max_drawdown,
-            "sharpe_ratio": result.sharpe_ratio,
-            "win_rate": result.win_rate,
-            "total_trades": result.total_trades,
-            "equity_curve": list(result.equity_curve),
-            "equity_dates": list(result.equity_dates),
         },
         "equity_curve": [
             {"date": d, "value": v}
