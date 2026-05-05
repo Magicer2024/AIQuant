@@ -28,11 +28,15 @@ from backtest.backtest import Backtester, BacktestResult
 @dataclass
 class RuleCondition:
     factor: str
-    operator: str      # "<" | ">" | "cross_above" | "cross_below"
+    operator: str      # "<" | ">" | "cross_above" | "cross_below" | "cross_above_factor" | "cross_below_factor"
     threshold: float = 0.5
+    ref_factor: Optional[str] = None  # reference factor for cross_*_factor operators
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        if self.ref_factor is None:
+            del d["ref_factor"]
+        return d
 
     def evaluate(self, factor_df: pd.DataFrame) -> pd.Series:
         if self.operator == ">":
@@ -45,6 +49,16 @@ class RuleCondition:
         elif self.operator == "cross_below":
             return (factor_df[self.factor] < self.threshold) & \
                    (factor_df[self.factor].shift(1) >= self.threshold)
+        elif self.operator == "cross_above_factor":
+            if self.ref_factor is None:
+                return pd.Series(False, index=factor_df.index)
+            return (factor_df[self.factor] > factor_df[self.ref_factor]) & \
+                   (factor_df[self.factor].shift(1) <= factor_df[self.ref_factor].shift(1))
+        elif self.operator == "cross_below_factor":
+            if self.ref_factor is None:
+                return pd.Series(False, index=factor_df.index)
+            return (factor_df[self.factor] < factor_df[self.ref_factor]) & \
+                   (factor_df[self.factor].shift(1) >= factor_df[self.ref_factor].shift(1))
         return pd.Series(False, index=factor_df.index)
 
 
@@ -82,6 +96,26 @@ class TemplateBuilder:
         self.factors = factor_names
         self.thresholds = thresholds
 
+    @staticmethod
+    def _op_for_factor(factor: str, *, default: str = ">") -> str:
+        """Heuristic operator selection for a given factor name.
+
+        - Volume factors: ">" for VOL_RATIO, OBV (rising volume is bullish);
+          "<" for VOL_波动率 (high vol-of-vol is bearish).
+        - HV_* and BB_PCT_B: "<" (overbought / high volatility signals caution).
+        - Default: the caller-supplied default.
+        """
+        upper = factor.upper()
+        if "VOL" in upper:
+            if "波动" in factor or "STD" in upper or "VOLATILITY" in upper:
+                return "<"
+            return ">"  # VOL_RATIO, OBV, etc.
+        if upper.startswith("HV_") or "HV_" in upper:
+            return "<"
+        if "PCT_B" in upper:
+            return "<"
+        return default
+
     def build_t1(self) -> List[StrategyRule]:
         """单因子阈值模板"""
         rules = []
@@ -110,8 +144,8 @@ class TemplateBuilder:
                 for f2 in cat_factors[cat_b][:3]:
                     for t1 in self.thresholds[1:4]:
                         for t2 in self.thresholds[1:4]:
-                            op1 = ">" if "VOL" not in f1 else ">"
-                            op2 = "<" if "PCT_B" in f2 or "HV" in f2 else ">"
+                            op1 = self._op_for_factor(f1, default=">")
+                            op2 = self._op_for_factor(f2, default=">")
                             rules.append(StrategyRule(
                                 name=f"T2_{f1}_{op1}{t1:.2f}_{f2}_{op2}{t2:.2f}",
                                 rule_type="T2",
@@ -131,7 +165,8 @@ class TemplateBuilder:
             rules.append(StrategyRule(
                 name=f"T3_{f_fast}_cross_above_{f_slow}",
                 rule_type="T3",
-                conditions=[RuleCondition(f_fast, "cross_above", 0)],
+                conditions=[RuleCondition(f_fast, "cross_above_factor", ref_factor=f_slow)],
+                sell_conditions=[RuleCondition(f_fast, "cross_below_factor", ref_factor=f_slow)],
             ))
         return rules
 
@@ -157,11 +192,12 @@ class RuleMiner:
     """Phase 1: 模板穷举 + 剪枝 + 回测验证"""
 
     def __init__(self, sample_size: int = None, min_trades: int = None,
-                 top_n: int = None):
+                 top_n: int = None, seed: int = None):
         self.config = PHASE1_CONFIG
         self.sample_size = sample_size or self.config["sample_stocks"]
         self.min_trades = min_trades or self.config["min_trades"]
         self.top_n = top_n or self.config["top_n_rules"]
+        self.seed = seed
 
     def prune_factors(self, factor_df: pd.DataFrame,
                       forward_returns: pd.Series) -> List[str]:
@@ -245,7 +281,7 @@ class RuleMiner:
     def score_rule(self, perf: dict) -> float:
         """⑥ 综合评分: 0.3*收益 + 0.3*胜率 + 0.25*夏普 - 0.15*最大回撤"""
         return (0.3 * perf["total_return"] / 100.0
-                + 0.3 * perf["win_rate"]
+                + 0.3 * perf["win_rate"] / 100.0
                 + 0.25 * perf["sharpe_ratio"]
                 - 0.15 * abs(perf["max_drawdown"]) / 100.0)
 
@@ -253,6 +289,9 @@ class RuleMiner:
                    forward_returns: pd.Series,
                    factor_df: pd.DataFrame) -> List[dict]:
         """执行完整 Phase 1 流程"""
+        if self.seed is not None:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
         active_factors = self.prune_factors(factor_df, forward_returns)
         candidates = self.generate_candidates(active_factors)
         scored = []
@@ -294,9 +333,20 @@ def load_template_library() -> List[StrategyRule]:
         try:
             conds_data = json.loads(row["conditions"])
             conds = [RuleCondition(**c) for c in conds_data]
+            sell_conds = []
+            sell_raw = row.get("sell_conditions", "[]")
+            if sell_raw and sell_raw != "[]":
+                try:
+                    sell_data = json.loads(sell_raw)
+                    sell_conds = [RuleCondition(**s) for s in sell_data]
+                except (json.JSONDecodeError, TypeError):
+                    pass
             rules.append(StrategyRule(
                 name=row["rule_name"], rule_type=row["rule_type"],
-                conditions=conds, source=row.get("source", "template"),
+                conditions=conds, sell_conditions=sell_conds,
+                holding_min=row.get("holding_min", 3),
+                holding_max=row.get("holding_max", 20),
+                source=row.get("source", "template"),
             ))
         except (json.JSONDecodeError, KeyError):
             continue
