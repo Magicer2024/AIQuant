@@ -17,7 +17,7 @@ import json
 import random
 
 from strategy.factor_lib import (
-    FACTOR_REGISTRY, compute_all_factors, calc_all_ic,
+    FACTOR_REGISTRY, calc_all_ic,
     filter_by_ic, get_factor_names_by_category,
 )
 from config.strategy_params import PHASE1_CONFIG, CROSS_PAIRS
@@ -219,9 +219,13 @@ class RuleMiner:
             return None
 
     def evaluate_rule(self, rule: StrategyRule, stock_data: Dict) -> Optional[dict]:
-        """全市场采样回测"""
+        """全市场采样回测（分层抽样，最多 sample_size 只）"""
+        codes = list(stock_data.keys())
+        if len(codes) > self.sample_size:
+            codes = random.sample(codes, self.sample_size)
         results = []
-        for code, (price_df, factor_df) in stock_data.items():
+        for code in codes:
+            price_df, factor_df = stock_data[code]
             perf = self.quick_backtest(rule, price_df, factor_df)
             if perf:
                 results.append(perf)
@@ -230,6 +234,7 @@ class RuleMiner:
         n = len(results)
         return {
             "total_return": np.mean([r["total_return"] for r in results]),
+            "annual_return": np.mean([r["annual_return"] for r in results]),
             "win_rate": np.mean([r["win_rate"] for r in results]),
             "sharpe_ratio": np.mean([r["sharpe_ratio"] for r in results]),
             "max_drawdown": np.max([r["max_drawdown"] for r in results]),
@@ -270,7 +275,7 @@ class RuleMiner:
                 "holding_max": rule.holding_max,
                 "source": "template",
                 "fitness": score,
-                "annual_return": perf["annual_return"] if "annual_return" in perf else 0,
+                "annual_return": perf["annual_return"],
                 "win_rate": perf["win_rate"],
                 "sharpe_ratio": perf["sharpe_ratio"],
                 "max_drawdown": perf["max_drawdown"],
