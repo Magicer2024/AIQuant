@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多Agent流水线控制台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 {
+    font-size: 24px;
+    margin-bottom: 4px;
+    background: linear-gradient(90deg, #38bdf8, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle { color: #64748b; font-size: 14px; margin-bottom: 24px; }
+
+  /* 控制栏 */
+  .control-bar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
+    color: #fff;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-secondary {
+    background: #1e293b;
+    color: #94a3b8;
+    border: 1px solid #334155;
+  }
+  .btn-secondary:hover { background: #334155; color: #e2e8f0; }
+
+  /* 状态卡片 */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .card-title { font-size: 13px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+  .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .status-idle { background: #64748b; }
+  .status-running { background: #f59e0b; animation: pulse 1.5s infinite; }
+  .status-success { background: #22c55e; }
+  .status-error { background: #ef4444; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .card-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #f1f5f9;
+  }
+  .card-detail { font-size: 13px; color: #64748b; margin-top: 4px; }
+
+  /* Agent流水线图 */
+  .pipeline-flow {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .pipeline-title { font-size: 16px; font-weight: 600; margin-bottom: 20px; color: #e2e8f0; }
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .flow-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 20px;
+    background: #0f172a;
+    border: 2px solid #334155;
+    border-radius: 10px;
+    min-width: 120px;
+    transition: all 0.3s;
+  }
+  .flow-node.active { border-color: #3b82f6; box-shadow: 0 0 12px rgba(59,130,246,0.2); }
+  .flow-node.done { border-color: #22c55e; }
+  .flow-node.error { border-color: #ef4444; }
+  .flow-node-name { font-size: 14px; font-weight: 600; }
+  .flow-node-time { font-size: 11px; color: #64748b; }
+  .flow-arrow { color: #475569; font-size: 20px; }
+
+  /* 日志区域 */
+  .log-panel {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .log-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between; }
+  .log-content {
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #94a3b8;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .log-line { padding: 2px 0; }
+  .log-time { color: #475569; margin-right: 8px; }
+  .log-info { color: #38bdf8; }
+  .log-success { color: #22c55e; }
+  .log-error { color: #ef4444; }
+  .log-warn { color: #f59e0b; }
+
+  /* 报告预览 */
+  .report-panel {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .report-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .report-title { font-size: 16px; font-weight: 600; }
+  .report-frame {
+    width: 100%;
+    height: 500px;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  /* 快捷Agent按钮 */
+  .agent-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .btn-agent {
+    padding: 6px 14px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #0f172a;
+    color: #94a3b8;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-agent:hover { border-color: #3b82f6; color: #3b82f6; }
+  .btn-agent:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .loading-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>多Agent协作 Alpha 流水线</h1>
+  <div class="subtitle">自动化策略扫描、回测验证、风险评估、报告生成</div>
+
+  <!-- 功能说明 -->
+  <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:24px">
+    <div style="font-size:14px;font-weight:600;color:#e2e8f0;margin-bottom:12px">📋 流水线说明</div>
+    <div style="font-size:13px;color:#94a3b8;line-height:1.8">
+      <p style="margin-bottom:8px">Alpha 流水线是一套全自动化的量化策略执行工作流，由5个专业Agent按顺序协作完成。点击「运行完整流水线」即可一键执行全部环节，也可以单独运行某个Agent。</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:12px">
+        <div style="background:#0f172a;border-radius:8px;padding:12px">
+          <div style="color:#38bdf8;font-weight:600;font-size:13px;margin-bottom:4px">📊 DataAgent · 数据管家</div>
+          <div style="font-size:12px;color:#64748b">判断交易日、同步全市场行情、数据质量检查</div>
+        </div>
+        <div style="background:#0f172a;border-radius:8px;padding:12px">
+          <div style="color:#38bdf8;font-weight:600;font-size:13px;margin-bottom:4px">🔍 SignalAgent · 信号猎手</div>
+          <div style="font-size:12px;color:#64748b">运行5策略融合扫描 + v4超跌反弹策略，生成候选股票</div>
+        </div>
+        <div style="background:#0f172a;border-radius:8px;padding:12px">
+          <div style="color:#38bdf8;font-weight:600;font-size:13px;margin-bottom:4px">📈 BacktestAgent · 回测验证</div>
+          <div style="font-size:12px;color:#64748b">对候选股做历史回测，计算胜率、盈亏比、最大回撤</div>
+        </div>
+        <div style="background:#0f172a;border-radius:8px;padding:12px">
+          <div style="color:#38bdf8;font-weight:600;font-size:13px;margin-bottom:4px">🛡️ RiskAgent · 风控官</div>
+          <div style="font-size:12px;color:#64748b">大盘风险评估、个股风险筛查、仓位建议、系统化风控</div>
+        </div>
+        <div style="background:#0f172a;border-radius:8px;padding:12px">
+          <div style="color:#38bdf8;font-weight:600;font-size:13px;margin-bottom:4px">📝 ReportAgent · 报告生成</div>
+          <div style="font-size:12px;color:#64748b">整合所有Agent输出，生成HTML交易计划报告</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 控制栏 -->
+  <div class="control-bar">
+    <button class="btn btn-primary" id="btnRunPipeline" onclick="runPipeline()">
+      <span>▶</span> 运行完整流水线
+    </button>
+    <button class="btn btn-secondary" onclick="refreshStatus()">🔄 刷新状态</button>
+    <button class="btn btn-secondary" onclick="loadReport()">📄 查看报告</button>
+    <div class="agent-actions">
+      <button class="btn-agent" onclick="runAgent('DataAgent')" id="btnData">DataAgent</button>
+      <button class="btn-agent" onclick="runAgent('SignalAgent')" id="btnSignal">SignalAgent</button>
+      <button class="btn-agent" onclick="runAgent('BacktestAgent')" id="btnBacktest">BacktestAgent</button>
+      <button class="btn-agent" onclick="runAgent('RiskAgent')" id="btnRisk">RiskAgent</button>
+      <button class="btn-agent" onclick="runAgent('ReportAgent')" id="btnReport">ReportAgent</button>
+    </div>
+  </div>
+
+  <!-- 状态卡片 -->
+  <div class="status-grid">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">流水线状态</span>
+        <span class="status-dot status-idle" id="statusDot"></span>
+      </div>
+      <div class="card-value" id="pipelineStatus">空闲</div>
+      <div class="card-detail" id="pipelineDetail">上次运行: -</div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">今日信号</span>
+        <span class="status-dot status-idle" id="signalDot"></span>
+      </div>
+      <div class="card-value" id="signalCount">-</div>
+      <div class="card-detail">融合 / v4 超跌</div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">市场环境</span>
+        <span class="status-dot status-idle" id="marketDot"></span>
+      </div>
+      <div class="card-value" id="marketStatus">-</div>
+      <div class="card-detail" id="marketDetail">建议仓位: -</div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">今日报告</span>
+        <span class="status-dot status-idle" id="reportDot"></span>
+      </div>
+      <div class="card-value" id="reportStatus">-</div>
+      <div class="card-detail" id="reportDetail">点击"查看报告"预览</div>
+    </div>
+  </div>
+
+  <!-- 流水线流程图 -->
+  <div class="pipeline-flow">
+    <div class="pipeline-title">执行流程</div>
+    <div class="flow-row" id="flowRow">
+      <div class="flow-node" id="nodeData" data-agent="DataAgent">
+        <div class="flow-node-name">📊 DataAgent</div>
+        <div class="flow-node-time">-</div>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node" id="nodeSignal" data-agent="SignalAgent">
+        <div class="flow-node-name">🔍 SignalAgent</div>
+        <div class="flow-node-time">-</div>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node" id="nodeBacktest" data-agent="BacktestAgent">
+        <div class="flow-node-name">📈 BacktestAgent</div>
+        <div class="flow-node-time">-</div>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node" id="nodeRisk" data-agent="RiskAgent">
+        <div class="flow-node-name">🛡️ RiskAgent</div>
+        <div class="flow-node-time">-</div>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node" id="nodeReport" data-agent="ReportAgent">
+        <div class="flow-node-name">📝 ReportAgent</div>
+        <div class="flow-node-time">-</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div class="log-panel">
+    <div class="log-title">
+      <span>执行日志</span>
+      <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px;" onclick="clearLog()">清空</button>
+    </div>
+    <div class="log-content" id="logContent">
+      <div class="log-line"><span class="log-time">--:--:--</span> 等待操作...</div>
+    </div>
+  </div>
+
+  <!-- 报告预览 -->
+  <div class="report-panel" id="reportPanel" style="display:none;">
+    <div class="report-header">
+      <span class="report-title">📋 今日报告预览</span>
+      <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px;" onclick="document.getElementById('reportPanel').style.display='none'">关闭</button>
+    </div>
+    <iframe class="report-frame" id="reportFrame" src="about:blank"></iframe>
+  </div>
+</div>
+
+<script>
+const API_BASE = window.location.origin.includes('localhost') ? 'http://localhost:5000' : '';
+let isRunning = false;
+let pollInterval = null;
+
+function now() {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function log(msg, type = 'info') {
+  const el = document.getElementById('logContent');
+  const colorClass = type === 'success' ? 'log-success' : type === 'error' ? 'log-error' : type === 'warn' ? 'log-warn' : 'log-info';
+  el.innerHTML += `<div class="log-line"><span class="log-time">${now()}</span><span class="${colorClass}">${msg}</span></div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('logContent').innerHTML = `<div class="log-line"><span class="log-time">${now()}</span> 日志已清空</div>`;
+}
+
+function setPipelineRunning(running) {
+  isRunning = running;
+  const btn = document.getElementById('btnRunPipeline');
+  const dot = document.getElementById('statusDot');
+  const status = document.getElementById('pipelineStatus');
+
+  document.querySelectorAll('.btn-agent').forEach(b => b.disabled = running);
+
+  if (running) {
+    btn.innerHTML = '<span class="loading-spinner"></span> 流水线运行中...';
+    btn.disabled = true;
+    dot.className = 'status-dot status-running';
+    status.textContent = '运行中';
+    status.style.color = '#f59e0b';
+    log('流水线启动...', 'warn');
+  } else {
+    btn.innerHTML = '<span>▶</span> 运行完整流水线';
+    btn.disabled = false;
+    dot.className = 'status-dot status-idle';
+    status.textContent = '空闲';
+    status.style.color = '#f1f5f9';
+  }
+}
+
+function setNodeState(agentName, state, timeText = '') {
+  const nodeMap = {
+    'DataAgent': 'nodeData',
+    'SignalAgent': 'nodeSignal',
+    'BacktestAgent': 'nodeBacktest',
+    'RiskAgent': 'nodeRisk',
+    'ReportAgent': 'nodeReport',
+  };
+  const nodeId = nodeMap[agentName];
+  if (!nodeId) return;
+  const node = document.getElementById(nodeId);
+  node.classList.remove('active', 'done', 'error');
+  if (state === 'running') node.classList.add('active');
+  if (state === 'success') node.classList.add('done');
+  if (state === 'failed') node.classList.add('error');
+  if (timeText) node.querySelector('.flow-node-time').textContent = timeText;
+}
+
+async function refreshStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/agents/status`);
+    const data = await res.json();
+
+    if (data.pipeline_running) {
+      setPipelineRunning(true);
+    } else {
+      setPipelineRunning(false);
+    }
+
+    // 更新各节点状态
+    const agentStatus = data.pipeline_status?.agent_status || {};
+    for (const [name, info] of Object.entries(agentStatus)) {
+      setNodeState(name, info.state === 'running' ? 'running' : info.state === 'success' ? 'success' : 'idle', info.time?.slice(11, 19) || '');
+    }
+
+    // 更新信号数
+    if (data.current?.agents?.SignalAgent?.success) {
+      document.getElementById('signalDot').className = 'status-dot status-success';
+      // 从报告API获取更详细数据
+    }
+
+    log('状态刷新完成', 'success');
+  } catch (e) {
+    log(`刷新状态失败: ${e.message}`, 'error');
+  }
+}
+
+async function runPipeline() {
+  if (isRunning) return;
+  setPipelineRunning(true);
+
+  // 重置节点状态
+  ['DataAgent','SignalAgent','BacktestAgent','RiskAgent','ReportAgent'].forEach(a => setNodeState(a, ''));
+
+  try {
+    const res = await fetch(`${API_BASE}/api/agents/run`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      log('流水线已启动，后台运行中...', 'info');
+      startPolling();
+    } else {
+      log(`启动失败: ${data.error}`, 'error');
+      setPipelineRunning(false);
+    }
+  } catch (e) {
+    log(`请求失败: ${e.message}`, 'error');
+    setPipelineRunning(false);
+  }
+}
+
+async function runAgent(agentName) {
+  if (isRunning) return;
+  log(`启动 ${agentName}...`, 'info');
+  setNodeState(agentName, 'running');
+
+  try {
+    const res = await fetch(`${API_BASE}/api/agents/run/${agentName}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      log(`${agentName} 已启动`, 'success');
+      setNodeState(agentName, 'success');
+    } else {
+      log(`${agentName} 启动失败: ${data.error}`, 'error');
+      setNodeState(agentName, 'failed');
+    }
+  } catch (e) {
+    log(`${agentName} 请求失败: ${e.message}`, 'error');
+    setNodeState(agentName, 'failed');
+  }
+}
+
+function startPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/agents/status`);
+      const data = await res.json();
+
+      const agentStatus = data.pipeline_status?.agent_status || {};
+      for (const [name, info] of Object.entries(agentStatus)) {
+        setNodeState(name, info.state === 'running' ? 'running' : info.state === 'success' ? 'success' : info.state?.includes('error') ? 'failed' : '');
+      }
+
+      if (!data.pipeline_running && isRunning) {
+        setPipelineRunning(false);
+        log('流水线执行完成！', 'success');
+        loadReport();
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    } catch (e) {
+      // 静默轮询错误
+    }
+  }, 2000);
+}
+
+async function loadReport() {
+  const today = new Date().toISOString().slice(0, 10);
+  const reportPath = `reports/daily_report_${today}.html`;
+
+  // 先尝试从API获取JSON数据
+  try {
+    const res = await fetch(`${API_BASE}/api/agents/report`);
+    const data = await res.json();
+    if (data.success && data.data) {
+      updateCardsFromReport(data.data);
+      document.getElementById('reportPanel').style.display = 'block';
+      document.getElementById('reportFrame').src = reportPath;
+      document.getElementById('reportDot').className = 'status-dot status-success';
+      document.getElementById('reportStatus').textContent = '已生成';
+      log('报告加载完成', 'success');
+      return;
+    }
+  } catch (e) {
+    // fallback: 直接加载文件
+  }
+
+  // 直接尝试加载HTML文件
+  fetch(reportPath)
+    .then(r => {
+      if (r.ok) {
+        document.getElementById('reportPanel').style.display = 'block';
+        document.getElementById('reportFrame').src = reportPath;
+        document.getElementById('reportDot').className = 'status-dot status-success';
+        document.getElementById('reportStatus').textContent = '已生成';
+        log('报告加载完成', 'success');
+      } else {
+        document.getElementById('reportDot').className = 'status-dot status-idle';
+        document.getElementById('reportStatus').textContent = '未生成';
+        log('今日报告尚未生成', 'warn');
+      }
+    })
+    .catch(() => {
+      log('无法加载报告', 'error');
+    });
+}
+
+function updateCardsFromReport(data) {
+  const summary = data.summary || {};
+  const risk = data.risk || {};
+
+  document.getElementById('signalCount').textContent =
+    `${summary.fusion_hits || 0} / ${summary.v4_hits || 0}`;
+  document.getElementById('signalDot').className = 'status-dot status-success';
+
+  const trend = risk.market_trend || '-';
+  document.getElementById('marketStatus').textContent = trend;
+  document.getElementById('marketDot').className =
+    trend === 'bull' ? 'status-dot status-success' :
+    trend === 'bear' ? 'status-dot status-error' : 'status-dot status-idle';
+
+  const pos = (risk.position_advice?.suggested_position || 0) * 100;
+  document.getElementById('marketDetail').textContent = `建议仓位: ${pos.toFixed(0)}%`;
+}
+
+// 初始加载
+refreshStatus();
+log('Agent流水线控制台已就绪', 'success');
+log('后端API地址: ' + API_BASE, 'info');
+</script>
+</body>
+</html>

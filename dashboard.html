@@ -1,0 +1,1526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIQuant 量化投资系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+        :root {
+            --primary: #1a73e8;
+            --success: #34a853;
+            --warning: #fbbc04;
+            --danger: #ea4335;
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --bg-hover: #21262d;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .navbar {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .navbar-brand {
+            font-size: 1.5rem;
+            font-weight: bold;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .navbar-nav {
+            display: flex;
+            gap: 20px;
+            list-style: none;
+        }
+
+        .navbar-nav a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 8px 15px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .navbar-nav a:hover, .navbar-nav a.active {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 30px;
+        }
+
+        .header-section {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+        }
+
+        .header-section h1 { font-size: 2.2rem; margin-bottom: 6px; }
+        .header-section p { font-size: 1rem; opacity: 0.9; }
+
+        /* ---- Status Bar ---- */
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .status-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.2s;
+        }
+
+        .status-card:hover { border-color: var(--primary); }
+
+        .status-indicator {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .status-idle { background: #64748b; }
+        .status-running { background: #f59e0b; animation: pulse 1.5s infinite; }
+        .status-success { background: #22c55e; }
+        .status-error { background: #ef4444; }
+        .status-warn { background: #f59e0b; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .status-info { flex: 1; min-width: 0; }
+        .status-label { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .status-value { font-size: 1.1rem; font-weight: 700; }
+        .status-detail { font-size: 0.75rem; color: var(--text-secondary); margin-top: 1px; }
+
+        .status-value.success { color: var(--success); }
+        .status-value.danger { color: var(--danger); }
+        .status-value.warning { color: var(--warning); }
+
+        /* ---- Action Bar ---- */
+        .action-bar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 9px 18px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-family: inherit;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #3b82f6, #6366f1);
+            color: #fff;
+        }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+        .btn-success { background: var(--success); color: #fff; }
+        .btn-success:hover { opacity: 0.9; }
+
+        .btn-warning { background: var(--warning); color: #000; }
+        .btn-warning:hover { opacity: 0.9; }
+
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+        .btn-secondary:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        .btn-agent {
+            padding: 5px 12px;
+            font-size: 0.75rem;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-dark);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-agent:hover { border-color: var(--primary); color: var(--primary); }
+        .btn-agent:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* ---- Tabs ---- */
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+            flex-wrap: wrap;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            font-size: 0.9rem;
+            white-space: nowrap;
+        }
+
+        .tab:hover { background: var(--bg-hover); }
+        .tab.active { background: var(--primary); color: white; border-color: var(--primary); }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* ---- Pipeline Flow ---- */
+        .pipeline-flow {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .pipeline-title { font-size: 1rem; font-weight: 600; margin-bottom: 18px; }
+        .flow-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .flow-node {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            padding: 14px 18px;
+            background: var(--bg-dark);
+            border: 2px solid var(--border);
+            border-radius: 10px;
+            min-width: 110px;
+            transition: all 0.3s;
+        }
+        .flow-node.active { border-color: #3b82f6; box-shadow: 0 0 14px rgba(59,130,246,0.25); }
+        .flow-node.done { border-color: #22c55e; }
+        .flow-node.error { border-color: #ef4444; }
+        .flow-node-name { font-size: 0.85rem; font-weight: 600; }
+        .flow-node-time { font-size: 0.7rem; color: var(--text-secondary); }
+        .flow-arrow { color: #475569; font-size: 1.2rem; }
+
+        .pipeline-parallel {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: center;
+        }
+        .pipeline-parallel-label {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .agent-quick-actions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 18px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* ---- Log Panel ---- */
+        .log-panel {
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .log-title { font-size: 0.9rem; font-weight: 600; }
+        .log-content {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.8rem;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .log-entry { padding: 2px 0; }
+        .log-time { color: #475569; margin-right: 8px; font-size: 0.75rem; }
+        .log-info { color: #38bdf8; }
+        .log-success { color: #22c55e; }
+        .log-error { color: #ef4444; }
+        .log-warn { color: #f59e0b; }
+
+        /* ---- Report Frame ---- */
+        .report-frame {
+            width: 100%;
+            height: 720px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: #fff;
+        }
+
+        /* ---- Recommendation Table ---- */
+        .rec-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .rec-table th, .rec-table td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85rem;
+        }
+        .rec-table th {
+            background: var(--bg-dark);
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .rec-table tr:hover { background: var(--bg-hover); }
+        .rec-table .score-high { color: #ef4444; font-weight: 700; }
+        .rec-table .score-mid { color: #f59e0b; font-weight: 700; }
+        .rec-table .score-low { color: var(--text-secondary); }
+        .rec-table .risk-warn { color: #f59e0b; font-size: 0.8rem; }
+        .rec-table .risk-ok { color: #22c55e; font-size: 0.8rem; }
+
+        .rec-strategy-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.72rem;
+            font-weight: 500;
+        }
+        .rec-strategy-badge.fusion { background: rgba(102,126,234,0.2); color: #667eea; }
+        .rec-strategy-badge.v4 { background: rgba(78,205,196,0.2); color: #4ecdc4; }
+
+        .rec-summary {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .rec-summary-item {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 16px;
+            text-align: center;
+            min-width: 90px;
+        }
+        .rec-summary-item .rec-num { font-size: 1.4rem; font-weight: 700; }
+        .rec-summary-item .rec-label { font-size: 0.72rem; color: var(--text-secondary); }
+
+        .non-trading-banner {
+            background: rgba(245,158,11,0.15);
+            border: 1px solid rgba(245,158,11,0.3);
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-bottom: 14px;
+            color: #f59e0b;
+            font-size: 0.85rem;
+        }
+
+        .loading-container {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+        .loading-spinner {
+            display: inline-block;
+            width: 28px; height: 28px;
+            border: 3px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ---- Badges ---- */
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        .badge-success { background: rgba(52,168,83,0.2); color: var(--success); }
+        .badge-warning { background: rgba(251,188,4,0.2); color: var(--warning); }
+        .badge-danger { background: rgba(234,67,53,0.2); color: var(--danger); }
+        .badge-info { background: rgba(26,115,232,0.2); color: var(--primary); }
+
+        /* ---- Modal ---- */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.active { display: flex; }
+        .modal-content {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 28px;
+            max-width: 500px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal-content h2 {
+            margin-bottom: 16px;
+            font-size: 1.2rem;
+        }
+        .form-group { margin-bottom: 14px; }
+        .form-group label { display: block; margin-bottom: 4px; color: var(--text-secondary); font-size: 0.85rem; }
+        .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 8px 10px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            font-family: inherit;
+        }
+        .form-group textarea { resize: vertical; min-height: 60px; }
+        .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 768px) {
+            .container { padding: 15px; }
+            .status-bar { grid-template-columns: repeat(2, 1fr); }
+            .flow-row { flex-direction: column; }
+            .flow-arrow { transform: rotate(90deg); }
+            .navbar { flex-direction: column; gap: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-brand">AIQuant 量化投资系统</div>
+        <ul class="navbar-nav">
+            <li><a href="/dashboard" class="active">控制台</a></li>
+            <li><a href="/market">实时行情</a></li>
+            <li><a href="/quant">量化选股</a></li>
+            <li><a href="/api/health" target="_blank">API健康</a></li>
+        </ul>
+    </nav>
+
+    <div class="container">
+        <div class="header-section">
+            <h1>AIQuant 控制台</h1>
+            <p>智能量化 · 流水线执行 · 每日推荐</p>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('overview')">今日概览</div>
+            <div class="tab" onclick="switchTab('console')">运行控制台</div>
+            <div class="tab" onclick="switchTab('report')">报告</div>
+            <div class="tab" onclick="switchTab('logs')">操作日志</div>
+        </div>
+
+        <!-- Tab: 今日概览 -->
+        <div id="tab-overview" class="tab-content active">
+            <!-- Status Bar -->
+            <div class="status-bar">
+                <div class="status-card">
+                    <span class="status-indicator" id="sysDot"></span>
+                    <div class="status-info">
+                        <div class="status-label">系统状态</div>
+                        <div class="status-value success" id="systemStatus">运行中</div>
+                    </div>
+                </div>
+                <div class="status-card">
+                    <span class="status-indicator status-idle" id="pipelineDot"></span>
+                    <div class="status-info">
+                        <div class="status-label">流水线状态</div>
+                        <div class="status-value" id="pipelineStatus">空闲</div>
+                        <div class="status-detail" id="pipelineDetail">上次运行: -</div>
+                    </div>
+                </div>
+                <div class="status-card">
+                    <span class="status-indicator status-idle" id="signalDot"></span>
+                    <div class="status-info">
+                        <div class="status-label">今日信号</div>
+                        <div class="status-value" id="signalCount">-</div>
+                        <div class="status-detail">融合 / v4 超跌</div>
+                    </div>
+                </div>
+                <div class="status-card">
+                    <span class="status-indicator status-idle" id="marketDot"></span>
+                    <div class="status-info">
+                        <div class="status-label">市场环境</div>
+                        <div class="status-value" id="marketStatus">-</div>
+                        <div class="status-detail" id="marketDetail">建议仓位: -</div>
+                    </div>
+                </div>
+                <div class="status-card">
+                    <span class="status-indicator status-idle" id="reportDot"></span>
+                    <div class="status-info">
+                        <div class="status-label">今日报告</div>
+                        <div class="status-value" id="reportStatus">-</div>
+                        <div class="status-detail" id="reportDetail">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recommendations -->
+            <div id="recommendationsContainer">
+                <div class="loading-container"><span class="loading-spinner"></span>加载今日推荐...</div>
+            </div>
+        </div>
+
+        <!-- Tab: 运行控制台 -->
+        <div id="tab-console" class="tab-content">
+            <!-- Action Bar -->
+            <div class="action-bar">
+                <button class="btn btn-primary" id="btnRunPipeline" onclick="runPipeline()">▶ 运行完整流水线</button>
+                <button class="btn btn-success" onclick="openIntentModal()">📝 设置策略意图</button>
+                <button class="btn btn-warning" onclick="runAgent('SignalAgent')">🔍 快速扫描</button>
+                <button class="btn btn-secondary" onclick="refreshAll()">🔄 刷新状态</button>
+                <button class="btn btn-secondary" onclick="showReport()">📄 查看报告</button>
+                <span style="color:var(--text-secondary);font-size:0.8rem;margin-left:8px;">单独运行:</span>
+                <button class="btn-agent" onclick="runAgent('DataAgent')" id="btnData">Data</button>
+                <button class="btn-agent" onclick="runAgent('SignalAgent')" id="btnSignal">Signal</button>
+                <button class="btn-agent" onclick="runAgent('BacktestAgent')" id="btnBacktest">Backtest</button>
+                <button class="btn-agent" onclick="runAgent('RiskAgent')" id="btnRisk">Risk</button>
+                <button class="btn-agent" onclick="runAgent('ReportAgent')" id="btnReport">Report</button>
+            </div>
+
+            <div class="pipeline-flow">
+                <div class="pipeline-title">执行流程</div>
+                <div class="flow-row" id="flowRow">
+                    <div class="flow-node" id="nodeData">
+                        <div class="flow-node-name">👑 DataAgent</div>
+                        <div class="flow-node-time">-</div>
+                    </div>
+                    <span class="flow-arrow">→</span>
+                    <div class="flow-node" id="nodeSignal">
+                        <div class="flow-node-name">📜 SignalAgent</div>
+                        <div class="flow-node-time">-</div>
+                    </div>
+                    <span class="flow-arrow">→</span>
+                    <div class="pipeline-parallel">
+                        <span class="pipeline-parallel-label">并行</span>
+                        <div style="display:flex;gap:8px">
+                            <div class="flow-node" id="nodeBacktest">
+                                <div class="flow-node-name">🔬 BacktestAgent</div>
+                                <div class="flow-node-time">-</div>
+                            </div>
+                            <div class="flow-node" id="nodeRisk">
+                                <div class="flow-node-name">⚖️ RiskAgent</div>
+                                <div class="flow-node-time">-</div>
+                            </div>
+                        </div>
+                    </div>
+                    <span class="flow-arrow">→</span>
+                    <div class="flow-node" id="nodeReport">
+                        <div class="flow-node-name">📊 ReportAgent</div>
+                        <div class="flow-node-time">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="log-panel">
+                <div class="log-header">
+                    <span class="log-title">流水线执行日志</span>
+                    <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px;" onclick="clearPipelineLog()">清空</button>
+                </div>
+                <div class="log-content" id="pipelineLogContent">
+                    <div class="log-entry"><span class="log-time">--:--:--</span> 等待操作...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: 报告 -->
+        <div id="tab-report" class="tab-content">
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+                <label style="font-size:0.85rem;color:#8b949e;">选择日期:</label>
+                <input type="date" id="reportDatePicker" onchange="onReportDateChange()" style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#e6edf3;font-size:0.85rem;">
+                <button class="btn btn-primary" style="padding:6px 16px;font-size:0.85rem;" onclick="viewReportByDate()" id="btnViewReport">查看报告</button>
+                <button class="btn btn-warning" style="padding:6px 16px;font-size:0.85rem;display:none;" onclick="runPipelineForDate()" id="btnRunForDate">生成报告</button>
+                <span style="font-size:0.82rem;color:#8b949e;" id="reportDateStatus"></span>
+            </div>
+            <iframe class="report-frame" id="reportFrame" src="about:blank"></iframe>
+        </div>
+
+        <!-- Tab: 操作日志 -->
+        <div id="tab-logs" class="tab-content">
+            <div class="log-panel">
+                <div class="log-header">
+                    <span class="log-title">系统操作日志</span>
+                    <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px;" onclick="clearLog()">清空</button>
+                </div>
+                <div class="log-content" id="logContainer">
+                    <div class="log-entry"><span class="log-time">--:--:--</span> 系统启动，等待数据加载...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Intent Modal -->
+    <div class="modal" id="intentModal">
+        <div class="modal-content">
+            <h2>设置策略意图</h2>
+            <form onsubmit="submitIntent(event)">
+                <div class="form-group">
+                    <label>策略立场</label>
+                    <select id="intentStance">
+                        <option value="bullish">多头（看涨）</option>
+                        <option value="neutral" selected>中性（观望）</option>
+                        <option value="bearish">空头（看跌）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>风险偏好</label>
+                    <select id="intentRisk">
+                        <option value="aggressive">激进</option>
+                        <option value="moderate" selected>中性</option>
+                        <option value="conservative">保守</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>备注</label>
+                    <textarea id="intentNotes" placeholder="可选备注..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeIntentModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">确认</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- K-line Chart Modal -->
+    <div class="modal" id="klineModal">
+        <div class="modal-content" style="max-width:960px;width:95%;max-height:90vh;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h2 id="klineTitle" style="margin:0;">K线图</h2>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn-agent" onclick="switchKlinePeriod('250')" id="btnPeriod250">一年</button>
+                    <button class="btn-agent" onclick="switchKlinePeriod('120')" id="btnPeriod120">半年</button>
+                    <button class="btn-agent" onclick="switchKlinePeriod('60')" id="btnPeriod60">60日</button>
+                    <button class="btn-agent" onclick="switchKlinePeriod('30')" id="btnPeriod30">30日</button>
+                    <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px;" onclick="closeKlineModal()">关闭</button>
+                </div>
+            </div>
+            <div id="klineChart" style="width:100%;height:520px;"></div>
+        </div>
+    </div>
+
+    <script>
+    const API_BASE = '/api/governance';
+    let isRunning = false;
+    let pollInterval = null;
+    let pipelineCompleteCallback = null;
+
+    // ── Utilities ──────────────────────────────
+    function now() {
+        return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    async function fetchJSON(url) {
+        try {
+            const res = await fetch(url);
+            return await res.json();
+        } catch (err) {
+            addLog('error', `请求失败: ${url} - ${err.message}`);
+            return null;
+        }
+    }
+
+    function addLog(type, message) {
+        const container = document.getElementById('logContainer');
+        const time = now();
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        entry.innerHTML = `<span class="log-time">${time}</span><span class="log-${type}">${message}</span>`;
+        container.appendChild(entry);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function addPipelineLog(type, message) {
+        const container = document.getElementById('pipelineLogContent');
+        const time = now();
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        entry.innerHTML = `<span class="log-time">${time}</span><span class="log-${type}">${message}</span>`;
+        container.appendChild(entry);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function clearLog() {
+        document.getElementById('logContainer').innerHTML = `<div class="log-entry"><span class="log-time">${now()}</span> 日志已清空</div>`;
+    }
+
+    function clearPipelineLog() {
+        document.getElementById('pipelineLogContent').innerHTML = `<div class="log-entry"><span class="log-time">${now()}</span> 日志已清空</div>`;
+    }
+
+    // ── Tab Switching ──────────────────────────
+    function switchTab(tabName) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+        const tabs = document.querySelectorAll('.tab');
+        for (const tab of tabs) {
+            const onclick = tab.getAttribute('onclick') || '';
+            if (onclick.includes(`'${tabName}'`) || onclick.includes(`"${tabName}"`)) {
+                tab.classList.add('active');
+                break;
+            }
+        }
+        document.getElementById(`tab-${tabName}`).classList.add('active');
+    }
+
+    // ── Status Refresh ─────────────────────────
+    async function refreshAll() {
+        addLog('info', '刷新全部状态...');
+        await Promise.all([refreshPipelineStatus(), loadRecommendations()]);
+        addLog('success', '状态刷新完成');
+    }
+
+    // ── Pipeline Status ────────────────────────
+    async function refreshPipelineStatus() {
+        try {
+            const res = await fetchJSON('/api/agents/status');
+            if (!res) return;
+
+            if (res.pipeline_running) {
+                setPipelineRunning(true);
+            } else if (!isRunning) {
+                updatePipelineUI(false, '空闲', 'status-idle');
+            }
+
+            const agentStatus = res.pipeline_status?.agent_status || {};
+            for (const [name, info] of Object.entries(agentStatus)) {
+                const state = info.state === 'running' ? 'running' : info.state === 'success' ? 'success' : 'idle';
+                const timeText = info.time?.slice(11, 19) || '';
+                setNodeState(name, state, timeText);
+            }
+        } catch (e) {
+            // silent
+        }
+    }
+
+    function setPipelineRunning(running) {
+        isRunning = running;
+        const btn = document.getElementById('btnRunPipeline');
+        const dot = document.getElementById('pipelineDot');
+        const status = document.getElementById('pipelineStatus');
+
+        document.querySelectorAll('.btn-agent').forEach(b => b.disabled = running);
+
+        if (running) {
+            btn.innerHTML = '<span class="loading-spinner" style="width:14px;height:14px;border-width:2px;"></span> 流水线运行中...';
+            btn.disabled = true;
+            dot.className = 'status-indicator status-running';
+            status.textContent = '运行中';
+            status.className = 'status-value warning';
+            addPipelineLog('warn', '流水线启动...');
+        } else {
+            btn.innerHTML = '▶ 运行完整流水线';
+            btn.disabled = false;
+        }
+    }
+
+    function setNodeState(agentName, state, timeText) {
+        const nodeMap = {
+            'DataAgent': 'nodeData',
+            'SignalAgent': 'nodeSignal',
+            'BacktestAgent': 'nodeBacktest',
+            'RiskAgent': 'nodeRisk',
+            'ReportAgent': 'nodeReport',
+        };
+        const nodeId = nodeMap[agentName];
+        if (!nodeId) return;
+        const node = document.getElementById(nodeId);
+        if (!node) return;
+        node.classList.remove('active', 'done', 'error');
+        if (state === 'running') node.classList.add('active');
+        if (state === 'success') node.classList.add('done');
+        if (state === 'failed') node.classList.add('error');
+        if (timeText) {
+            const timeEl = node.querySelector('.flow-node-time');
+            if (timeEl) timeEl.textContent = timeText;
+        }
+    }
+
+    function updatePipelineUI(running, statusText, dotClass) {
+        document.getElementById('pipelineStatus').textContent = statusText;
+        document.getElementById('pipelineStatus').className = running ? 'status-value warning' : 'status-value';
+        document.getElementById('pipelineDot').className = 'status-indicator ' + dotClass;
+    }
+
+    // ── Pipeline Actions ───────────────────────
+    async function runPipeline() {
+        if (isRunning) return;
+        setPipelineRunning(true);
+
+        // Reset nodes
+        ['DataAgent', 'SignalAgent', 'BacktestAgent', 'RiskAgent', 'ReportAgent'].forEach(a => setNodeState(a, ''));
+        switchTab('console');
+
+        try {
+            const res = await fetch('/api/agents/run', { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                addPipelineLog('info', '流水线已启动，后台运行中...');
+                addLog('info', '流水线已启动');
+                startPolling();
+            } else {
+                addPipelineLog('error', `启动失败: ${data.error}`);
+                addLog('error', `流水线启动失败: ${data.error}`);
+                setPipelineRunning(false);
+            }
+        } catch (e) {
+            addPipelineLog('error', `请求失败: ${e.message}`);
+            setPipelineRunning(false);
+        }
+    }
+
+    async function runAgent(agentName) {
+        if (isRunning) {
+            addLog('warn', '流水线运行中，请等待完成');
+            return;
+        }
+        const labelMap = {
+            'DataAgent': '数据管家',
+            'SignalAgent': '信号猎手',
+            'BacktestAgent': '回测验证',
+            'RiskAgent': '风控官',
+            'ReportAgent': '报告生成',
+        };
+        addLog('info', `启动 ${agentName}（${labelMap[agentName] || agentName}）...`);
+        addPipelineLog('info', `启动 ${agentName}...`);
+        setNodeState(agentName, 'running');
+
+        try {
+            const res = await fetch(`/api/agents/run/${agentName}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                addLog('success', `${agentName} 已启动，后台执行中`);
+                addPipelineLog('success', `${agentName} 已启动`);
+
+                let pollCount = 0;
+                const maxPolls = 120;
+                const poll = setInterval(async () => {
+                    pollCount++;
+                    try {
+                        const sr = await fetchJSON('/api/agents/status');
+                        if (!sr || !sr.pipeline_running || pollCount >= maxPolls) {
+                            clearInterval(poll);
+                            setNodeState(agentName, pollCount >= maxPolls ? 'failed' : 'success', '');
+                            addLog('success', `${agentName} 执行完成`);
+                            addPipelineLog('success', `${agentName} 完成`);
+                            if (agentName === 'SignalAgent' || agentName === 'ReportAgent') {
+                                await loadRecommendations();
+                            }
+                            if (agentName === 'ReportAgent') {
+                                updateReportStatus();
+                            }
+                        }
+                    } catch (e) { clearInterval(poll); }
+                }, 2000);
+            } else {
+                addLog('error', `${agentName} 启动失败: ${data.error}`);
+                addPipelineLog('error', `${agentName} 失败: ${data.error}`);
+                setNodeState(agentName, 'failed');
+            }
+        } catch (e) {
+            addLog('error', `${agentName} 请求失败: ${e.message}`);
+            setNodeState(agentName, 'failed');
+        }
+    }
+
+    function startPolling(cb) {
+        if (cb) pipelineCompleteCallback = cb;
+        if (pollInterval) clearInterval(pollInterval);
+        pollInterval = setInterval(async () => {
+            try {
+                const res = await fetchJSON('/api/agents/status');
+                if (!res) return;
+
+                const agentStatus = res.pipeline_status?.agent_status || {};
+                for (const [name, info] of Object.entries(agentStatus)) {
+                    const state = info.state === 'running' ? 'running'
+                        : info.state === 'success' ? 'success'
+                        : info.state?.includes('error') ? 'failed' : '';
+                    const timeText = info.time?.slice(11, 19) || '';
+                    setNodeState(name, state, timeText);
+                }
+
+                if (!res.pipeline_running && isRunning) {
+                    setPipelineRunning(false);
+                    updatePipelineUI(false, '空闲', 'status-success');
+                    document.getElementById('pipelineDetail').textContent = `上次运行: ${now()}`;
+                    document.getElementById('pipelineDot').className = 'status-indicator status-success';
+                    addPipelineLog('success', '流水线执行完成！');
+                    addLog('success', '流水线执行完成');
+                    updateReportStatus();
+                    await loadRecommendations();
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    if (pipelineCompleteCallback) {
+                        const cb = pipelineCompleteCallback;
+                        pipelineCompleteCallback = null;
+                        cb();
+                    }
+                }
+            } catch (e) { /* silent */ }
+        }, 2000);
+    }
+
+    // ── Report ─────────────────────────────────
+    async function updateReportStatus(dateStr) {
+        const targetDate = dateStr || new Date().toISOString().slice(0, 10);
+        const reportPath = `reports/daily_report_${targetDate}.html`;
+
+        try {
+            const res = await fetchJSON(`/api/agents/report?date=${targetDate}`);
+            if (res && res.success && res.data) {
+                document.getElementById('reportDot').className = 'status-indicator status-success';
+                document.getElementById('reportStatus').textContent = '已生成';
+                document.getElementById('reportDetail').textContent = `日期: ${res.date}`;
+                document.getElementById('reportFrame').src = reportPath;
+                return;
+            }
+        } catch (e) { /* fall through */ }
+
+        try {
+            const check = await fetch(reportPath);
+            if (check.ok) {
+                document.getElementById('reportDot').className = 'status-indicator status-success';
+                document.getElementById('reportStatus').textContent = '已生成';
+                document.getElementById('reportDetail').textContent = targetDate;
+                document.getElementById('reportFrame').src = reportPath;
+                return;
+            }
+        } catch (e) { /* fall through */ }
+
+        document.getElementById('reportDot').className = 'status-indicator status-idle';
+        document.getElementById('reportStatus').textContent = '未生成';
+        document.getElementById('reportDetail').textContent = '运行流水线生成报告';
+    }
+
+    function initReportDatePicker() {
+        const today = new Date().toISOString().slice(0, 10);
+        const picker = document.getElementById('reportDatePicker');
+        picker.value = today;
+        picker.max = today;
+    }
+
+    function onReportDateChange() {
+        document.getElementById('btnRunForDate').style.display = 'none';
+        document.getElementById('reportDateStatus').textContent = '';
+    }
+
+    async function viewReportByDate() {
+        const dateVal = document.getElementById('reportDatePicker').value;
+        if (!dateVal) return;
+
+        const statusEl = document.getElementById('reportDateStatus');
+        const runBtn = document.getElementById('btnRunForDate');
+        const frame = document.getElementById('reportFrame');
+
+        statusEl.textContent = '加载中...';
+        statusEl.style.color = '#8b949e';
+        runBtn.style.display = 'none';
+
+        const res = await fetchJSON(`/api/agents/report?date=${dateVal}`);
+        if (res && res.success) {
+            statusEl.textContent = '已生成';
+            statusEl.style.color = '#34a853';
+            frame.src = `reports/daily_report_${dateVal}.html`;
+        } else {
+            statusEl.textContent = res?.error || '报告不存在';
+            statusEl.style.color = '#fbbc04';
+            runBtn.style.display = 'inline-block';
+            frame.src = 'about:blank';
+        }
+    }
+
+    async function runPipelineForDate() {
+        if (isRunning) return;
+        const dateVal = document.getElementById('reportDatePicker').value;
+        if (!dateVal) return;
+
+        setPipelineRunning(true);
+        document.getElementById('btnRunForDate').style.display = 'none';
+        document.getElementById('reportDateStatus').textContent = '流水线运行中...';
+        document.getElementById('reportDateStatus').style.color = '#fbbc04';
+
+        ['DataAgent', 'SignalAgent', 'BacktestAgent', 'RiskAgent', 'ReportAgent'].forEach(a => setNodeState(a, ''));
+        switchTab('console');
+
+        try {
+            const res = await fetch('/api/agents/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ run_date: dateVal })
+            });
+            const data = await res.json();
+            if (data.success) {
+                addPipelineLog('info', `流水线已启动 (日期: ${dateVal})`);
+                addLog('info', `流水线已启动 (日期: ${dateVal})`);
+                startPolling(() => {
+                    switchTab('report');
+                    viewReportByDate();
+                });
+            } else {
+                addPipelineLog('error', `启动失败: ${data.error}`);
+                addLog('error', `流水线启动失败: ${data.error}`);
+                setPipelineRunning(false);
+                document.getElementById('reportDateStatus').textContent = '启动失败';
+                document.getElementById('reportDateStatus').style.color = '#ea4335';
+            }
+        } catch (e) {
+            addPipelineLog('error', `请求失败: ${e.message}`);
+            setPipelineRunning(false);
+        }
+    }
+
+    function showReport() {
+        updateReportStatus();
+        switchTab('report');
+    }
+
+    function hideReport() {
+        // Report is now displayed in a dedicated tab; no close action needed
+    }
+
+    // ── Recommendations ────────────────────────
+    async function loadRecommendations() {
+        const container = document.getElementById('recommendationsContainer');
+        const today = new Date().toISOString().slice(0, 10);
+
+        const [reportRes, fusionRes, v4Res] = await Promise.all([
+            fetchJSON('/api/agents/report'),
+            fetchJSON(`/api/signals/history?end_date=${today}&min_score=0&limit=50`),
+            fetchJSON(`/api/signals/history_v4?end_date=${today}&min_score=0&limit=20`)
+        ]);
+
+        let recommendations = [];
+        let reportMeta = null;
+
+        if (reportRes && reportRes.success && reportRes.data) {
+            reportMeta = reportRes.data;
+            recommendations = reportRes.data.recommendations || [];
+        }
+
+        if (recommendations.length === 0 && fusionRes && fusionRes.groups) {
+            const dates = fusionRes.dates || [];
+            for (const dt of dates) {
+                const items = fusionRes.groups[dt] || [];
+                for (const item of items) {
+                    recommendations.push({
+                        code: item.code,
+                        name: item.name,
+                        price: item.price,
+                        score: item.fusion_score || item.score || 0,
+                        strategy: 'fusion',
+                        trigger_list: item.trigger_list || item.triggered || [],
+                        stop_loss: item.stop_loss,
+                        take_profit: item.take_profit,
+                        backtest: {},
+                        risk: { flags: [] },
+                        warning: false
+                    });
+                }
+                if (recommendations.length > 0) break;
+            }
+        }
+
+        if (recommendations.length === 0 && v4Res && v4Res.groups) {
+            const dates = v4Res.dates || [];
+            for (const dt of dates) {
+                const items = v4Res.groups[dt] || [];
+                for (const item of items) {
+                    recommendations.push({
+                        code: item.symbol || item.code,
+                        name: item.name,
+                        price: item.price,
+                        score: item.score || 0,
+                        strategy: 'v4_oversold',
+                        trigger_list: item.triggered || [],
+                        backtest: {},
+                        risk: { flags: [] },
+                        warning: false
+                    });
+                }
+                if (recommendations.length > 0) break;
+            }
+        }
+
+        // Deduplicate by code (safety net)
+        const seenCodes = new Set();
+        recommendations = recommendations.filter(r => {
+            if (seenCodes.has(r.code)) return false;
+            seenCodes.add(r.code);
+            return true;
+        });
+
+        // Update signal count card
+        if (recommendations.length > 0) {
+            const fCount = recommendations.filter(r => r.strategy === 'fusion').length;
+            const v4Count = recommendations.filter(r => r.strategy !== 'fusion').length;
+            document.getElementById('signalCount').textContent = `${fCount} / ${v4Count}`;
+            document.getElementById('signalDot').className = 'status-indicator status-success';
+        }
+
+        // Update market card from report
+        if (reportMeta && reportMeta.risk) {
+            const risk = reportMeta.risk;
+            const trend = risk.market_trend || '-';
+            document.getElementById('marketStatus').textContent = trend;
+            document.getElementById('marketDot').className = trend === 'bull' ? 'status-indicator status-success'
+                : trend === 'bear' ? 'status-indicator status-error' : 'status-indicator status-idle';
+            const pos = (risk.position_advice?.suggested_position || 0) * 100;
+            document.getElementById('marketDetail').textContent = `建议仓位: ${pos.toFixed(0)}%`;
+        }
+
+        renderRecommendationTable(container, recommendations, reportMeta, today);
+    }
+
+    function renderRecommendationTable(container, recs, reportMeta, today) {
+        if (recs.length === 0) {
+            const msg = reportMeta
+                ? '流水线已完成，但暂无符合条件的推荐股票'
+                : '暂无推荐数据，请执行扫描';
+            container.innerHTML = `<div class="loading-container">${msg}</div>`;
+            return;
+        }
+
+        const isTrading = reportMeta ? reportMeta.is_trading_day : true;
+        const effectiveDate = reportMeta ? reportMeta.effective_trade_date : today;
+
+        let html = '';
+
+        if (!isTrading && effectiveDate !== today) {
+            html += `<div class="non-trading-banner">⚠️ 非交易日，数据基于最近交易日 <b>${effectiveDate}</b></div>`;
+        }
+
+        const fusionCount = recs.filter(r => r.strategy === 'fusion').length;
+        const v4Count = recs.filter(r => r.strategy !== 'fusion').length;
+
+        html += `
+            <div class="rec-summary">
+                <div class="rec-summary-item">
+                    <div class="rec-num">${recs.length}</div>
+                    <div class="rec-label">总推荐数</div>
+                </div>
+                <div class="rec-summary-item">
+                    <div class="rec-num" style="color:#667eea">${fusionCount}</div>
+                    <div class="rec-label">融合策略</div>
+                </div>
+                <div class="rec-summary-item">
+                    <div class="rec-num" style="color:#4ecdc4">${v4Count}</div>
+                    <div class="rec-label">v4超跌</div>
+                </div>
+        `;
+
+        if (reportMeta && reportMeta.risk && reportMeta.risk.overall_risk) {
+            const rl = reportMeta.risk.overall_risk;
+            const riskLabel = { low: '低风险', medium: '中等风险', high: '高风险' }[rl] || rl;
+            const riskColor = { low: '#22c55e', medium: '#f59e0b', high: '#ef4444' }[rl] || 'var(--text-secondary)';
+            html += `<div class="rec-summary-item"><div class="rec-num" style="color:${riskColor}">${riskLabel}</div><div class="rec-label">整体风险</div></div>`;
+        }
+
+        html += `</div>`;
+
+        html += `
+            <table class="rec-table">
+                <thead>
+                    <tr><th>股票</th><th>策略</th><th>评分</th><th>现价</th><th>触发条件</th><th>止损/止盈</th><th>回测胜率</th><th>风险</th></tr>
+                </thead>
+                <tbody>
+        `;
+
+        for (const rec of recs) {
+            const strategyLabel = rec.strategy === 'fusion' ? '融合' : 'v4超跌';
+            const strategyCls = rec.strategy === 'fusion' ? 'fusion' : 'v4';
+            const score = rec.score || 0;
+            const scoreCls = score >= 40 ? 'score-high' : score >= 25 ? 'score-mid' : 'score-low';
+            const trigger = (rec.trigger_list || []).join(' · ') || '-';
+            const stopLoss = rec.stop_loss ? rec.stop_loss.toFixed(2) : '-';
+            const takeProfit = rec.take_profit ? rec.take_profit.toFixed(2) : '-';
+            const bt = rec.backtest || {};
+            const winRate = bt.win_rate ? (bt.win_rate * 100).toFixed(1) + '%' : '-';
+            const riskFlags = rec.risk ? (rec.risk.flags || []) : [];
+            const riskText = riskFlags.length > 0
+                ? '<span class="risk-warn">⚠ ' + riskFlags.join(', ') + '</span>'
+                : '<span class="risk-ok">正常</span>';
+
+            html += `
+                <tr>
+                    <td>
+                        <a href="javascript:void(0)" onclick="showKline('${rec.code}', '${(rec.name || rec.code).replace(/'/g, "\\'")}')" style="color:var(--primary);text-decoration:none;font-weight:700;">
+                            ${rec.code}
+                        </a>
+                        <br><small style="color:var(--text-secondary)">${rec.name || rec.code}</small>
+                    </td>
+                    <td><span class="rec-strategy-badge ${strategyCls}">${strategyLabel}</span></td>
+                    <td class="${scoreCls}">${score.toFixed(1)}</td>
+                    <td>${typeof rec.price === 'number' ? rec.price.toFixed(2) : rec.price || '-'}</td>
+                    <td style="font-size:0.8rem;max-width:160px">${trigger}</td>
+                    <td style="font-size:0.8rem">${stopLoss} / ${takeProfit}</td>
+                    <td>${winRate}</td>
+                    <td>${riskText}</td>
+                </tr>
+            `;
+        }
+
+        html += `</tbody></table>`;
+        html += `<p style="color:var(--text-secondary);font-size:0.75rem;margin-top:12px;text-align:center;">数据基于最近交易日 | 仅供参考，投资有风险</p>`;
+        container.innerHTML = html;
+
+        const topNames = recs.slice(0, 3).map(r => r.code + ' ' + r.name).join(', ');
+        addLog('info', `推荐列表加载完成: ${recs.length} 只，Top3: ${topNames}`);
+    }
+
+    // ── Intent Modal ───────────────────────────
+    function openIntentModal() {
+        document.getElementById('intentModal').classList.add('active');
+    }
+
+    function closeIntentModal() {
+        document.getElementById('intentModal').classList.remove('active');
+    }
+
+    async function submitIntent(e) {
+        e.preventDefault();
+        const stance = document.getElementById('intentStance').value;
+        const risk = document.getElementById('intentRisk').value;
+        const notes = document.getElementById('intentNotes').value;
+
+        addLog('info', `设置策略意图: stance=${stance}, risk=${risk}`);
+        const res = await fetch(`${API_BASE}/decision`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stance, risk, notes })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            addLog('success', `策略意图设置成功: ${data.plan.plan_id}`);
+            closeIntentModal();
+        } else {
+            addLog('error', `设置失败: ${data.error || '未知错误'}`);
+        }
+    }
+
+    // ── K-line Chart ───────────────────────────
+    let klineChartInstance = null;
+    let klineCurrentCode = '';
+    let klineCurrentName = '';
+    let klineCurrentDays = 250;
+
+    async function showKline(code, name) {
+        klineCurrentCode = code;
+        klineCurrentName = name;
+        klineCurrentDays = 250;
+        document.getElementById('klineTitle').textContent = `${code} ${name} - K线图`;
+        document.getElementById('klineModal').classList.add('active');
+        document.querySelectorAll('#klineModal .btn-agent').forEach(b => b.style.borderColor = 'var(--border)');
+
+        await loadKlineData(code, name, 250);
+    }
+
+    function closeKlineModal() {
+        document.getElementById('klineModal').classList.remove('active');
+        if (klineChartInstance) {
+            klineChartInstance.dispose();
+            klineChartInstance = null;
+        }
+    }
+
+    async function switchKlinePeriod(days) {
+        klineCurrentDays = days;
+        document.querySelectorAll('#klineModal .btn-agent').forEach(b => {
+            b.style.borderColor = b.textContent.includes(String(days)) || (days === 250 && b.textContent.includes('一年'))
+                ? 'var(--primary)' : 'var(--border)';
+        });
+        await loadKlineData(klineCurrentCode, klineCurrentName, days);
+    }
+
+    async function loadKlineData(code, name, days) {
+        const chartDom = document.getElementById('klineChart');
+        if (klineChartInstance) {
+            klineChartInstance.dispose();
+            klineChartInstance = null;
+        }
+
+        chartDom.innerHTML = '<div class="loading-container"><span class="loading-spinner"></span>加载K线数据...</div>';
+
+        try {
+            const res = await fetchJSON(`/api/chart/kline/${code}?days=${days}`);
+            if (!res || !res.success) {
+                chartDom.innerHTML = `<div class="loading-container" style="color:var(--danger)">${res?.error || '加载失败'}</div>`;
+                return;
+            }
+            renderKlineChart(code, name, res.data);
+        } catch (e) {
+            chartDom.innerHTML = `<div class="loading-container" style="color:var(--danger)">请求失败: ${e.message}</div>`;
+        }
+    }
+
+    function renderKlineChart(code, name, rawData) {
+        const chartDom = document.getElementById('klineChart');
+        if (klineChartInstance) klineChartInstance.dispose();
+
+        klineChartInstance = echarts.init(chartDom, 'dark');
+
+        const dates = [];
+        const ohlc = [];
+        const volumes = [];
+        const ma5Data = [];
+        const ma10Data = [];
+        const ma20Data = [];
+
+        for (let i = 0; i < rawData.length; i++) {
+            const d = rawData[i];
+            dates.push(d[0]);
+            const prevClose = i > 0 ? rawData[i-1][2] : 0;
+            const chg = prevClose ? parseFloat(((d[2] - prevClose) / prevClose * 100).toFixed(2)) : null;
+            ohlc.push([d[1], d[2], d[3], d[4], chg]);
+
+            const up = d[2] >= d[1];
+            volumes.push([i, d[5], up ? 1 : -1]);
+
+            if (i >= 4) {
+                const ma5 = rawData.slice(i - 4, i + 1).reduce((s, r) => s + r[2], 0) / 5;
+                ma5Data.push(round2(ma5));
+            } else {
+                ma5Data.push(null);
+            }
+            if (i >= 9) {
+                const ma10 = rawData.slice(i - 9, i + 1).reduce((s, r) => s + r[2], 0) / 10;
+                ma10Data.push(round2(ma10));
+            } else {
+                ma10Data.push(null);
+            }
+            if (i >= 19) {
+                const ma20 = rawData.slice(i - 19, i + 1).reduce((s, r) => s + r[2], 0) / 20;
+                ma20Data.push(round2(ma20));
+            } else {
+                ma20Data.push(null);
+            }
+        }
+
+        function round2(v) { return Math.round(v * 100) / 100; }
+
+        const option = {
+            animation: false,
+            title: {
+                text: `${code} ${name}`,
+                left: 'center',
+                textStyle: { fontSize: 13, color: '#e2e8f0' }
+            },
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'cross' },
+                formatter: function (params) {
+                    const d = params[0];
+                    if (!d || !d.axisValue) return '';
+                    const k = params.find(p => p.seriesName === 'K线');
+                    let html = `<b>${d.axisValue}</b><br/>`;
+                    if (k) {
+                        const v = k.data;
+                        html += `开: ${v[1]}<br/>收: ${v[2]}<br/>低: ${v[3]}<br/>高: ${v[4]}<br/>`;
+                        if (v[5] != null) html += `涨跌幅: ${v[5] > 0 ? '+' : ''}${v[5]}%<br/>`;
+                    }
+                    const vol = params.find(p => p.seriesName === '成交量');
+                    if (vol && vol.data) {
+                        html += `量: ${(vol.data[1] / 10000).toFixed(0)}万`;
+                    }
+                    return html;
+                }
+            },
+            grid: [
+                { left: '8%', right: '3%', top: '12%', height: '55%' },
+                { left: '8%', right: '3%', top: '75%', height: '16%' }
+            ],
+            xAxis: [
+                {
+                    type: 'category',
+                    data: dates,
+                    axisLine: { lineStyle: { color: '#334155' } },
+                    axisLabel: { color: '#8b949e', fontSize: 10, formatter: v => v.slice(5) },
+                    gridIndex: 0
+                },
+                {
+                    type: 'category',
+                    data: dates,
+                    axisLine: { lineStyle: { color: '#334155' } },
+                    axisLabel: { show: false },
+                    gridIndex: 1
+                }
+            ],
+            yAxis: [
+                {
+                    type: 'value',
+                    scale: true,
+                    axisLine: { lineStyle: { color: '#334155' } },
+                    axisLabel: { color: '#8b949e', fontSize: 10 },
+                    splitLine: { lineStyle: { color: '#1e293b' } },
+                    gridIndex: 0
+                },
+                {
+                    type: 'value',
+                    axisLine: { lineStyle: { color: '#334155' } },
+                    axisLabel: { show: false },
+                    splitLine: { show: false },
+                    gridIndex: 1
+                }
+            ],
+            dataZoom: [
+                { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
+                { type: 'slider', xAxisIndex: [0, 1], start: 50, end: 100, bottom: 5, height: 15, borderColor: '#334155', backgroundColor: '#1e293b', fillerColor: 'rgba(59,130,246,0.2)' }
+            ],
+            series: [
+                {
+                    name: 'K线',
+                    type: 'candlestick',
+                    data: ohlc,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    itemStyle: {
+                        color: '#ef4444',
+                        color0: '#22c55e',
+                        borderColor: '#ef4444',
+                        borderColor0: '#22c55e'
+                    }
+                },
+                {
+                    name: 'MA5',
+                    type: 'line',
+                    data: ma5Data,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    smooth: true,
+                    lineStyle: { width: 1, color: '#f59e0b' },
+                    symbol: 'none'
+                },
+                {
+                    name: 'MA10',
+                    type: 'line',
+                    data: ma10Data,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    smooth: true,
+                    lineStyle: { width: 1, color: '#3b82f6' },
+                    symbol: 'none'
+                },
+                {
+                    name: 'MA20',
+                    type: 'line',
+                    data: ma20Data,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    smooth: true,
+                    lineStyle: { width: 1, color: '#a855f7' },
+                    symbol: 'none'
+                },
+                {
+                    name: '成交量',
+                    type: 'bar',
+                    data: volumes,
+                    xAxisIndex: 1,
+                    yAxisIndex: 1,
+                    itemStyle: {
+                        color: function (params) {
+                            return params.data[2] > 0 ? '#ef4444' : '#22c55e';
+                        }
+                    }
+                }
+            ]
+        };
+
+        klineChartInstance.setOption(option);
+
+        window.addEventListener('resize', () => {
+            if (klineChartInstance) klineChartInstance.resize();
+        });
+    }
+
+    // Close modal on backdrop click
+    document.getElementById('klineModal').addEventListener('click', (e) => {
+        if (e.target === document.getElementById('klineModal')) closeKlineModal();
+    });
+
+    // ── Init ───────────────────────────────────
+    window.addEventListener('load', () => {
+        addLog('info', 'AIQuant 控制台初始化完成');
+        initReportDatePicker();
+        refreshPipelineStatus();
+        loadRecommendations();
+        updateReportStatus();
+
+        setInterval(refreshPipelineStatus, 15000);
+    });
+
+    document.getElementById('intentModal').addEventListener('click', (e) => {
+        if (e.target === document.getElementById('intentModal')) closeIntentModal();
+    });
+    </script>
+</body>
+</html>
