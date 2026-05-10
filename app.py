@@ -36,6 +36,7 @@ from routes.llm import llm_bp
 from routes.deployment import deployment_bp
 from routes.data_fetch import data_fetch_bp
 from routes.chart import chart_bp
+from routes.strategy_lab import strategy_lab_bp
 
 app = Flask(__name__)
 CORS(app)
@@ -72,6 +73,7 @@ app.register_blueprint(llm_bp)
 app.register_blueprint(deployment_bp)
 app.register_blueprint(data_fetch_bp)
 app.register_blueprint(chart_bp)
+app.register_blueprint(strategy_lab_bp)
 
 # 注册 WebSocket 路由
 register_ws_routes(sock)

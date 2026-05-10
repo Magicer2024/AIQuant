@@ -38,6 +38,8 @@ class RuleCondition:
         return d
 
     def evaluate(self, factor_df: pd.DataFrame) -> pd.Series:
+        if self.factor not in factor_df.columns:
+            return pd.Series(False, index=factor_df.index)
         if self.operator == ">":
             return factor_df[self.factor] > self.threshold
         elif self.operator == "<":
@@ -49,12 +51,12 @@ class RuleCondition:
             return (factor_df[self.factor] < self.threshold) & \
                    (factor_df[self.factor].shift(1) >= self.threshold)
         elif self.operator == "cross_above_factor":
-            if self.ref_factor is None:
+            if self.ref_factor is None or self.ref_factor not in factor_df.columns:
                 return pd.Series(False, index=factor_df.index)
             return (factor_df[self.factor] > factor_df[self.ref_factor]) & \
                    (factor_df[self.factor].shift(1) <= factor_df[self.ref_factor].shift(1))
         elif self.operator == "cross_below_factor":
-            if self.ref_factor is None:
+            if self.ref_factor is None or self.ref_factor not in factor_df.columns:
                 return pd.Series(False, index=factor_df.index)
             return (factor_df[self.factor] < factor_df[self.ref_factor]) & \
                    (factor_df[self.factor].shift(1) >= factor_df[self.ref_factor].shift(1))
@@ -139,8 +141,8 @@ class TemplateBuilder:
         categories = list(cat_factors.keys())
 
         for cat_a, cat_b in combinations(categories, 2):
-            for f1 in cat_factors[cat_a][:3]:
-                for f2 in cat_factors[cat_b][:3]:
+            for f1 in cat_factors[cat_a][:2]:
+                for f2 in cat_factors[cat_b][:2]:
                     for t1 in self.thresholds[1:4]:
                         for t2 in self.thresholds[1:4]:
                             op1 = self._op_for_factor(f1, default=">")
@@ -172,8 +174,8 @@ class TemplateBuilder:
     def build_t4(self) -> List[StrategyRule]:
         """三因子确认模板"""
         t2_rules = self.build_t2()
-        if len(t2_rules) > 200:
-            t2_rules = random.sample(t2_rules, 200)
+        if len(t2_rules) > 80:
+            t2_rules = random.sample(t2_rules, 80)
         rules = []
         for t2_rule in t2_rules:
             for f in self.factors[:10]:
@@ -230,17 +232,22 @@ class RuleMiner:
         """⑤ 单只股票单条规则快速回测"""
         buy_signal = rule.get_buy_signal(factor_df)
         sell_signal = rule.get_sell_signal(factor_df)
-        if buy_signal.sum() < 3:
+        if buy_signal.sum() < 2:
             return None
-        signal_df = stock_df[["close", "volume"]].copy()
-        signal_df["BUY_SIGNAL"] = buy_signal.astype(int)
-        signal_df["SELL_SIGNAL"] = sell_signal.astype(int)
-        signal_df["BUY_SCORE"] = buy_signal.astype(float)
+        signal_df = stock_df[["trade_date", "close", "volume"]].copy()
+        signal_df["trade_date"] = pd.to_datetime(signal_df["trade_date"])
+        signal_df = signal_df.set_index("trade_date")
+        signal_df["BUY_SIGNAL"] = buy_signal.astype(int).values
+        signal_df["SELL_SIGNAL"] = sell_signal.astype(int).values
+        signal_df["BUY_SCORE"] = buy_signal.astype(float).values
         signal_df["STRATEGY"] = rule.name
         if "open" in stock_df.columns:
-            signal_df["open"] = stock_df["open"]
+            signal_df["open"] = stock_df["open"].values
         try:
-            bt = Backtester(initial_capital=100000)
+            bt = Backtester(initial_capital=100000,
+                           use_stop_loss=False, use_take_profit=False,
+                           use_drawdown_guard=False, use_market_timing=False,
+                           use_dynamic_position=False)
             result = bt.run(signal_df)
             return {
                 "total_return": result.total_return,
@@ -259,12 +266,15 @@ class RuleMiner:
         if len(codes) > self.sample_size:
             codes = random.sample(codes, self.sample_size)
         results = []
-        for code in codes:
+        for i, code in enumerate(codes):
             price_df, factor_df = stock_data[code]
             perf = self.quick_backtest(rule, price_df, factor_df)
             if perf:
                 results.append(perf)
-        if not results or len(results) < 5:
+            # 早期终止：评估15只后仍无有效回测则跳过
+            if i >= 15 and len(results) < 1:
+                return None
+        if not results or len(results) < 2:
             return None
         n = len(results)
         return {
@@ -288,17 +298,46 @@ class RuleMiner:
                    forward_returns: pd.Series,
                    factor_df: pd.DataFrame) -> List[dict]:
         """执行完整 Phase 1 流程"""
+        import time
+        t0 = time.time()
         if self.seed is not None:
             random.seed(self.seed)
             np.random.seed(self.seed)
         active_factors = self.prune_factors(factor_df, forward_returns)
+        print(f"[Phase1] 因子剪枝完成: {len(active_factors)} 个因子 (耗时 {time.time()-t0:.1f}s)")
         candidates = self.generate_candidates(active_factors)
+        print(f"[Phase1] 候选规则生成: {len(candidates)} 条 (耗时 {time.time()-t0:.1f}s)")
         scored = []
+        # 数据抽查：打印第一只股票的前几个因子值
+        if stock_data:
+            sample_code = next(iter(stock_data))
+            _, sample_fd = stock_data[sample_code]
+            sample_cols = [c for c in active_factors[:5] if c in sample_fd.columns]
+            if sample_cols:
+                print(f"[Phase1] 数据抽查({sample_code}): {sample_fd[sample_cols].iloc[-1].to_dict()}")
+            else:
+                print(f"[Phase1] 警告: 样本因子列不存在! active_factors前5={active_factors[:5]}, sample_fd列={list(sample_fd.columns)[:5]}")
         for i, rule in enumerate(candidates):
+            if i > 0 and i % 200 == 0:
+                print(f"[Phase1] 评估进度: {i}/{len(candidates)} (找到 {len(scored)} 条有效规则, 耗时 {time.time()-t0:.1f}s)")
+            # 调试：前3条规则输出详细信息
+            if i < 3 and stock_data:
+                sc = next(iter(stock_data))
+                _, sfd = stock_data[sc]
+                bs = rule.get_buy_signal(sfd)
+                c_info = []
+                for c in rule.conditions:
+                    if c.factor in sfd.columns:
+                        col = sfd[c.factor]
+                        c_info.append(f"{c.factor}[{col.min():.2f}~{col.max():.2f}] {c.operator} {c.threshold}")
+                    else:
+                        c_info.append(f"{c.factor}[MISSING]")
+                print(f"[Phase1] 规则#{i}: {rule.name} | {', '.join(c_info)} | 买入信号={bs.sum()}")
             perf = self.evaluate_rule(rule, stock_data)
             if perf and perf["total_trades"] >= self.min_trades:
                 score = self.score_rule(perf)
                 scored.append((score, rule, perf))
+        print(f"[Phase1] 评估完成: {len(scored)} 条有效规则 (耗时 {time.time()-t0:.1f}s)")
         scored.sort(key=lambda x: x[0], reverse=True)
         top_rules = scored[:self.top_n]
         results = []

@@ -11,6 +11,7 @@ routes/agents.py —— 三省六部制流水线API
 """
 
 from flask import Blueprint, jsonify, request
+from datetime import datetime, date
 from agents.orchestrator import get_orchestrator
 from agents.governance_mapping import get_pipeline_flow, get_governance_role, format_agent_display
 from scheduler.state import PIPELINE_STATUS
@@ -33,19 +34,31 @@ def get_status():
 
 @agents_bp.route("/run", methods=["POST"])
 def run_pipeline():
-    """手动触发完整流水线"""
+    """手动触发完整流水线（可选 run_date 参数）"""
     orch = get_orchestrator()
     if orch.is_running():
         return jsonify({"success": False, "error": "流水线已在运行中"}), 409
 
+    body = request.get_json(silent=True) or {}
+    run_date = body.get("run_date")
+
+    if run_date:
+        try:
+            from datetime import date
+            run_dt = datetime.strptime(run_date, "%Y-%m-%d").date()
+            if run_dt > date.today():
+                return jsonify({"success": False, "error": f"不能为未来日期运行: {run_date}"}), 400
+        except ValueError:
+            return jsonify({"success": False, "error": f"日期格式无效: {run_date}，应为 YYYY-MM-DD"}), 400
+
     def _run():
-        orch.run_pipeline()
+        orch.run_pipeline(run_date=run_date)
 
     import threading
     t = threading.Thread(target=_run, daemon=True)
     t.start()
 
-    return jsonify({"success": True, "message": "流水线已启动"})
+    return jsonify({"success": True, "message": "流水线已启动", "run_date": run_date})
 
 
 @agents_bp.route("/run/<agent_name>", methods=["POST"])
@@ -79,22 +92,41 @@ def get_history():
 
 @agents_bp.route("/report", methods=["GET"])
 def get_latest_report():
-    """查看最新生成的报告"""
-    from datetime import date
-    today = date.today().strftime("%Y-%m-%d")
-    reports_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reports")
+    """按日期查看报告（?date=YYYY-MM-DD，默认今天）"""
+    req_date = request.args.get("date", date.today().strftime("%Y-%m-%d"))
+    try:
+        datetime.strptime(req_date, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"success": False, "error": f"日期格式无效: {req_date}，应为 YYYY-MM-DD"}), 400
 
-    # 尝试今天的报告
-    html_path = os.path.join(reports_dir, f"daily_report_{today}.html")
-    json_path = os.path.join(reports_dir, f"daily_report_{today}.json")
+    reports_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reports")
+    json_path = os.path.join(reports_dir, f"daily_report_{req_date}.json")
 
     if os.path.exists(json_path):
         import json
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return jsonify({"success": True, "date": today, "data": data})
+        return jsonify({"success": True, "date": req_date, "data": data})
 
-    return jsonify({"success": False, "error": "今日报告尚未生成", "date": today})
+    return jsonify({"success": False, "error": f"{req_date} 报告尚未生成", "date": req_date})
+
+
+@agents_bp.route("/reports", methods=["GET"])
+def list_reports():
+    """列出所有已生成报告的日期"""
+    import re
+    reports_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reports")
+    if not os.path.isdir(reports_dir):
+        return jsonify({"success": True, "dates": [], "count": 0})
+
+    pattern = re.compile(r"daily_report_(\d{4}-\d{2}-\d{2})\.json$")
+    dates = []
+    for fname in os.listdir(reports_dir):
+        m = pattern.match(fname)
+        if m:
+            dates.append(m.group(1))
+    dates.sort(reverse=True)
+    return jsonify({"success": True, "dates": dates, "count": len(dates)})
 
 
 @agents_bp.route("/governance", methods=["GET"])

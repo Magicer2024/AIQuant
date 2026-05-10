@@ -49,8 +49,10 @@ def is_trading_day(today: str = None) -> bool:
         trade_dates = set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
         return today in trade_dates
     except Exception:
-        # 接口失败时按工作日 fallback
-        return date.today().weekday() < 5
+        # 接口失败时按工作日 fallback（使用查询日期而非今天）
+        from datetime import datetime
+        queried_dt = datetime.strptime(today, "%Y-%m-%d").date()
+        return queried_dt.weekday() < 5
 
 
 def is_after_market_close() -> bool:
@@ -222,8 +224,12 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
     注意：baostock 的 query_history_k_data_plus 不是线程安全的，
     如果在多线程环境中使用，需要确保每个线程有自己的登录会话
     """
+    # 标准化日期格式：去除 - 分隔符，统一为 YYYYMMDD
+    start_date = start_date.replace("-", "")
     if end_date is None:
         end_date = date.today().strftime("%Y%m%d")
+    else:
+        end_date = end_date.replace("-", "")
 
     # 转换代码格式（添加交易所后缀）
     bs_code = _format_code_for_baostock(code)

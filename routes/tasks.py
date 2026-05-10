@@ -81,10 +81,38 @@ def batch_score_task(stocks: list):
     return {"evaluated": len(results), "results": results[:50]}
 
 
+def run_phase1_mine_task():
+    """Phase 1: 模板穷举规则挖掘"""
+    from services.strategy_lab_service import run_phase1_mine
+    return run_phase1_mine()
+
+
+def run_phase2_evolve_task(rule_ids: list = None, generations: int = 20):
+    """Phase 2: 遗传进化"""
+    from services.strategy_lab_service import run_phase2_evolve
+    return run_phase2_evolve(rule_ids=rule_ids, generations=generations)
+
+
+def run_phase4_select_task():
+    """Phase 4: 动态策略选择"""
+    from services.strategy_lab_service import run_phase4_select
+    return run_phase4_select()
+
+
+def run_lgbm_train_task():
+    """Phase 3: LightGBM 训练"""
+    from services.strategy_lab_service import run_lgbm_train
+    return run_lgbm_train()
+
+
 TASK_REGISTRY = {
     "demo": demo_task,
     "backtest": run_backtest_task,
     "batch_score": batch_score_task,
+    "phase1_mine": run_phase1_mine_task,
+    "phase2_evolve": run_phase2_evolve_task,
+    "phase4_select": run_phase4_select_task,
+    "lgbm_train": run_lgbm_train_task,
 }
 
 
@@ -173,5 +201,9 @@ def get_task_types():
             {"id": "demo", "name": "演示任务", "description": "用于测试队列功能"},
             {"id": "backtest", "name": "回测任务", "description": "异步执行策略回测"},
             {"id": "batch_score", "name": "批量评分", "description": "批量对股票列表进行多因子评分"},
+            {"id": "phase1_mine", "name": "Phase1 规则挖掘", "description": "模板穷举 + IC筛选 + 聚类去重 + 全市场回测"},
+            {"id": "phase2_evolve", "name": "Phase2 遗传进化", "description": "遗传算法进化策略规则（交叉/变异/选择）"},
+            {"id": "phase4_select", "name": "Phase4 动态选股", "description": "双窗口回测评分 + 动态策略选择 + 三级后备"},
+            {"id": "lgbm_train", "name": "LGBM 训练", "description": "LightGBM 融合模型训练"},
         ],
     })

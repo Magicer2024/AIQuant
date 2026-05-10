@@ -30,15 +30,16 @@ class DataAgent(BaseAgent):
     governance_role = "太子院·数据官"
 
     def _execute(self, ctx: AgentContext) -> dict:
-        today = date.today().strftime("%Y-%m-%d")
+        today = ctx.run_date
+        run_dt = datetime.strptime(today, "%Y-%m-%d").date()
         ctx.set("today", today)
 
         # 1. 交易日判断
         if not is_trading_day(today):
             init_db()
-            latest_in_db = get_latest_date_all()
+            latest_in_db = get_latest_date_all(before_date=today)
             weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
-            wday = date.today().weekday()
+            wday = run_dt.weekday()
             msg = (
                 "今天是周六" if wday == 5 else
                 "今天是周日" if wday == 6 else
@@ -66,12 +67,37 @@ class DataAgent(BaseAgent):
                 "record_count": stats.get("行情记录总数", 0),
             }
 
-        # 3. 执行同步
+        # 2.5 历史日期：不拉取实时数据，检验 DB 是否有足够数据
+        is_historical = run_dt < date.today()
+        if is_historical:
+            if latest_in_db and latest_in_db >= today:
+                stats = db_stats()
+                return {
+                    "trading_day": True,
+                    "already_latest": True,
+                    "historical": True,
+                    "today": today,
+                    "latest_in_db": latest_in_db,
+                    "stock_count": stats.get("有行情股票数", 0),
+                    "record_count": stats.get("行情记录总数", 0),
+                }
+            else:
+                return {
+                    "trading_day": True,
+                    "already_latest": False,
+                    "historical": True,
+                    "data_insufficient": True,
+                    "today": today,
+                    "latest_in_db": latest_in_db,
+                    "skip_reason": f"数据库中最新数据为 {latest_in_db}，早于请求日期 {today}，无法为历史日期拉取实时数据",
+                }
+
+        # 3. 执行同步（仅当天）
         is_after_close = is_after_market_close()
         sync_report = self._run_sync(today, full=is_after_close)
 
         # 4. 数据质量检查
-        quality = self._check_quality()
+        quality = self._check_quality(today)
 
         # 5. 清理旧缓存
         cache_cleaned = self._cleanup_cache()
@@ -120,8 +146,10 @@ class DataAgent(BaseAgent):
             daily_sync(verbose=False)
             return {"mode": "incremental"}
 
-    def _check_quality(self) -> dict:
+    def _check_quality(self, today: str = None) -> dict:
         """数据质量检查：缺失率、停牌检测"""
+        if today is None:
+            today = date.today().strftime("%Y-%m-%d")
         try:
             stocks = get_data_source_manager().get_stock_list_df()
             total = len(stocks)
@@ -132,7 +160,6 @@ class DataAgent(BaseAgent):
             sample = stocks.sample(min(100, total)) if total > 100 else stocks
             missing_count = 0
             stale_count = 0
-            today = date.today().strftime("%Y-%m-%d")
 
             for _, row in sample.iterrows():
                 try:

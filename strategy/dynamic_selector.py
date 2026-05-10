@@ -305,12 +305,12 @@ class DynamicSelector:
 
         # 1. Load active rules
         db_rules = get_active_rules(limit=200)
-        rules: List[StrategyRule] = []
+        rules: List[Tuple[int, StrategyRule]] = []
         if db_rules:
             for row in db_rules:
                 rule = _rule_from_db_row(row)
                 if rule is not None:
-                    rules.append(rule)
+                    rules.append((row["id"], rule))
 
         # 2. L1 fallback
         if not rules:
@@ -331,7 +331,7 @@ class DynamicSelector:
 
         # 4-5. Evaluate each rule on dual windows
         scored = []
-        for rule in rules:
+        for rule_id, rule in rules:
             perf_60 = self.miner.evaluate_rule(rule, stock_60)
             if perf_60 is None:
                 continue
@@ -358,6 +358,7 @@ class DynamicSelector:
 
             scored.append({
                 "rule": rule,
+                "rule_id": rule_id,
                 "perf_60": perf_60,
                 "perf_120": perf_120,
                 "score_60": score_60,
@@ -386,7 +387,7 @@ class DynamicSelector:
         for rank, item in enumerate(selected, 1):
             selections.append((
                 today,
-                item.get("rule_id", 0),
+                item["rule_id"],
                 item["rule"].name,
                 item["score_60"],
                 item["score_120"],
@@ -395,11 +396,9 @@ class DynamicSelector:
                 valid_until,
             ))
         try:
-            # Deduplicate: remove any existing selections for this date
-            # (active_strategies has no UNIQUE constraint, so plain INSERT
-            # would accumulate duplicates on repeated runs.)
+            # 清除所有当前有效的策略（同一周期内多次执行应覆盖旧结果）
             with get_conn() as conn:
-                conn.execute("DELETE FROM active_strategies WHERE select_date=?", (today,))
+                conn.execute("DELETE FROM active_strategies WHERE valid_until >= ?", (today,))
             upsert_active_strategies(selections)
             logger.info("Saved %d active strategies for week %s", len(selections), today)
         except Exception:
@@ -449,6 +448,8 @@ class DynamicSelector:
                 valid_until,
             ))
         try:
+            with get_conn() as conn:
+                conn.execute("DELETE FROM active_strategies WHERE valid_until >= ?", (today,))
             upsert_active_strategies(rows)
         except Exception:
             logger.exception("Failed to save baseline selections")
@@ -460,10 +461,14 @@ class DynamicSelector:
 
         These mirror the original five-strategy framework using factor-library
         conditions so they can be evaluated even with an empty template library.
+
+        Each baseline is persisted into strategy_rules to obtain a real ID,
+        which allows the backtest pipeline to load them by ID later.
         """
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         valid_until = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
         baselines = [
             StrategyRule(
@@ -503,19 +508,55 @@ class DynamicSelector:
         ]
 
         results = []
-        for i, rule in enumerate(baselines):
-            results.append({
-                "rule": rule,
-                "rule_name": rule.name,
-                "rule_id": 0,
-                "score_60": 0,
-                "score_120": 0,
-                "final_score": 0,
-                "rank": i + 1,
-                "select_date": today,
-                "valid_until": valid_until,
-                "source": "L1_fallback",
-            })
+        with get_conn() as conn:
+            for i, rule in enumerate(baselines):
+                conds_json = json.dumps(
+                    [{"factor": c.factor, "operator": c.operator, "threshold": c.threshold}
+                     for c in rule.conditions]
+                )
+                try:
+                    cur = conn.execute("""
+                        INSERT INTO strategy_rules
+                            (rule_name, rule_type, encoding, conditions, sell_conditions,
+                             holding_min, holding_max, source, generation, fitness,
+                             annual_return, win_rate, sharpe_ratio, max_drawdown,
+                             total_trades, signal_overlap, is_active)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        ON CONFLICT(rule_name) DO UPDATE SET
+                            rule_type=excluded.rule_type, conditions=excluded.conditions,
+                            source=excluded.source, is_active=1,
+                            degraded_at=NULL, updated_at=?
+                    """, (
+                        rule.name, rule.rule_type, "[]", conds_json, "[]",
+                        rule.holding_min, rule.holding_max, "baseline", 0, 0.0,
+                        0.0, 0.0, 0.0, 0.0, 0, 0.0,
+                        now_str,
+                    ))
+                    # lastrowid gives the inserted row id; for UPDATE on conflict,
+                    # re-query to be safe
+                    rule_id = cur.lastrowid
+                    if rule_id == 0:
+                        row = conn.execute(
+                            "SELECT id FROM strategy_rules WHERE rule_name=?",
+                            (rule.name,),
+                        ).fetchone()
+                        rule_id = row["id"] if row else 0
+                except Exception:
+                    logger.exception("Failed to upsert L1 baseline rule: %s", rule.name)
+                    rule_id = 0
+
+                results.append({
+                    "rule": rule,
+                    "rule_name": rule.name,
+                    "rule_id": rule_id,
+                    "score_60": 0,
+                    "score_120": 0,
+                    "final_score": 0,
+                    "rank": i + 1,
+                    "select_date": today,
+                    "valid_until": valid_until,
+                    "source": "L1_fallback",
+                })
 
         logger.warning("L1 fallback: using %d manual baseline strategies", len(results))
         return results

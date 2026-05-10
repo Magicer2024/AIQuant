@@ -42,9 +42,14 @@ def get_signal_history(start_date: date, end_date: date,
 
     groups = defaultdict(list)
     ss_counts = {td: 0 for td in dates_to_process}
+    seen = defaultdict(set)
 
     for r in rows:
         td = r["trade_date"]
+        code = r["code"]
+        if code in seen[td]:
+            continue
+        seen[td].add(code)
         trigger_list = []
         try:
             trigger_list = json.loads(r["trigger_list"] or "[]")
@@ -144,6 +149,7 @@ def get_signal_history_v4(start_date: date, end_date: date,
 
     all_groups = {td: [] for td in dates_to_process}
     ss_counts = {td: 0 for td in dates_to_process}
+    seen = defaultdict(set)
 
     with db.get_conn() as conn:
         rows = conn.execute(f"""
@@ -160,6 +166,10 @@ def get_signal_history_v4(start_date: date, end_date: date,
 
     for r in rows:
         td = r["trade_date"]
+        code = r["code"]
+        if code in seen[td]:
+            continue
+        seen[td].add(code)
         trigger_list = []
         try:
             trigger_list = json.loads(r["trigger_list"] or "[]")

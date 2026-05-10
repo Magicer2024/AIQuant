@@ -266,6 +266,6 @@ def calc_bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFram
 
 def calc_historical_volatility(close: pd.Series, n: int = 20) -> pd.DataFrame:
     """历史波动率（年化）"""
-    log_ret = np.log(close / close.shift(1))
+    log_ret = np.log((close / close.shift(1)).clip(lower=1e-12))
     hv = log_ret.rolling(window=n).std() * np.sqrt(252)
     return pd.DataFrame({f"HV_{n}": hv}, index=close.index)

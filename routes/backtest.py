@@ -1,12 +1,16 @@
 """
-routes/backtest.py —— 批量回测 + 策略选股回测路由（薄层）
+routes/backtest.py —— 批量回测 + 策略选股回测 + 策略实验室回测路由（薄层）
 """
 import traceback
 from datetime import date
 from flask import jsonify, request
 
 from routes import backtest_bp
-from services.backtest_service import run_batch_backtest
+from services.backtest_service import (
+    run_batch_backtest,
+    get_strategy_lab_strategies_for_backtest,
+    run_strategy_lab_backtest,
+)
 from ministries.personnel.strategy_registry import get_strategy_registry
 
 
@@ -164,3 +168,65 @@ def list_strategies():
             "融合信号高分选股",
         ],
     })
+
+
+# ═══════════════════════════════════════════════════════════════
+# 策略实验室回测端点
+# ═══════════════════════════════════════════════════════════════
+
+@backtest_bp.route("/strategy-lab-strategies", methods=["GET"])
+def strategy_lab_strategies():
+    """获取策略实验室活跃策略列表（用于回测选择）"""
+    try:
+        strategies = get_strategy_lab_strategies_for_backtest()
+        return jsonify({"success": True, "strategies": strategies})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@backtest_bp.route("/run-strategy-lab", methods=["POST"])
+def run_strategy_lab():
+    """使用策略实验室规则进行多股票筛选回测"""
+    try:
+        data = request.get_json() or {}
+    except Exception:
+        return jsonify({"error": "请求体需为 JSON"}), 400
+
+    rule_ids = data.get("rule_ids", [])
+    if not rule_ids:
+        return jsonify({"success": False, "error": "请至少选择一个策略规则"}), 400
+    if not isinstance(rule_ids, list):
+        return jsonify({"success": False, "error": "rule_ids 需为数组"}), 400
+
+    start_date = data.get("start_date", "2025-01-01")
+    end_date = data.get("end_date", date.today().strftime("%Y-%m-%d"))
+    capital = float(data.get("capital", 100000))
+    max_positions = int(data.get("max_positions", 5))
+    buy_num_per_day = int(data.get("buy_num_per_day", 3))
+    hold_days = int(data.get("hold_days", 10))
+    stop_loss = float(data.get("stop_loss", -0.06))
+    take_profit = float(data.get("take_profit", 0.15))
+    trailing_stop = float(data.get("trailing_stop", 0.0))
+    signal_mode = data.get("signal_mode", "any")
+
+    try:
+        result = run_strategy_lab_backtest(
+            rule_ids=rule_ids,
+            start_date=start_date,
+            end_date=end_date,
+            capital=capital,
+            max_positions=max_positions,
+            buy_num_per_day=buy_num_per_day,
+            hold_days=hold_days,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            trailing_stop=trailing_stop,
+            signal_mode=signal_mode,
+        )
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500

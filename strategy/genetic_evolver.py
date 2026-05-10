@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import json
 import random
+import time
 from typing import Dict, List, Optional, Tuple
 from dataclasses import asdict
 
@@ -40,11 +41,20 @@ FACTOR_RANGES = {
 FACTOR_DEFAULT_RANGE = (0, 1)
 
 # 所有因子名称列表（供随机选择）
-_ALL_FACTOR_NAMES = list(FACTOR_REGISTRY.keys())
+# 排除未实现计算或需要外部数据的因子，避免 factor_df KeyError
+_UNIMPLEMENTED_FACTORS = {
+    "LHB_FLAG", "SECTOR_RANK", "MKT_CAP", "MKT_CAP_PCTL",
+    "PE_TTM", "PB_LF", "ROE", "ROA", "PROFIT_YOY", "REVENUE_YOY",
+    "GROSS_MARGIN", "NET_MARGIN", "DEBT_RATIO", "CURRENT_RATIO",
+    "CFO_RATIO",
+}
+_ALL_FACTOR_NAMES = [f for f in FACTOR_REGISTRY if f not in _UNIMPLEMENTED_FACTORS]
 
-# 同类别因子高速缓存
+# 同类别因子高速缓存（排除未实现计算的因子）
 _CATEGORY_FACTORS: Dict[str, List[str]] = {}
 for _fname, _meta in FACTOR_REGISTRY.items():
+    if _fname in _UNIMPLEMENTED_FACTORS:
+        continue
     _cat = _meta.get("category", "unknown")
     _CATEGORY_FACTORS.setdefault(_cat, []).append(_fname)
 
@@ -632,6 +642,7 @@ class GeneticEvolver:
         early_stop_generations: int = 8,
         early_stop_threshold: float = 0.02,
         seed: int = None,
+        seed_population: List[StrategyRule] = None,
     ):
         """初始化进化器。
 
@@ -641,12 +652,14 @@ class GeneticEvolver:
             early_stop_generations: 连续无改进代数阈值
             early_stop_threshold: 适应度改进的最小阈值
             seed: 随机种子
+            seed_population: 种子种群（从 Phase 1 结果加载）
         """
         self.population_size = population_size
         self.max_generations = max_generations
         self.early_stop_generations = early_stop_generations
         self.early_stop_threshold = early_stop_threshold
         self.seed = seed
+        self.seed_population = seed_population
 
         # 遗传算子概率（累加区间）
         # reproduction: 0.05, crossover: 0.35, subtree: 0.15, threshold: 0.20,
@@ -686,20 +699,24 @@ class GeneticEvolver:
         return "random_reset"
 
     def initialize_population(self) -> List[StrategyRule]:
-        """初始化种群: 30 条来自 Phase 1 模板库 + 20 条随机规则。
+        """初始化种群: 种子种群 + 模板库 + 随机规则。
 
         Returns:
             初始种群列表
         """
         population = []
 
-        # 从模板库加载
-        try:
-            templates = load_template_library()
-            # 取前 30 条
-            population.extend(templates[:30])
-        except Exception:
-            pass
+        # 优先使用传入的种子种群
+        if self.seed_population:
+            population.extend(self.seed_population[:30])
+
+        # 从模板库补充
+        if len(population) < 30:
+            try:
+                templates = load_template_library()
+                population.extend(templates[:30 - len(population)])
+            except Exception:
+                pass
 
         # 补充到 30 条模板（如模板库不足）
         while len(population) < 30:
@@ -799,11 +816,13 @@ class GeneticEvolver:
         results: List[dict] = []
 
         # 1. 初始化种群
+        t_init = time.time()
         population = self.initialize_population()
+        print(f"[Phase2] 初始种群: {len(population)} 条规则")
 
         # 2. 初始适应度评估
         evaluated: List[Tuple[StrategyRule, float, dict]] = []  # (rule, fitness, perf)
-        for rule in population:
+        for i, rule in enumerate(population):
             perf = miner.evaluate_rule(rule, stock_data)
             if perf is None:
                 perf = {
@@ -815,6 +834,8 @@ class GeneticEvolver:
             existing_rules = [r for r, _, _ in evaluated]
             ft = compute_fitness(perf, rule, existing_rules, factor_df)
             evaluated.append((rule, ft, perf))
+            if (i + 1) % 10 == 0:
+                print(f"[Phase2] 初始评估: {i+1}/{len(population)} (耗时 {time.time()-t_init:.1f}s)")
 
         # 按适应度排序
         evaluated.sort(key=lambda x: x[1], reverse=True)
@@ -823,6 +844,7 @@ class GeneticEvolver:
 
         # 3. 进化循环
         for gen in range(1, self.max_generations + 1):
+            t_gen = time.time()
             # 生成新一代
             new_rules = self.evolve_one_generation(
                 [(r, f) for r, f, _ in evaluated]
@@ -856,9 +878,12 @@ class GeneticEvolver:
                 no_improve_count += 1
 
             # 早停
+            print(f"[Phase2] 第{gen}代: best={current_best:.4f} imp={improvement:+.4f} 无改进={no_improve_count}/{self.early_stop_generations} (耗时 {time.time()-t_gen:.1f}s)")
             if no_improve_count >= self.early_stop_generations:
+                print(f"[Phase2] 早停于第{gen}代")
                 break
 
+        print(f"[Phase2] 进化完成，开始入库 (总耗时 {time.time()-t_init:.1f}s)")
         # 4. 入库合格规则 (fitness > 0.5, 信号重叠 < 75%)
         inserted = 0
         for rule, fitness, perf in evaluated:
@@ -867,14 +892,18 @@ class GeneticEvolver:
 
             # 检查与已入库规则的信号重叠
             if factor_df is not None:
-                existing_in_db = [
-                    StrategyRule(
-                        name=r["rule_name"], rule_type=r["rule_type"],
-                        conditions=json.loads(r["conditions"])
-                        if isinstance(r["conditions"], str) else r["conditions"],
-                    )
-                    for r in get_active_rules(min_fitness=0.3, limit=100)
-                ]
+                existing_in_db = []
+                for r in get_active_rules(min_fitness=0.3, limit=100):
+                    try:
+                        conds_raw = r["conditions"]
+                        conds_data = json.loads(conds_raw) if isinstance(conds_raw, str) else conds_raw
+                        conds = [RuleCondition(**c) for c in conds_data]
+                        existing_in_db.append(StrategyRule(
+                            name=r["rule_name"], rule_type=r["rule_type"],
+                            conditions=conds,
+                        ))
+                    except Exception:
+                        continue
                 try:
                     max_ov = 0.0
                     for er in existing_in_db:

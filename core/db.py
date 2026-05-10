@@ -812,13 +812,38 @@ def get_latest_date(code: str) -> str | None:
     return row["d"] if row and row["d"] else None
 
 
-def get_latest_date_all() -> str | None:
-    """获取数据库中全市场最新交易日"""
+def get_latest_date_all(before_date: str = None) -> str | None:
+    """获取数据库中全市场最新交易日
+
+    :param before_date: 可选，只返回该日期之前的交易日（非交易日时排除当天）
+    """
+    where = "WHERE trade_date < ?" if before_date else ""
+    params = (before_date,) if before_date else ()
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT MAX(trade_date) as d FROM daily_price"
-        ).fetchone()
-    return row["d"] if row and row["d"] else None
+        rows = conn.execute(
+            f"SELECT DISTINCT trade_date FROM daily_price {where} ORDER BY trade_date DESC LIMIT 30",
+            params,
+        ).fetchall()
+    if not rows:
+        return None
+    candidates = [r["trade_date"] for r in rows]
+    # 优先用 akshare 交易日历精确匹配
+    try:
+        import akshare as ak
+        import pandas as pd
+        df = ak.tool_trade_date_hist_sina()
+        trade_dates = set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
+        for d in candidates:
+            if d in trade_dates:
+                return d
+    except Exception:
+        pass
+    # Fallback: 返回最近的工作日
+    from datetime import datetime as _dt
+    for d in candidates:
+        if _dt.strptime(d, "%Y-%m-%d").weekday() < 5:
+            return d
+    return candidates[0]
 
 
 def has_today_data(code: str) -> bool:
@@ -1274,6 +1299,7 @@ from core.repository.mgmt_repo import (
 def upsert_strategy_rule(rule: dict) -> int:
     """插入或更新策略规则，返回 rule_id"""
     with get_conn() as conn:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         cur = conn.execute("""
             INSERT INTO strategy_rules
                 (rule_name, rule_type, encoding, conditions, sell_conditions,
@@ -1287,7 +1313,7 @@ def upsert_strategy_rule(rule: dict) -> int:
                 annual_return=excluded.annual_return, win_rate=excluded.win_rate,
                 sharpe_ratio=excluded.sharpe_ratio, max_drawdown=excluded.max_drawdown,
                 total_trades=excluded.total_trades, signal_overlap=excluded.signal_overlap,
-                updated_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                updated_at=?
         """, (
             rule["rule_name"], rule["rule_type"], rule.get("encoding", "[]"),
             rule.get("conditions", "[]"), rule.get("sell_conditions", "[]"),
@@ -1296,7 +1322,7 @@ def upsert_strategy_rule(rule: dict) -> int:
             rule.get("fitness", 0), rule.get("annual_return", 0),
             rule.get("win_rate", 0), rule.get("sharpe_ratio", 0),
             rule.get("max_drawdown", 0), rule.get("total_trades", 0),
-            rule.get("signal_overlap", 0),
+            rule.get("signal_overlap", 0), now,
         ))
         return cur.lastrowid
 

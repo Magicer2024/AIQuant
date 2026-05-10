@@ -81,25 +81,32 @@ class PipelineOrchestrator:
     def run_pipeline(
         self,
         pipeline_id: str | None = None,
+        run_date: str | None = None,
         on_agent_start: Callable[[str], None] | None = None,
         on_agent_finish: Callable[[str, AgentResult], None] | None = None,
     ) -> AgentContext:
         """
         执行完整流水线
         :param pipeline_id: 流水线ID（默认自动生成）
+        :param run_date: 目标日期 YYYY-MM-DD，默认今天
         :param on_agent_start: Agent开始回调 (agent_name) -> None
         :param on_agent_finish: Agent完成回调 (agent_name, result) -> None
         :return: 执行上下文（含所有结果）
         """
+        run_date = run_date or date.today().strftime("%Y-%m-%d")
+        run_dt = datetime.strptime(run_date, "%Y-%m-%d").date()
+        if run_dt > date.today():
+            raise ValueError(f"不能为未来日期运行流水线: {run_date}")
+
         with self._lock:
             if self._running:
                 raise RuntimeError("流水线已在运行中")
             self._running = True
 
-        pipeline_id = pipeline_id or f"pipe-{date.today()}-{uuid.uuid4().hex[:8]}"
+        pipeline_id = pipeline_id or f"pipe-{run_date}-{uuid.uuid4().hex[:8]}"
         ctx = AgentContext(
             pipeline_id=pipeline_id,
-            run_date=date.today().strftime("%Y-%m-%d"),
+            run_date=run_date,
         )
         self._current_ctx = ctx
 
@@ -241,8 +248,13 @@ class PipelineOrchestrator:
     # 单Agent快捷执行
     # ─────────────────────────────────────────────
 
-    def run_single(self, agent_name: str) -> AgentResult:
+    def run_single(self, agent_name: str, run_date: str | None = None) -> AgentResult:
         """单独执行一个Agent（用于调试/手动触发）"""
+        run_date = run_date or date.today().strftime("%Y-%m-%d")
+        run_dt = datetime.strptime(run_date, "%Y-%m-%d").date()
+        if run_dt > date.today():
+            raise ValueError(f"不能为未来日期运行: {run_date}")
+
         with self._lock:
             if self._running:
                 raise RuntimeError("流水线已在运行中")
@@ -250,7 +262,7 @@ class PipelineOrchestrator:
 
         ctx = AgentContext(
             pipeline_id=f"single-{agent_name}-{uuid.uuid4().hex[:6]}",
-            run_date=date.today().strftime("%Y-%m-%d"),
+            run_date=run_date,
         )
         self._current_ctx = ctx
 

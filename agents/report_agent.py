@@ -62,7 +62,7 @@ class ReportAgent(BaseAgent):
         return self.RISK_LEVEL_CN.get(level, level)
 
     def _execute(self, ctx: AgentContext) -> dict:
-        today = date.today().strftime("%Y-%m-%d")
+        today = ctx.run_date
 
         # 收集上游数据
         data_result = ctx.get_result("DataAgent")
