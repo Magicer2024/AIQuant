@@ -11,14 +11,15 @@ def _get_conn():
     return get_conn()
 
 
-def save_signals(signals: list[dict], sent_wechat: bool = False):
+def save_signals(signals: list[dict], sent_wechat: bool = False, trade_date: str = None):
     """
     保存策略筛选结果到 signal_records 表
     """
     if not signals:
         return
+    if trade_date is None:
+        trade_date = date.today().strftime("%Y-%m-%d")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    today = date.today().strftime("%Y-%m-%d")
     with _get_conn() as conn:
         conn.executemany("""
             INSERT INTO signal_records
@@ -29,7 +30,7 @@ def save_signals(signals: list[dict], sent_wechat: bool = False):
                :stop_loss, :take_profit, :buy_volume, :buy_money, :sent_wechat)
         """, [{
             "scan_time":   now,
-            "trade_date":  today,
+            "trade_date":  trade_date,
             "code":        s.get("code", ""),
             "name":        s.get("name", ""),
             "price":       s.get("price", 0),
@@ -43,14 +44,15 @@ def save_signals(signals: list[dict], sent_wechat: bool = False):
     print(f"[DB] 保存 {len(signals)} 条信号记录，推送微信={'是' if sent_wechat else '否'}")
 
 
-def save_scan_signals(scan_results: list[dict], sent_wechat: bool = False):
+def save_scan_signals(scan_results: list[dict], sent_wechat: bool = False, scan_date: str = None):
     """
     保存每日策略扫描推荐结果到 stock_signal 表。
     """
     if not scan_results:
         return
+    if scan_date is None:
+        scan_date = date.today().strftime("%Y-%m-%d")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    today = date.today().strftime("%Y-%m-%d")
     records = []
     for s in scan_results:
         def _si(v):
@@ -63,8 +65,8 @@ def save_scan_signals(scan_results: list[dict], sent_wechat: bool = False):
         else:
             trigger_json = str(trigger or "[]")
         records.append({
-            "scan_date":    today,
-            "trade_date":   s.get("trade_date") or today,
+            "scan_date":    scan_date,
+            "trade_date":   s.get("trade_date") or scan_date,
             "code":         s.get("code", ""),
             "name":         s.get("name", ""),
             "price":        _si(s.get("price")),

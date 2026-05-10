@@ -34,9 +34,10 @@ class ReportGenerator:
         rows = ""
         for p in positions:
             pnl_cls = "up" if p.get("unrealized_pnl", 0) >= 0 else "down"
+            p_name = p.get('name', p.get('code', ''))
             rows += f"""
             <tr>
-                <td><strong>{p.get('code', '')}</strong><br/><small style="color:var(--muted)">{p.get('name', '')}</small></td>
+                <td><a href="javascript:void(0)" class="stock-link" onclick="showKline('{p.get('code', '')}', '{p_name.replace(chr(39), chr(92)+chr(39))}')">{p.get('code', '')}</a><br/><small style="color:var(--muted)">{p.get('name', '')}</small></td>
                 <td>{p.get('shares', 0)}</td>
                 <td>{p.get('entry_price', 0):.2f}</td>
                 <td>{p.get('current_price', 0):.2f}</td>
@@ -96,7 +97,7 @@ class ReportGenerator:
             rows += f"""
             <tr>
                 <td>{o.get('order_id', '')}</td>
-                <td><strong>{o.get('code', '')}</strong></td>
+                <td><a href="javascript:void(0)" class="stock-link" onclick="showKline('{o.get('code', '')}', '{o.get('code', '')}')">{o.get('code', '')}</a></td>
                 <td>{'买入' if o.get('direction') == 'buy' else '卖出'}</td>
                 <td>{o.get('shares', 0)}</td>
                 <td>{o.get('price', 0):.2f}</td>
@@ -224,6 +225,7 @@ class ReportGenerator:
 <head>
 <meta charset="UTF-8">
 <title>AIQuant Report</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
 :root {{
     --bg: {t['bg']};
@@ -284,9 +286,68 @@ tr:hover {{ background: rgba(255,255,255,0.02); }}
 .subtitle {{ color: var(--muted); font-size: 0.875rem; margin-bottom: 1rem; }}
 .non-trading-banner {{ background: rgba(245,158,11,0.15); border: 1px solid rgba(245,158,11,0.3); border-radius: 4px; padding: 8px 12px; margin-bottom: 16px; color: #f59e0b; font-size: 0.875rem; }}
 .footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.75rem; text-align: center; }}
+.stock-link {{ color: var(--accent); text-decoration: none; font-weight: 700; }}
+.stock-link:hover {{ text-decoration: underline; }}
+/* ---- Modal ---- */
+.modal {{
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}}
+.modal.active {{ display: flex; }}
+.modal-content {{
+    background: {t['card']};
+    border-radius: 12px;
+    padding: 28px;
+    max-width: 960px;
+    width: 95%;
+    max-height: 90vh;
+    overflow-y: auto;
+}}
+.modal-content h2 {{
+    margin: 0 0 16px;
+    font-size: 1.2rem;
+}}
+.btn-agent {{
+    padding: 5px 12px;
+    font-size: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+}}
+.btn-agent:hover {{ border-color: var(--accent); color: var(--accent); }}
+.btn-secondary {{
+    padding: 4px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--muted);
+    cursor: pointer;
+    font-family: inherit;
+}}
+.btn-secondary:hover {{ background: rgba(255,255,255,0.05); color: var(--text); }}
+.loading-container {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 520px;
+    color: var(--muted);
+    font-size: 0.875rem;
+}}
 @media print {{
     body {{ background: white; color: black; }}
     .stat {{ border: 1px solid #ccc; }}
+    .modal {{ display: none !important; }}
 }}
 @media (max-width: 768px) {{
     .summary {{ grid-template-columns: repeat(2, 1fr); }}
@@ -297,6 +358,274 @@ tr:hover {{ background: rgba(255,255,255,0.02); }}
 <div class="container">
 {content}
 </div>
+
+<!-- K-line Chart Modal -->
+<div class="modal" id="klineModal">
+    <div class="modal-content">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <h2 id="klineTitle" style="margin:0;">K线图</h2>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn-agent" onclick="switchKlinePeriod(250)" id="btnPeriod250">一年</button>
+                <button class="btn-agent" onclick="switchKlinePeriod(120)" id="btnPeriod120">半年</button>
+                <button class="btn-agent" onclick="switchKlinePeriod(60)" id="btnPeriod60">60日</button>
+                <button class="btn-agent" onclick="switchKlinePeriod(30)" id="btnPeriod30">30日</button>
+                <button class="btn-secondary" onclick="closeKlineModal()">关闭</button>
+            </div>
+        </div>
+        <div id="klineChart" style="width:100%;height:520px;"></div>
+    </div>
+</div>
+
+<script>
+var klineChartInstance = null;
+var klineCurrentCode = '';
+var klineCurrentName = '';
+var klineCurrentDays = 250;
+
+function showKline(code, name) {{
+    klineCurrentCode = code;
+    klineCurrentName = name;
+    klineCurrentDays = 250;
+    document.getElementById('klineTitle').textContent = code + ' ' + name + ' - K线图';
+    document.getElementById('klineModal').classList.add('active');
+    var buttons = document.querySelectorAll('#klineModal .btn-agent');
+    for (var i = 0; i < buttons.length; i++) {{
+        buttons[i].style.borderColor = 'var(--border)';
+    }}
+    document.getElementById('btnPeriod250').style.borderColor = 'var(--accent)';
+    loadKlineData(code, 250);
+}}
+
+function closeKlineModal() {{
+    document.getElementById('klineModal').classList.remove('active');
+    if (klineChartInstance) {{
+        klineChartInstance.dispose();
+        klineChartInstance = null;
+    }}
+}}
+
+function switchKlinePeriod(days) {{
+    klineCurrentDays = days;
+    ['btnPeriod250','btnPeriod120','btnPeriod60','btnPeriod30'].forEach(function(id) {{
+        var btn = document.getElementById(id);
+        if (btn) btn.style.borderColor = parseInt(id.replace('btnPeriod','')) === days ? 'var(--accent)' : 'var(--border)';
+    }});
+    loadKlineData(klineCurrentCode, days);
+}}
+
+function loadKlineData(code, days) {{
+    var chartDom = document.getElementById('klineChart');
+    if (klineChartInstance) {{
+        klineChartInstance.dispose();
+        klineChartInstance = null;
+    }}
+    chartDom.innerHTML = '<div class="loading-container">加载K线数据...</div>';
+
+    fetch('/api/chart/kline/' + encodeURIComponent(code) + '?days=' + days)
+        .then(function(r) {{ return r.json(); }})
+        .then(function(res) {{
+            if (!res || !res.success) {{
+                chartDom.innerHTML = '<div class="loading-container" style="color:#ef4444">' + (res && res.error ? res.error : '加载失败') + '</div>';
+                return;
+            }}
+            renderKlineChart(code, res.data);
+        }})
+        .catch(function(e) {{
+            chartDom.innerHTML = '<div class="loading-container" style="color:#ef4444">请求失败: ' + e.message + '</div>';
+        }});
+}}
+
+function renderKlineChart(code, rawData) {{
+    var chartDom = document.getElementById('klineChart');
+    if (klineChartInstance) klineChartInstance.dispose();
+
+    klineChartInstance = echarts.init(chartDom, 'dark');
+
+    var dates = [];
+    var ohlc = [];
+    var volumes = [];
+    var ma5Data = [];
+    var ma10Data = [];
+    var ma20Data = [];
+
+    for (var i = 0; i < rawData.length; i++) {{
+        var d = rawData[i];
+        dates.push(d[0]);
+        var prevClose = i > 0 ? rawData[i-1][2] : 0;
+        var chg = prevClose ? parseFloat(((d[2] - prevClose) / prevClose * 100).toFixed(2)) : null;
+        ohlc.push([d[1], d[2], d[3], d[4], chg]);
+
+        var up = d[2] >= d[1] ? 1 : -1;
+        volumes.push([i, d[5], up]);
+
+        if (i >= 4) {{
+            var sum5 = 0;
+            for (var j = i - 4; j <= i; j++) sum5 += rawData[j][2];
+            ma5Data.push(Math.round(sum5 / 5 * 100) / 100);
+        }} else {{
+            ma5Data.push(null);
+        }}
+        if (i >= 9) {{
+            var sum10 = 0;
+            for (var j = i - 9; j <= i; j++) sum10 += rawData[j][2];
+            ma10Data.push(Math.round(sum10 / 10 * 100) / 100);
+        }} else {{
+            ma10Data.push(null);
+        }}
+        if (i >= 19) {{
+            var sum20 = 0;
+            for (var j = i - 19; j <= i; j++) sum20 += rawData[j][2];
+            ma20Data.push(Math.round(sum20 / 20 * 100) / 100);
+        }} else {{
+            ma20Data.push(null);
+        }}
+    }}
+
+    var option = {{
+        animation: false,
+        title: {{
+            text: klineCurrentCode + ' ' + klineCurrentName,
+            left: 'center',
+            textStyle: {{ fontSize: 13, color: '#e2e8f0' }}
+        }},
+        tooltip: {{
+            trigger: 'axis',
+            axisPointer: {{ type: 'cross' }},
+            formatter: function(params) {{
+                var d = params[0];
+                if (!d || !d.axisValue) return '';
+                var k = null;
+                for (var i = 0; i < params.length; i++) {{
+                    if (params[i].seriesName === 'K线') {{ k = params[i]; break; }}
+                }}
+                var html = '<b>' + d.axisValue + '</b><br/>';
+                if (k) {{
+                    var v = k.data;
+                    html += '开: ' + v[1] + '<br/>收: ' + v[2] + '<br/>低: ' + v[3] + '<br/>高: ' + v[4] + '<br/>';
+                    if (v[5] != null) html += '涨跌幅: ' + (v[5] > 0 ? '+' : '') + v[5] + '%<br/>';
+                }}
+                var vol = null;
+                for (var i = 0; i < params.length; i++) {{
+                    if (params[i].seriesName === '成交量') {{ vol = params[i]; break; }}
+                }}
+                if (vol && vol.data) {{
+                    html += '量: ' + (vol.data[1] / 10000).toFixed(0) + '万';
+                }}
+                return html;
+            }}
+        }},
+        grid: [
+            {{ left: '8%', right: '3%', top: '12%', height: '55%' }},
+            {{ left: '8%', right: '3%', top: '75%', height: '16%' }}
+        ],
+        xAxis: [
+            {{
+                type: 'category',
+                data: dates,
+                axisLine: {{ lineStyle: {{ color: '#334155' }} }},
+                axisLabel: {{ color: '#8b949e', fontSize: 10, formatter: function(v) {{ return v.slice(5); }} }},
+                gridIndex: 0
+            }},
+            {{
+                type: 'category',
+                data: dates,
+                axisLine: {{ lineStyle: {{ color: '#334155' }} }},
+                axisLabel: {{ show: false }},
+                gridIndex: 1
+            }}
+        ],
+        yAxis: [
+            {{
+                type: 'value',
+                scale: true,
+                axisLine: {{ lineStyle: {{ color: '#334155' }} }},
+                axisLabel: {{ color: '#8b949e', fontSize: 10 }},
+                splitLine: {{ lineStyle: {{ color: '#1e293b' }} }},
+                gridIndex: 0
+            }},
+            {{
+                type: 'value',
+                axisLine: {{ lineStyle: {{ color: '#334155' }} }},
+                axisLabel: {{ show: false }},
+                splitLine: {{ show: false }},
+                gridIndex: 1
+            }}
+        ],
+        dataZoom: [
+            {{ type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 }},
+            {{ type: 'slider', xAxisIndex: [0, 1], start: 50, end: 100, bottom: 5, height: 15, borderColor: '#334155', backgroundColor: '#1e293b', fillerColor: 'rgba(59,130,246,0.2)' }}
+        ],
+        series: [
+            {{
+                name: 'K线',
+                type: 'candlestick',
+                data: ohlc,
+                xAxisIndex: 0,
+                yAxisIndex: 0,
+                itemStyle: {{
+                    color: '#ef4444',
+                    color0: '#22c55e',
+                    borderColor: '#ef4444',
+                    borderColor0: '#22c55e'
+                }}
+            }},
+            {{
+                name: 'MA5',
+                type: 'line',
+                data: ma5Data,
+                xAxisIndex: 0,
+                yAxisIndex: 0,
+                smooth: true,
+                lineStyle: {{ width: 1, color: '#f59e0b' }},
+                symbol: 'none'
+            }},
+            {{
+                name: 'MA10',
+                type: 'line',
+                data: ma10Data,
+                xAxisIndex: 0,
+                yAxisIndex: 0,
+                smooth: true,
+                lineStyle: {{ width: 1, color: '#3b82f6' }},
+                symbol: 'none'
+            }},
+            {{
+                name: 'MA20',
+                type: 'line',
+                data: ma20Data,
+                xAxisIndex: 0,
+                yAxisIndex: 0,
+                smooth: true,
+                lineStyle: {{ width: 1, color: '#a855f7' }},
+                symbol: 'none'
+            }},
+            {{
+                name: '成交量',
+                type: 'bar',
+                data: volumes,
+                xAxisIndex: 1,
+                yAxisIndex: 1,
+                itemStyle: {{
+                    color: function(params) {{
+                        return params.data[2] > 0 ? '#ef4444' : '#22c55e';
+                    }}
+                }}
+            }}
+        ]
+    }};
+
+    klineChartInstance.setOption(option);
+
+    window.addEventListener('resize', function() {{
+        if (klineChartInstance) klineChartInstance.resize();
+    }});
+}}
+
+// Close modal on backdrop click
+document.getElementById('klineModal').addEventListener('click', function(e) {{
+    if (e.target === document.getElementById('klineModal')) closeKlineModal();
+}});
+</script>
 </body>
 </html>"""
 
@@ -334,9 +663,10 @@ tr:hover {{ background: rgba(255,255,255,0.02); }}
             risk_flags = rec.get("risk", {}).get("flags", [])
             risk_text = " ".join(risk_flags) if risk_flags else "正常"
 
+            stock_name = rec.get('name', rec.get('code', ''))
             rows += f"""
             <tr>
-                <td><b>{rec.get('code', '')}</b><br><small>{rec.get('name', '')}</small></td>
+                <td><a href="javascript:void(0)" class="stock-link" onclick="showKline('{rec.get('code', '')}', '{stock_name.replace(chr(39), chr(92)+chr(39))}')">{rec.get('code', '')}</a><br><small>{rec.get('name', '')}</small></td>
                 <td><span class="badge">{strategy_label}</span></td>
                 <td><b>{score:.1f}</b></td>
                 <td>{rec.get('price', '-')}</td>

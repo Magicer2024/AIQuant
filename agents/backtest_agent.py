@@ -11,7 +11,7 @@ agents/backtest_agent.py —— 回测验证器
 from __future__ import annotations
 
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 from agents.base import BaseAgent, AgentContext
 from backtest.backtest_v4 import run_oversold_v4
@@ -41,16 +41,18 @@ class BacktestAgent(BaseAgent):
         if not fusion_candidates and not v4_candidates:
             return {"status": "no_candidates", "reports": []}
 
+        exec_date = datetime.strptime(ctx.run_date, "%Y-%m-%d").date() if ctx.run_date else date.today()
+
         reports = []
 
         # 对融合策略候选做回测
         for item in fusion_candidates:
-            report = self._backtest_single(item, strategy="fusion")
+            report = self._backtest_single(item, strategy="fusion", exec_date=exec_date)
             reports.append(report)
 
         # 对v4候选做回测
         for item in v4_candidates:
-            report = self._backtest_single(item, strategy="v4")
+            report = self._backtest_single(item, strategy="v4", exec_date=exec_date)
             reports.append(report)
 
         # 汇总统计
@@ -67,14 +69,16 @@ class BacktestAgent(BaseAgent):
             "reports": reports,
         }
 
-    def _backtest_single(self, item: dict, strategy: str) -> dict:
+    def _backtest_single(self, item: dict, strategy: str, exec_date: date | None = None) -> dict:
         """对单只股票做近3个月快速回测"""
         code = item["code"]
         name = item["name"]
+        if exec_date is None:
+            exec_date = date.today()
 
         try:
-            end_date = date.today().strftime("%Y-%m-%d")
-            start_date = (date.today() - timedelta(days=90)).strftime("%Y-%m-%d")
+            end_date = exec_date.strftime("%Y-%m-%d")
+            start_date = (exec_date - timedelta(days=90)).strftime("%Y-%m-%d")
 
             if strategy == "v4":
                 # v4策略回测
@@ -113,7 +117,7 @@ class BacktestAgent(BaseAgent):
                 }
             else:
                 # 5策略融合回测（简化版）
-                df = get_data_source_manager().get_daily_price_df(code)
+                df = get_data_source_manager().get_daily_price_df(code, end_date=end_date)
                 if df is None or df.empty:
                     return self._empty_report(code, name, strategy)
 

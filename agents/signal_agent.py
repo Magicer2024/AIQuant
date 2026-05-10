@@ -40,6 +40,8 @@ class SignalAgent(BaseAgent):
     governance_role = "中书省·策略官"
 
     def _execute(self, ctx: AgentContext) -> dict:
+        run_date = ctx.run_date
+
         stocks_df = get_data_source_manager().get_stock_list_df()
         if stocks_df.empty:
             return {"status": "no_stocks", "hits_fusion": [], "hits_v4": []}
@@ -59,12 +61,12 @@ class SignalAgent(BaseAgent):
             code, name = row["code"], row["name"]
 
             # 5策略融合
-            item_f = self._analyze_fusion(code, name)
+            item_f = self._analyze_fusion(code, name, run_date)
             if item_f:
                 fusion_hits.append(item_f)
 
             # v4 超跌反弹
-            item_v4 = self._analyze_v4(code, name)
+            item_v4 = self._analyze_v4(code, name, run_date)
             if item_v4:
                 v4_hits.append(item_v4)
 
@@ -80,12 +82,12 @@ class SignalAgent(BaseAgent):
         # 保存到数据库（供面板展示）
         sig_limit = 200
         if fusion_all:
-            save_scan_signals(fusion_all[:sig_limit], sent_wechat=False)
+            save_scan_signals(fusion_all[:sig_limit], sent_wechat=False, scan_date=run_date)
         if v4_all:
             # v4也保存到 stock_signal，但用不同的标识
             for item in v4_all[:sig_limit]:
                 item["strategy_type"] = "v4_oversold"
-            save_scan_signals(v4_all[:sig_limit], sent_wechat=False)
+            save_scan_signals(v4_all[:sig_limit], sent_wechat=False, scan_date=run_date)
 
         # 写入上下文供下游Agent使用
         ctx.set("fusion_candidates", fusion_top)
@@ -102,11 +104,11 @@ class SignalAgent(BaseAgent):
             "v4_top": v4_top,
         }
 
-    def _analyze_fusion(self, code: str, name: str) -> dict | None:
+    def _analyze_fusion(self, code: str, name: str, run_date: str) -> dict | None:
         """5策略融合分析"""
         try:
             import pandas as pd
-            df = get_data_source_manager().get_daily_price_df(code)
+            df = get_data_source_manager().get_daily_price_df(code, end_date=run_date)
             if df.empty or len(df) < 30:
                 return None
 
@@ -184,11 +186,11 @@ class SignalAgent(BaseAgent):
         except Exception:
             return None
 
-    def _analyze_v4(self, code: str, name: str) -> dict | None:
+    def _analyze_v4(self, code: str, name: str, run_date: str) -> dict | None:
         """v4超跌反弹策略分析"""
         try:
             import pandas as pd
-            df = get_data_source_manager().get_daily_price_df(code)
+            df = get_data_source_manager().get_daily_price_df(code, end_date=run_date)
             if df.empty or len(df) < 30:
                 return None
 

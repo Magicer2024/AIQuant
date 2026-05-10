@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 from agents.base import BaseAgent, AgentContext
 from ministries.rites.data_source_manager import get_data_source_manager
@@ -29,7 +29,7 @@ class RiskAgent(BaseAgent):
     governance_role = "门下省·风控官"
 
     def _execute(self, ctx: AgentContext) -> dict:
-        today = date.today().strftime("%Y-%m-%d")
+        today = ctx.run_date
 
         # 1. 大盘风险评估（原有功能）
         market_risk = self._assess_market(today)
@@ -41,7 +41,7 @@ class RiskAgent(BaseAgent):
         fusion_candidates = ctx.get("fusion_candidates", [])
         v4_candidates = ctx.get("v4_candidates", [])
         all_candidates = fusion_candidates + v4_candidates
-        stock_risks = self._screen_stocks(all_candidates)
+        stock_risks = self._screen_stocks(all_candidates, today)
 
         # 4. 仓位建议（原有功能）
         position_advice = self._position_advice(market_risk, volatility)
@@ -102,7 +102,8 @@ class RiskAgent(BaseAgent):
     def _assess_market(self, today: str) -> dict:
         """大盘趋势评估（沪深300）"""
         try:
-            start = (date.today() - timedelta(days=90)).strftime("%Y-%m-%d")
+            _run_dt = datetime.strptime(today, "%Y-%m-%d").date()
+            start = (_run_dt - timedelta(days=90)).strftime("%Y-%m-%d")
             df = get_data_source_manager().get_index_daily_df("000300", start_date=start, end_date=today)
             if df is None or df.empty:
                 return {"status": "no_data", "trend": "unknown"}
@@ -140,7 +141,8 @@ class RiskAgent(BaseAgent):
     def _assess_volatility(self, today: str) -> dict:
         """市场波动率评估（沪深300）"""
         try:
-            start = (date.today() - timedelta(days=40)).strftime("%Y-%m-%d")
+            _run_dt = datetime.strptime(today, "%Y-%m-%d").date()
+            start = (_run_dt - timedelta(days=40)).strftime("%Y-%m-%d")
             df = get_data_source_manager().get_index_daily_df("000300", start_date=start, end_date=today)
             if df is None or len(df) < 20:
                 return {"status": "insufficient_data", "level": "medium"}
@@ -161,7 +163,7 @@ class RiskAgent(BaseAgent):
         except Exception as e:
             return {"status": "error", "error": str(e)[:200]}
 
-    def _screen_stocks(self, candidates: list[dict]) -> list[dict]:
+    def _screen_stocks(self, candidates: list[dict], run_date: str = None) -> list[dict]:
         """个股风险筛查"""
         results = []
         for item in candidates:
@@ -169,7 +171,7 @@ class RiskAgent(BaseAgent):
             risk = {"code": code, "name": item.get("name", ""), "risk_flags": []}
 
             try:
-                df = get_data_source_manager().get_daily_price_df(code)
+                df = get_data_source_manager().get_daily_price_df(code, end_date=run_date)
                 if df is None or df.empty:
                     risk["risk_flags"].append("no_data")
                     results.append(risk)
