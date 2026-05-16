@@ -71,7 +71,8 @@ class SignalAgent(BaseAgent):
                 v4_hits.append(item_v4)
 
             if (i + 1) % 500 == 0:
-                print(f"  [SignalAgent] 扫描进度: {i+1}/{total}，融合命中:{len(fusion_hits)}，v4命中:{len(v4_hits)}")
+                ctx.log("info", f"扫描进度: {i+1}/{total}，融合命中:{len(fusion_hits)}，v4命中:{len(v4_hits)}")
+                print(f"  [SignalAgent] 扫描进度: {i+1}/{total}，融合命中:{len(fusion_hits)}，v4命中:{len(v4_hits)}", flush=True)
 
         # 排序取Top
         fusion_top = sorted(fusion_hits, key=lambda x: x["score"], reverse=True)[:POSITION_NUM]

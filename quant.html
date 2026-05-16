@@ -1222,6 +1222,7 @@
             <div class="lab-section">
                 <h4>策略流水线</h4>
                 <div class="lab-action-row">
+                    <button class="lab-action-btn primary" id="btn-full-pipeline" onclick="runLabPhase('full_pipeline')" style="background:#f59e0b;color:#000;font-weight:700;">一键执行 P1→P4</button>
                     <button class="lab-action-btn primary" id="btn-phase1" onclick="runLabPhase('phase1_mine')">Phase1 规则挖掘</button>
                     <button class="lab-action-btn primary" id="btn-phase2" onclick="runLabPhase('phase2_evolve')">Phase2 遗传进化</button>
                     <button class="lab-action-btn primary" id="btn-lgbm" onclick="runLabPhase('lgbm_train')">Phase3 LGBM训练</button>
@@ -2305,18 +2306,19 @@
         // ---- 流水线任务 ----
         async function runLabPhase(taskType) {
             const nameMap = {
+                'full_pipeline': ['btn-full-pipeline', '一键执行流水线'],
                 'phase1_mine': ['btn-phase1', 'Phase1 规则挖掘'],
                 'phase2_evolve': ['btn-phase2', 'Phase2 遗传进化'],
                 'lgbm_train': ['btn-lgbm', 'Phase3 LGBM训练'],
                 'phase4_select': ['btn-phase4', 'Phase4 动态选股'],
             };
             const [btnId, taskName] = nameMap[taskType] || [null, taskType];
-            const btn = document.getElementById(btnId);
+            const allPhaseBtns = ['btn-full-pipeline', 'btn-phase1', 'btn-phase2', 'btn-lgbm', 'btn-phase4'];
             const progressBar = document.getElementById('lab-progress-bar');
             const progressFill = document.getElementById('lab-progress-fill');
             const statusEl = document.getElementById('lab-task-status');
 
-            if (btn) btn.disabled = true;
+            allPhaseBtns.forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
             progressBar.style.display = 'block';
             progressFill.style.width = '0%';
             statusEl.style.display = 'block';
@@ -2354,9 +2356,19 @@
                                 clearInterval(labTaskPollTimer);
                                 labTaskPollTimer = null;
                                 progressFill.style.width = '100%';
-                                statusEl.textContent = `${taskName} 完成 ✓`;
+                                const result = task.result || task;
+                                if (taskType === 'full_pipeline' && result.phases) {
+                                    const parts = [];
+                                    for (const [k, v] of Object.entries(result.phases)) {
+                                        const icon = v.status === 'success' ? '✓' : '✗';
+                                        parts.push(`${k}:${icon}`);
+                                    }
+                                    statusEl.textContent = `一键执行完成 [${parts.join(' ')}] (${result.elapsed_seconds || 0}s)`;
+                                } else {
+                                    statusEl.textContent = `${taskName} 完成 ✓`;
+                                }
                                 statusEl.style.color = '#22c55e';
-                                resolve(task.result || task);
+                                resolve(result);
                             } else if (task.status === 'failed') {
                                 clearInterval(labTaskPollTimer);
                                 labTaskPollTimer = null;
@@ -2385,7 +2397,7 @@
                 statusEl.style.color = '#ef4444';
                 progressFill.style.width = '100%';
             } finally {
-                if (btn) btn.disabled = false;
+                allPhaseBtns.forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
             }
         }
     </script>

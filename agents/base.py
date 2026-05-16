@@ -54,6 +54,12 @@ class AgentContext:
     def get(self, key: str, default: Any = None) -> Any:
         return self._store.get(key, default)
 
+    def log(self, level: str, message: str):
+        """写入流水线日志，会透传到前端日志面板"""
+        from scheduler.state import append_log
+        agent = self.get("_current_agent")
+        append_log(level, message, agent=agent)
+
     def set_result(self, result: AgentResult):
         self.results[result.agent_name] = result
 
@@ -92,6 +98,7 @@ class BaseAgent(abc.ABC):
 
     def run(self, ctx: AgentContext) -> AgentResult:
         """执行Agent任务，自动包装异常和计时"""
+        ctx.set("_current_agent", self.name)
         started = datetime.now()
         result = AgentResult(
             agent_name=self.name,

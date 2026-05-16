@@ -94,7 +94,23 @@ class DataAgent(BaseAgent):
 
         # 3. 执行同步（仅当天）
         is_after_close = is_after_market_close()
-        sync_report = self._run_sync(today, full=is_after_close)
+
+        # 收盘前：今日数据尚未产生，跳过同步，直接使用已有最新数据
+        if not is_after_close:
+            print(f"  [DataAgent] 市场未收盘，跳过同步，使用已有数据 (最新: {latest_in_db})", flush=True)
+            ctx.log("info", f"市场未收盘，跳过同步，使用已有数据 (最新: {latest_in_db})")
+            stats = db_stats()
+            return {
+                "trading_day": True,
+                "already_latest": True,
+                "today": today,
+                "latest_in_db": latest_in_db,
+                "stock_count": stats.get("有行情股票数", 0),
+                "record_count": stats.get("行情记录总数", 0),
+                "note": "market not closed, sync skipped",
+            }
+
+        sync_report = self._run_sync(today, full=is_after_close, ctx=ctx)
 
         # 4. 数据质量检查
         quality = self._check_quality(today)
@@ -112,25 +128,46 @@ class DataAgent(BaseAgent):
             "cache_cleaned": cache_cleaned,
         }
 
-    def _run_sync(self, today: str, full: bool) -> dict:
+    def _run_sync(self, today: str, full: bool, ctx: AgentContext = None) -> dict:
         """执行数据同步，返回统计"""
         if full:
+            import baostock as bs
             stocks = get_data_source_manager().get_stock_list_df()
             success_n, fail_n = 0, 0
             total = len(stocks)
-            for i, row in stocks.iterrows():
-                code = row["code"]
-                ok = sync_one_stock(code, today, today, verbose=False)
-                if ok:
-                    success_n += 1
-                    try:
-                        sync_strategy_score(code, verbose=False)
-                    except Exception:
-                        pass
-                else:
-                    fail_n += 1
-                if (i + 1) % 500 == 0:
-                    print(f"  [DataAgent] 同步进度: {i+1}/{total}")
+
+            # 批量同步：只登录一次，大幅提升速度
+            lg = bs.login()
+            if lg.error_code != '0':
+                if ctx:
+                    ctx.log("error", f"baostock 登录失败: {lg.error_msg}")
+                print(f"  [DataAgent] baostock 登录失败: {lg.error_msg}")
+                return {
+                    "mode": "full",
+                    "stocks_success": 0,
+                    "stocks_fail": total,
+                    "stocks_total": total,
+                    "index_records": 0,
+                }
+
+            try:
+                for i, row in stocks.iterrows():
+                    code = row["code"]
+                    ok = sync_one_stock(code, today, today, verbose=False, auto_login=False)
+                    if ok:
+                        success_n += 1
+                        try:
+                            sync_strategy_score(code, verbose=False)
+                        except Exception:
+                            pass
+                    else:
+                        fail_n += 1
+                    if (i + 1) % 500 == 0:
+                        if ctx:
+                            ctx.log("info", f"同步进度: {i+1}/{total}")
+                        print(f"  [DataAgent] 同步进度: {i+1}/{total}", flush=True)
+            finally:
+                bs.logout()
 
             index_results = sync_all_indices(start_date=today, end_date=today, verbose=False)
             total_idx = sum(index_results.values()) if index_results else 0

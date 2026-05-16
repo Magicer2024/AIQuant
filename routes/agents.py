@@ -22,12 +22,17 @@ agents_bp = Blueprint("agents", __name__, url_prefix="/api/agents")
 
 @agents_bp.route("/status", methods=["GET"])
 def get_status():
-    """获取当前流水线状态"""
+    """获取当前流水线状态（支持 ?since=N 增量拉取日志）"""
+    from scheduler.state import get_logs
     orch = get_orchestrator()
+    since = request.args.get("since", 0, type=int)
     status = {
         "pipeline_running": orch.is_running(),
         "pipeline_status": PIPELINE_STATUS,
         "current": orch.get_current_status(),
+        "stepwise": orch.get_stepwise_status(),
+        "logs": get_logs(since),
+        "log_total": len(PIPELINE_STATUS["logs"]),
     }
     return jsonify(status)
 
@@ -80,6 +85,47 @@ def run_single_agent(agent_name: str):
     t.start()
 
     return jsonify({"success": True, "message": f"Agent {agent_name} 已启动"})
+
+
+@agents_bp.route("/run/stepwise/start", methods=["POST"])
+def stepwise_start():
+    """启动分步执行流水线（创建共享AgentContext）"""
+    orch = get_orchestrator()
+    if orch.is_running():
+        return jsonify({"success": False, "error": "流水线已在运行中"}), 409
+
+    body = request.get_json(silent=True) or {}
+    run_date = body.get("run_date")
+
+    try:
+        info = orch.start_stepwise(run_date=run_date)
+        return jsonify({"success": True, **info})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"success": False, "error": str(e)}), 409
+
+
+@agents_bp.route("/run/stepwise/next", methods=["POST"])
+def stepwise_next():
+    """执行分步流水线的下一个阶段"""
+    orch = get_orchestrator()
+    try:
+        info = orch.stepwise_next()
+        return jsonify({"success": True, **info})
+    except RuntimeError as e:
+        return jsonify({"success": False, "error": str(e)}), 409
+
+
+@agents_bp.route("/run/stepwise/cancel", methods=["POST"])
+def stepwise_cancel():
+    """取消分步执行流水线"""
+    orch = get_orchestrator()
+    try:
+        info = orch.stepwise_cancel()
+        return jsonify({"success": True, **info})
+    except RuntimeError as e:
+        return jsonify({"success": False, "error": str(e)}), 409
 
 
 @agents_bp.route("/history", methods=["GET"])

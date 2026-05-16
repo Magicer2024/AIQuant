@@ -245,6 +245,9 @@
     <button class="btn btn-primary" id="btnRunPipeline" onclick="runPipeline()">
       <span>▶</span> 运行完整流水线
     </button>
+    <button class="btn btn-primary" id="btnRunStepByStep" onclick="runPipelineStepByStep()" style="background:#8b5cf6;">
+      <span>▶</span> 分步执行
+    </button>
     <button class="btn btn-secondary" onclick="refreshStatus()">🔄 刷新状态</button>
     <button class="btn btn-secondary" onclick="loadReport()">📄 查看报告</button>
     <div class="agent-actions">
@@ -365,8 +368,12 @@ function clearLog() {
 }
 
 function setPipelineRunning(running) {
+  // 状态未变化时不重复操作（避免轮询时重复打印日志）
+  if (isRunning === running) return;
+
   isRunning = running;
   const btn = document.getElementById('btnRunPipeline');
+  const btnStep = document.getElementById('btnRunStepByStep');
   const dot = document.getElementById('statusDot');
   const status = document.getElementById('pipelineStatus');
 
@@ -375,6 +382,7 @@ function setPipelineRunning(running) {
   if (running) {
     btn.innerHTML = '<span class="loading-spinner"></span> 流水线运行中...';
     btn.disabled = true;
+    if (btnStep) btnStep.disabled = true;
     dot.className = 'status-dot status-running';
     status.textContent = '运行中';
     status.style.color = '#f59e0b';
@@ -382,6 +390,7 @@ function setPipelineRunning(running) {
   } else {
     btn.innerHTML = '<span>▶</span> 运行完整流水线';
     btn.disabled = false;
+    if (btnStep) btnStep.disabled = false;
     dot.className = 'status-dot status-idle';
     status.textContent = '空闲';
     status.style.color = '#f1f5f9';
@@ -458,25 +467,176 @@ async function runPipeline() {
   }
 }
 
-async function runAgent(agentName) {
-  if (isRunning) return;
+function runAgentAsync(agentName) {
   log(`启动 ${agentName}...`, 'info');
   setNodeState(agentName, 'running');
 
-  try {
-    const res = await fetch(`${API_BASE}/api/agents/run/${agentName}`, { method: 'POST' });
-    const data = await res.json();
-    if (data.success) {
-      log(`${agentName} 已启动`, 'success');
-      setNodeState(agentName, 'success');
-    } else {
-      log(`${agentName} 启动失败: ${data.error}`, 'error');
+  return new Promise(async (resolve, reject) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/agents/run/${agentName}`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        log(`${agentName} 已启动，后台执行中`, 'success');
+
+        let pollCount = 0;
+        const maxPolls = 180;
+        const poll = setInterval(async () => {
+          pollCount++;
+          try {
+            const sr = await fetch(`${API_BASE}/api/agents/status`).then(r => r.json());
+            if (!sr || !sr.pipeline_running || pollCount >= maxPolls) {
+              clearInterval(poll);
+              const ok = sr && !sr.pipeline_running;
+              setNodeState(agentName, ok ? 'success' : 'failed');
+              log(`${agentName} ${ok ? '执行完成' : '执行超时'}`, ok ? 'success' : 'error');
+              resolve(ok);
+            }
+          } catch (e) { clearInterval(poll); reject(e); }
+        }, 2000);
+      } else {
+        log(`${agentName} 启动失败: ${data.error}`, 'error');
+        setNodeState(agentName, 'failed');
+        reject(new Error(data.error));
+      }
+    } catch (e) {
+      log(`${agentName} 请求失败: ${e.message}`, 'error');
       setNodeState(agentName, 'failed');
+      reject(e);
     }
+  });
+}
+
+async function runAgent(agentName) {
+  if (isRunning) return;
+  try { await runAgentAsync(agentName); } catch (e) { /* handled in runAgentAsync */ }
+}
+
+async function runPipelineStepByStep() {
+  if (isRunning) return;
+
+  setPipelineRunning(true);
+  ['DataAgent','SignalAgent','BacktestAgent','RiskAgent','ReportAgent'].forEach(a => setNodeState(a, ''));
+  clearLog();
+
+  log('开始分步执行流水线 (共享上下文 p1→p2→p3→p4)...', 'info');
+
+  // Step 1: 启动分步会话
+  try {
+    const startRes = await fetch(`${API_BASE}/api/agents/run/stepwise/start`, { method: 'POST' }).then(r => r.json());
+    if (!startRes || !startRes.success) {
+      log(`启动分步流水线失败: ${startRes?.error}`, 'error');
+      setPipelineRunning(false);
+      return;
+    }
+    log(`分步流水线已启动  session=${startRes.session_id}`, 'info');
   } catch (e) {
-    log(`${agentName} 请求失败: ${e.message}`, 'error');
-    setNodeState(agentName, 'failed');
+    log(`启动分步流水线异常: ${e.message}`, 'error');
+    setPipelineRunning(false);
+    return;
   }
+
+  // Step 2: 循环执行各阶段
+  await stepwiseNextLoop();
+
+  // Step 3: 完成
+  setPipelineRunning(false);
+  document.getElementById('statusDot').className = 'status-dot status-idle';
+  document.getElementById('pipelineStatus').textContent = '空闲';
+  document.getElementById('pipelineStatus').style.color = '#f1f5f9';
+  document.getElementById('pipelineDetail').textContent = `上次运行: ${now()}`;
+  loadReport();
+}
+
+async function stepwiseNextLoop() {
+  const STAGE_LABELS = { 1: 'p1', 2: 'p2', 3: 'p3', 4: 'p4' };
+
+  while (true) {
+    let nextRes;
+    try {
+      nextRes = await fetch(`${API_BASE}/api/agents/run/stepwise/next`, { method: 'POST' }).then(r => r.json());
+    } catch (e) {
+      log(`调用 next 失败: ${e.message}`, 'error');
+      return;
+    }
+
+    if (!nextRes || !nextRes.success) {
+      log(`分步执行失败: ${nextRes?.error}`, 'error');
+      return;
+    }
+
+    if (nextRes.skipped) {
+      log(`Stage 4 被跳过: ${nextRes.reason}`, 'warn');
+      await stepwiseWaitForCompletion();
+      return;
+    }
+
+    const label = STAGE_LABELS[nextRes.stage] || `s${nextRes.stage}`;
+    const agentList = nextRes.agents.join(', ');
+    log(`--- ${label}: ${agentList} ---`, 'info');
+
+    nextRes.agents.forEach(a => setNodeState(a, 'running'));
+
+    const stageDone = await stepwiseWaitForStage();
+    if (!stageDone) {
+      log('阶段执行异常，流水线中断', 'error');
+      return;
+    }
+
+    const statusRes = await fetch(`${API_BASE}/api/agents/status`).then(r => r.json());
+    const agentStatus = statusRes?.pipeline_status?.agent_status || {};
+    for (const [name, info] of Object.entries(agentStatus)) {
+      setNodeState(name, info.state === 'success' ? 'success' : info.state === 'failed' ? 'failed' : '');
+    }
+
+    if (statusRes?.stepwise?.pipeline_complete) {
+      if (statusRes.stepwise.risk_blocked) {
+        log('分步流水线完成 (风控拦截，跳过Report)', 'warn');
+      } else {
+        log('分步流水线完成', 'success');
+      }
+      return;
+    }
+  }
+}
+
+async function stepwiseWaitForStage(timeoutSec = 600) {
+  const pollMs = 2000;
+  const maxPolls = Math.ceil(timeoutSec * 1000 / pollMs);
+  let pollCount = 0;
+
+  return new Promise((resolve) => {
+    const poll = setInterval(async () => {
+      pollCount++;
+      try {
+        const sr = await fetch(`${API_BASE}/api/agents/status`).then(r => r.json());
+        if (!sr) { clearInterval(poll); resolve(false); return; }
+
+        const agentStatus = sr.pipeline_status?.agent_status || {};
+        for (const [name, info] of Object.entries(agentStatus)) {
+          setNodeState(name, info.state === 'running' ? 'running' : info.state === 'success' ? 'success' : '');
+        }
+
+        const sw = sr.stepwise;
+        if (sw && sw.stage_complete && !sw.stage_running) { clearInterval(poll); resolve(true); return; }
+        if (sw && sw.pipeline_complete) { clearInterval(poll); resolve(true); return; }
+        if (pollCount >= maxPolls) { clearInterval(poll); log('阶段执行超时', 'error'); resolve(false); }
+      } catch (e) { clearInterval(poll); resolve(false); }
+    }, pollMs);
+  });
+}
+
+async function stepwiseWaitForCompletion() {
+  return new Promise((resolve) => {
+    let count = 0;
+    const poll = setInterval(async () => {
+      count++;
+      try {
+        const sr = await fetch(`${API_BASE}/api/agents/status`).then(r => r.json());
+        if (!sr?.pipeline_running) { clearInterval(poll); resolve(); return; }
+        if (count > 30) { clearInterval(poll); resolve(); }
+      } catch (e) { clearInterval(poll); resolve(); }
+    }, 1000);
+  });
 }
 
 function startPolling() {

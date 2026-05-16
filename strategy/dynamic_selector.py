@@ -105,19 +105,19 @@ def apply_constraints(rule_perf: dict) -> Tuple[bool, str]:
     Returns (passed, reason).  If passed is False the rule should be excluded.
 
     Checks:
-        1. Minimum 3 trades per stock (normalized by sample_count)
+        1. Minimum total trades >= 3 (avoid noise from per-stock normalization)
         2. Max drawdown < 20 %
         3. 60-day return > -5 %
         4. (Max consecutive loss days <= 12 — SKIPPED: evaluate_rule does
            not return equity_curve data. Requires backtester upgrade.)
     """
-    # 1. Minimum trades per stock — total_trades is the sum across all
-    #    sampled stocks, so normalize by sample_count for a fair threshold.
+    # 1. Minimum total trades — use absolute count instead of per-stock ratio.
+    #    In short windows (60d/120d), per-stock trades are often 0~1 which
+    #    was filtering out all rules. A total of 3+ trades is a reasonable
+    #    noise floor.
     total_trades = rule_perf.get("total_trades", 0) or 0
-    sample_count = rule_perf.get("sample_count", 1) or 1
-    per_stock_trades = total_trades / max(sample_count, 1)
-    if per_stock_trades < 3:
-        return False, f"insufficient_trades({per_stock_trades:.1f}<3 per stock)"
+    if total_trades < 3:
+        return False, f"insufficient_trades(total={total_trades}<3)"
 
     # 2. Max drawdown
     mdd = abs(rule_perf.get("max_drawdown", 0) or 0)
@@ -142,8 +142,8 @@ def get_turnover_penalty(rule_perf: dict) -> float:
     Estimates turnover from total_trades / sample_count since the backtester
     does not yet surface turnover_rate directly.
 
-    - estimated turnover > 2.0  → eliminated (return 0.0)
-    - 1.5 < estimated turnover <= 2.0 → score * 0.7
+    - estimated turnover > 5.0  → eliminated (return 0.0)
+    - 3.0 < estimated turnover <= 5.0 → score * 0.7
     - otherwise → 1.0
     """
     # NOTE: turnover_rate is not returned by RuleMiner.evaluate_rule().
@@ -153,9 +153,9 @@ def get_turnover_penalty(rule_perf: dict) -> float:
     if sample_count < 1:
         return 1.0
     est_turnover = total_trades / sample_count
-    if est_turnover > 2.0:
+    if est_turnover > 5.0:
         return 0.0
-    if 1.5 < est_turnover <= 2.0:
+    if 3.0 < est_turnover <= 5.0:
         return 0.7
     return 1.0
 

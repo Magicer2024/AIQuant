@@ -884,10 +884,14 @@ class GeneticEvolver:
                 break
 
         print(f"[Phase2] 进化完成，开始入库 (总耗时 {time.time()-t_init:.1f}s)")
-        # 4. 入库合格规则 (fitness > 0.5, 信号重叠 < 75%)
+        # 4. 入库合格规则 (fitness > 0.15, 胜率 >= 50%, 成交次数 >= 5, 信号重叠 < 75%)
         inserted = 0
         for rule, fitness, perf in evaluated:
-            if fitness <= 0.5:
+            if fitness <= 0.15:        # 原 0.5 → 0.15，过滤综合得分过低的规则
+                continue
+            if perf.get("win_rate", 0) < 50:  # 强制最低胜率，确保策略具备正期望
+                continue
+            if perf.get("total_trades", 0) < 5:  # 排除样本量过少的噪声规则
                 continue
 
             # 检查与已入库规则的信号重叠

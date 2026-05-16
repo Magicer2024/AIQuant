@@ -2,6 +2,9 @@
 scheduler/state.py —— 进程内调度状态（线程安全由调用方保证）
 """
 
+import threading
+from datetime import datetime
+
 # 传统同步/扫描状态（兼容旧代码）
 SYNC_STATUS = {"running": False, "last_time": None, "last_result": ""}
 SCAN_STATUS = {"running": False, "last_time": None, "last_result": ""}
@@ -18,7 +21,31 @@ PIPELINE_STATUS = {
     "last_time": None,
     "last_result": None,
     "agent_status": {},  # 各Agent实时状态
+    "logs": [],          # 流水线执行日志（透传到前端）
 }
+
+_log_lock = threading.Lock()
+
+
+def append_log(level: str, message: str, agent: str | None = None):
+    """追加一条流水线日志（线程安全），供前端实时展示"""
+    with _log_lock:
+        entry = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "level": level,
+            "message": message,
+            "agent": agent,
+        }
+        PIPELINE_STATUS["logs"].append(entry)
+        # 保留最近 500 条，防止内存无限增长
+        if len(PIPELINE_STATUS["logs"]) > 500:
+            PIPELINE_STATUS["logs"] = PIPELINE_STATUS["logs"][-500:]
+
+
+def get_logs(since_index: int = 0) -> list[dict]:
+    """获取从指定索引开始的增量日志"""
+    with _log_lock:
+        return PIPELINE_STATUS["logs"][since_index:]
 
 
 def update_pipeline_status(

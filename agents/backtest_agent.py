@@ -55,15 +55,17 @@ class BacktestAgent(BaseAgent):
             report = self._backtest_single(item, strategy="v4", exec_date=exec_date)
             reports.append(report)
 
-        # 汇总统计
-        avg_winrate = sum(r["win_rate"] for r in reports) / len(reports) if reports else 0
-        avg_return = sum(r["avg_return"] for r in reports) / len(reports) if reports else 0
+        # 汇总统计（只统计成功的回测）
+        valid_reports = [r for r in reports if r.get("status") == "ok"]
+        avg_winrate = sum(r["win_rate"] for r in valid_reports) / len(valid_reports) if valid_reports else 0
+        avg_return  = sum(r["avg_return"] for r in valid_reports) / len(valid_reports) if valid_reports else 0
 
         ctx.set("backtest_reports", reports)
 
         return {
             "status": "ok",
             "reports_count": len(reports),
+            "valid_count": len(valid_reports),
             "avg_win_rate": round(avg_winrate, 3),
             "avg_return": round(avg_return, 3),
             "reports": reports,
@@ -158,7 +160,9 @@ class BacktestAgent(BaseAgent):
                     "name": name,
                     "strategy": strategy,
                     "signal_count_90d": len(signals),
+                    "win_rate": round(win_rate_5d, 3),
                     "win_rate_5d": round(win_rate_5d, 3),
+                    "avg_return": round(avg_5d, 4),
                     "avg_return_5d": round(avg_5d, 4),
                     "avg_return_10d": round(avg_10d, 4),
                     "status": "ok",

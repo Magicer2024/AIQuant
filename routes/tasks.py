@@ -105,6 +105,12 @@ def run_lgbm_train_task():
     return run_lgbm_train()
 
 
+def run_full_pipeline_task():
+    """一键执行: P1 → P2 → P3 → P4"""
+    from services.strategy_lab_service import run_full_pipeline
+    return run_full_pipeline()
+
+
 TASK_REGISTRY = {
     "demo": demo_task,
     "backtest": run_backtest_task,
@@ -113,6 +119,7 @@ TASK_REGISTRY = {
     "phase2_evolve": run_phase2_evolve_task,
     "phase4_select": run_phase4_select_task,
     "lgbm_train": run_lgbm_train_task,
+    "full_pipeline": run_full_pipeline_task,
 }
 
 
@@ -205,5 +212,6 @@ def get_task_types():
             {"id": "phase2_evolve", "name": "Phase2 遗传进化", "description": "遗传算法进化策略规则（交叉/变异/选择）"},
             {"id": "phase4_select", "name": "Phase4 动态选股", "description": "双窗口回测评分 + 动态策略选择 + 三级后备"},
             {"id": "lgbm_train", "name": "LGBM 训练", "description": "LightGBM 融合模型训练"},
+            {"id": "full_pipeline", "name": "一键执行流水线", "description": "P1 规则挖掘 → P2 遗传进化 → P3 LGBM训练 → P4 动态选股"},
         ],
     })

@@ -2,7 +2,7 @@
 services/strategy_lab_service.py —— 策略实验室业务逻辑
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from strategy.factor_lib import FACTOR_REGISTRY, get_factor_category, get_factor_names_by_category, calc_all_ic
@@ -304,10 +304,16 @@ def run_phase2_evolve(rule_ids: Optional[List[int]] = None, generations: int = 2
 
 
 def run_lgbm_train() -> dict:
+    import pandas as pd
     from strategy.lgbm_ranker import get_ranker
-    from core.db import get_signals_for_training
+    from core.db import get_signals_for_training, get_conn, update_signal_labels
 
     start = _dt.now()
+
+    # 1. 自动回填未打标的信号（用5日后价格计算超额收益）
+    _backfill_signal_labels()
+
+    # 2. 查询已打标信号
     signals = get_signals_for_training("2024-01-01", _dt.now().strftime("%Y-%m-%d"))
 
     if not signals:
@@ -322,6 +328,144 @@ def run_lgbm_train() -> dict:
         "samples": len(signals),
         "metrics": metrics if isinstance(metrics, dict) else {"score": str(metrics)},
         "elapsed_seconds": round(elapsed, 1),
+    }
+
+
+def _backfill_signal_labels(horizon: int = 5):
+    """回填 strategy_signals 表中 label_return 和 is_win 字段。
+
+    用信号触发日 + horizon 天后的实际收盘价计算未来超额收益。
+    对已打标的记录跳过。
+    """
+    import pandas as pd
+
+    with get_conn() as conn:
+        unlabeled = conn.execute("""
+            SELECT id, trade_date, code
+            FROM strategy_signals
+            WHERE label_return IS NULL
+            ORDER BY trade_date
+        """).fetchall()
+
+    if not unlabeled:
+        print(f"[Phase3] 所有信号已打标，无需回填")
+        return
+
+    print(f"[Phase3] 需要回填 {len(unlabeled)} 条信号的 label_return")
+
+    # 批量加载相关股票价格数据
+    codes = list(set(r["code"] for r in unlabeled))
+    dates = list(set(r["trade_date"] for r in unlabeled))
+
+    with get_conn() as conn:
+        placeholders = ",".join(["?" for _ in codes])
+        rows = conn.execute(f"""
+            SELECT code, trade_date, close
+            FROM daily_price
+            WHERE code IN ({placeholders})
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY code, trade_date
+        """, (codes, min(dates), (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"))
+        ).fetchall()
+
+    if not rows:
+        print("[Phase3] 无法加载价格数据，跳过回填")
+        return
+
+    price_df = pd.DataFrame([dict(r) for r in rows])
+    price_df["trade_date"] = pd.to_datetime(price_df["trade_date"])
+    price_df = price_df.sort_values(["code", "trade_date"])
+
+    # 加载指数数据用于计算超额收益（可选，没有则用绝对收益）
+    index_close = {}
+    try:
+        with get_conn() as conn:
+            idx_rows = conn.execute("""
+                SELECT trade_date, close FROM index_daily
+                WHERE code = '000001.SH' OR code = '000001'
+                ORDER BY trade_date
+            """).fetchall()
+        if idx_rows:
+            for r in idx_rows:
+                index_close[str(r["trade_date"])] = r["close"]
+    except Exception:
+        pass
+
+    # 逐条计算 label_return
+    updates = []
+    backfilled = 0
+    for sig in unlabeled:
+        sig_id = sig["id"]
+        sig_date = pd.Timestamp(sig["trade_date"])
+        sig_code = sig["code"]
+
+        stock_prices = price_df[
+            (price_df["code"] == sig_code) &
+            (price_df["trade_date"] >= sig_date)
+        ].sort_values("trade_date")
+
+        if len(stock_prices) <= horizon:
+            continue  # 价格数据不足，跳过
+
+        entry_price = stock_prices.iloc[0]["close"]
+        exit_price = stock_prices.iloc[horizon]["close"]
+        stock_return = exit_price / entry_price - 1
+
+        # 计算同期的指数收益（超额收益）
+        sig_date_str = sig["trade_date"]
+        exit_date = stock_prices.iloc[horizon]["trade_date"]
+        exit_date_str = str(exit_date.date()) if hasattr(exit_date, "date") else str(exit_date)
+
+        index_return = 0.0
+        if index_close:
+            idx_entry = index_close.get(sig_date_str)
+            idx_exit = index_close.get(exit_date_str)
+            if idx_entry and idx_exit and idx_entry > 0:
+                index_return = idx_exit / idx_entry - 1
+
+        label_return = stock_return - index_return
+        is_win = 1 if label_return > 0 else 0
+        updates.append((round(label_return, 6), is_win, sig_id))
+        backfilled += 1
+
+    if updates:
+        update_signal_labels(updates)
+        print(f"[Phase3] 回填完成: {backfilled}/{len(unlabeled)} 条信号已打标")
+    else:
+        print(f"[Phase3] 无有效数据可回填 (所有信号价格数据不足)")
+
+
+
+def run_full_pipeline() -> dict:
+    """一键执行完整流水线: P1 规则挖掘 → P2 遗传进化 → P3 LGBM训练 → P4 动态选股"""
+    start = _dt.now()
+    results = {}
+
+    phases = [
+        ("phase1", "规则挖掘", run_phase1_mine),
+        ("phase2", "遗传进化", run_phase2_evolve),
+        ("phase3", "LGBM训练", run_lgbm_train),
+        ("phase4", "动态选股", run_phase4_select),
+    ]
+
+    for phase_key, phase_name, fn in phases:
+        t0 = _dt.now()
+        try:
+            result = fn()
+            result["status"] = "success"
+            results[phase_key] = result
+            print(f"[FullPipeline] {phase_name} 完成 ({(_dt.now() - t0).total_seconds():.1f}s)")
+        except Exception as e:
+            logger.error(f"[FullPipeline] {phase_name} 失败: {e}")
+            results[phase_key] = {"status": "failed", "error": str(e)}
+
+    elapsed = (_dt.now() - start).total_seconds()
+    return {
+        "pipeline": "full",
+        "status": "success",
+        "elapsed_seconds": round(elapsed, 1),
+        "phases": results,
     }
 
 

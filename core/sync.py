@@ -217,12 +217,16 @@ def _format_code_for_baostock(code: str) -> str:
 
 
 def sync_one_stock(code: str, start_date: str = HISTORY_START,
-                   end_date: str = None, verbose: bool = False) -> bool:
+                   end_date: str = None, verbose: bool = False,
+                   auto_login: bool = True) -> bool:
     """
     拉取单只股票行情并写入数据库（主数据源：baostock，备用：akshare）
-    
+
     注意：baostock 的 query_history_k_data_plus 不是线程安全的，
     如果在多线程环境中使用，需要确保每个线程有自己的登录会话
+
+    :param auto_login: 为 True 时自动 login/logout；为 False 时依赖外部已登录的会话，
+                       适合批量调用场景（外部统一 login，批量查询后再 logout）
     """
     # 标准化日期格式：去除 - 分隔符，统一为 YYYYMMDD
     start_date = start_date.replace("-", "")
@@ -243,31 +247,33 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
     # 主数据源：baostock
     try:
         import baostock as bs
-        # 每个线程需要独立登录
-        lg = bs.login()
-        if lg.error_code != '0':
-            if verbose:
-                print(f"  [{code}] baostock 登录失败: {lg.error_msg}")
-            bs.logout()
-            raise Exception("baostock login failed")
-        
+        # 仅在 auto_login=True 时自行管理登录
+        if auto_login:
+            lg = bs.login()
+            if lg.error_code != '0':
+                if verbose:
+                    print(f"  [{code}] baostock 登录失败: {lg.error_msg}")
+                bs.logout()
+                raise Exception("baostock login failed")
+
         # 转换日期格式
         bs_start = start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:]
         bs_end = end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
-        
+
         rs = bs.query_history_k_data_plus(
             bs_code,
             "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg",
             start_date=bs_start, end_date=bs_end,
             frequency="d", adjustflag="2"  # 前复权
         )
-        
+
         data_list = []
         while (rs.error_code == '0') & rs.next():
             data_list.append(rs.get_row_data())
-        
-        bs.logout()
-        
+
+        if auto_login:
+            bs.logout()
+
         if data_list:
             df = pd.DataFrame(data_list, columns=rs.fields)
             # 转换数据类型
