@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(superpowers:writing-plans)",
+      "Skill(superpowers:writing-plans:*)",
+      "Skill(superpowers:subagent-driven-development)",
+      "Skill(superpowers:subagent-driven-development:*)",
+      "Skill(superpowers:using-git-worktrees)",
+      "Skill(superpowers:using-git-worktrees:*)",
+      "Bash(python -m pip install pyqlib)",
+      "Bash(python3 -m pip install pyqlib)",
+      "Bash(pip install *)",
+      "Bash(cmd /c \"python --version 2>&1 && pip install pyqlib 2>&1\")",
+      "Bash(where python *)",
+      "Bash(ls /c/Python*)",
+      "Read(//mnt/**)",
+      "Bash(python -c \"from agents.data_agent import DataAgent; print\\('DataAgent OK'\\)\")",
+      "Bash(python -c \"from agents.backtest_agent import BacktestAgent; print\\('BacktestAgent OK'\\)\")",
+      "Bash(python -c \"from services.strategy_lab_service import run_phase1_mine; print\\('strategy_lab OK'\\)\")",
+      "Bash(python -c \"from services.stock_service import run_single_backtest; print\\('stock_service OK'\\)\")",
+      "Bash(python -c \"from services.strategy_service import run_all_strategies; print\\('strategy_service OK'\\)\")"
+    ]
+  }
+}

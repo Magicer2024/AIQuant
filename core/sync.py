@@ -15,10 +15,12 @@ from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.data_fetcher import get_market_index
 from core.db import (
-    init_db, upsert_stock_list, upsert_daily_price, update_strategy_scores_batch,
+    init_db, upsert_stock_list, update_strategy_scores_batch,
     get_all_stocks, get_latest_date, get_latest_date_all, get_stock_count_in_db,
     log_sync, db_stats, get_conn, get_daily_price, upsert_index_daily, get_index_daily
 )
+from qlib_engine.data_bridge import append_daily_data, batch_append_daily, append_calendar_dates
+from qlib_engine import init_qlib as _init_qlib
 from strategy.strategies import (
     strategy_volume_breakout, strategy_ma_convergence,
     strategy_price_volume_divergence, strategy_bottom_fishing,
@@ -278,7 +280,9 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
             
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
-            n = upsert_daily_price(code, df)
+            # Write to Qlib binary format
+            df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+            n = append_daily_data(code, df_qlib)
             if verbose:
                 print(f"  [{code}] baostock OK (+{n} 行)")
             return True
@@ -302,7 +306,9 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
             }, inplace=True)
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
-            n = upsert_daily_price(code, df)
+            # Write to Qlib binary format
+            df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+            n = append_daily_data(code, df_qlib)
             if verbose:
                 print(f"  [{code}] akshare OK (+{n} 行)")
             return True
@@ -323,6 +329,7 @@ def initial_sync(limit: int = None, verbose: bool = True) -> dict:
     支持断点续传（已有数据的股票自动跳过）
     """
     init_db()
+    _init_qlib()  # Ensure Qlib is initialized before data operations
     stocks_df = get_all_stocks()
 
     if stocks_df.empty:
@@ -463,7 +470,7 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
                min_coverage: float = 0.9) -> dict:
     """
     每天运行一次：增量拉取当日行情（单线程版本，baostock 不支持多线程）
-    
+
     Args:
         verbose: 是否打印详细日志
         progress_callback: 进度回调函数，接收(current, total, symbol)参数
@@ -471,8 +478,9 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         min_coverage: 覆盖率阈值，默认0.9（90%），数据源不完整时可降低
     """
     import baostock as bs
-    
+
     init_db()
+    _init_qlib()  # Ensure Qlib is initialized before data operations
     stocks_df = get_all_stocks()
 
     if stocks_df.empty:
@@ -625,7 +633,8 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
                 if data_list:
                     df = pd.DataFrame(data_list)
                     df.set_index('date', inplace=True)
-                    n = upsert_daily_price(code, df)
+                    df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+                    n = append_daily_data(code, df_qlib)
                     success_n += 1
                     synced_codes.add(code)
                     

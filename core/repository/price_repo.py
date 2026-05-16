@@ -208,13 +208,36 @@ def get_latest_date(code: str) -> str | None:
     return row["d"] if row and row["d"] else None
 
 
-def get_latest_date_all() -> str | None:
-    """获取数据库中全市场最新交易日"""
+def get_latest_date_all(before_date: str = None) -> str | None:
+    """获取数据库中全市场最新交易日
+
+    :param before_date: 可选，只返回该日期之前的交易日（非交易日时排除当天）
+    """
+    where = "WHERE trade_date < ?" if before_date else ""
+    params = (before_date,) if before_date else ()
     with _get_conn() as conn:
-        row = conn.execute(
-            "SELECT MAX(trade_date) as d FROM daily_price"
-        ).fetchone()
-    return row["d"] if row and row["d"] else None
+        rows = conn.execute(
+            f"SELECT DISTINCT trade_date FROM daily_price {where} ORDER BY trade_date DESC LIMIT 30",
+            params,
+        ).fetchall()
+    if not rows:
+        return None
+    candidates = [r["trade_date"] for r in rows]
+    try:
+        import akshare as ak
+        import pandas as pd
+        df = ak.tool_trade_date_hist_sina()
+        trade_dates = set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
+        for d in candidates:
+            if d in trade_dates:
+                return d
+    except Exception:
+        pass
+    from datetime import datetime as _dt
+    for d in candidates:
+        if _dt.strptime(d, "%Y-%m-%d").weekday() < 5:
+            return d
+    return candidates[0]
 
 
 def has_today_data(code: str) -> bool:

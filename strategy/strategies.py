@@ -428,3 +428,19 @@ def fuse_signals(dfs: List[pd.DataFrame],
     result["SELL_SIGNAL"]   = False
     return result
 
+
+def fuse_with_phase34(dfs: List[pd.DataFrame],
+                       weights: List[float] = None,
+                       phase34_signals: dict = None) -> pd.DataFrame:
+    """
+    Fuse strategy outputs: prefer Phase 3/4 dynamic scoring, fall back to manual scoring.
+
+    phase34_signals: {"code": "000001", "fusion_score": 35.2, "signals": [...]}
+    """
+    result = fuse_signals(dfs, weights)
+    if phase34_signals and phase34_signals.get("fusion_score", 0) > 0:
+        new_score = phase34_signals["fusion_score"]
+        new_score = max(0.0, min(50.0, new_score))
+        result.loc[result.index[-1], "FUSION_SCORE"] = new_score
+    return result
+

@@ -3,8 +3,15 @@ config/thresholds.py —— 扫描阈值、回测默认参数、风控阈值
 """
 
 # ── 5策略融合评分阈值 ──────────────────────────
-FUSION_THRESHOLD = 20.0       # 融合分触发门槛（0-50）
-FUSION_THRESHOLD_MIN = 15.0   # 最低有效门槛（数据实际范围）
+FUSION_THRESHOLD = 28.0       # 融合分触发门槛（与 signal_agent.py/quant.py 对齐）
+FUSION_THRESHOLD_MIN = 15.0   # 最低有效门槛（信号回填用）
+V4_SCORE_THRESHOLD = 1.8      # v4 超跌反弹信号阈值
+
+# ── 信号扫描参数 ───────────────────────────────
+START_CAPITAL = 10000         # 单笔交易初始资金
+POSITION_PER_STOCK = 0.5      # 单股仓位比例
+POSITION_NUM = 3              # 每日最多推荐数
+SIG_BACKFILL_THRESHOLD = 15.0 # 信号回填最低分
 
 # ── 单股止损止盈 ───────────────────────────────
 STOP_LOSS = -0.06             # 默认止损 -6%

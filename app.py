@@ -1,5 +1,5 @@
 """
-Flask 后端 API
+Flask 后端 API（Qlib 集成版）
 提供数据接口给前端可视化界面
 """
 from flask import Flask, jsonify, request, send_from_directory
@@ -16,6 +16,14 @@ from routes.account import account_bp
 from routes.optimizer import optimizer_bp
 from routes.sync import sync_bp
 from routes.agents import agents_bp
+
+# ── Qlib engine initialization ──────────────────────
+try:
+    from qlib_engine import init_qlib
+    init_qlib()
+    print("[Qlib] Engine initialized")
+except Exception as e:
+    print(f"[Qlib] Initialization skipped: {e}")
 
 app = Flask(__name__)
 CORS(app)
@@ -36,12 +44,7 @@ app.register_blueprint(agents_bp)
 
 @app.route("/")
 def index():
-    return send_from_directory(".", "仪表板.html")
-
-
-@app.route("/仪表板.html")
-def dashboard():
-    return send_from_directory(".", "仪表板.html")
+    return send_from_directory(".", "dashboard.html")
 
 
 @app.route("/agent")

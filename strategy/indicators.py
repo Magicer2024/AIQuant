@@ -179,6 +179,34 @@ def calc_dmi(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
     }, index=close.index)
 
 
+def calc_dpo(close: pd.Series, n: int = 20) -> pd.DataFrame:
+    """DPO 去价格趋势震荡"""
+    ma = close.rolling(window=n).mean()
+    dpo = close - ma.shift(int(n / 2) + 1)
+    return pd.DataFrame({"DPO": dpo}, index=close.index)
+
+
+def calc_bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFrame:
+    """布林带"""
+    ma = close.rolling(window=n).mean()
+    std = close.rolling(window=n).std()
+    upper = ma + k * std
+    lower = ma - k * std
+    pct_b = (close - lower) / (upper - lower).clip(lower=1e-9)
+    bandwidth = (upper - lower) / ma.clip(lower=1e-9)
+    return pd.DataFrame({
+        "BB_UPPER": upper, "BB_LOWER": lower, "BB_MA": ma,
+        "BB_PCT_B": pct_b, "BB_BANDWIDTH": bandwidth,
+    }, index=close.index)
+
+
+def calc_historical_volatility(close: pd.Series, n: int = 20) -> pd.DataFrame:
+    """历史波动率（年化）"""
+    log_ret = np.log((close / close.shift(1)).clip(lower=1e-12))
+    hv = log_ret.rolling(window=n).std() * np.sqrt(252)
+    return pd.DataFrame({f"HV_{n}": hv}, index=close.index)
+
+
 def calc_volume_ratio(volume: pd.Series, period: int = 5) -> pd.Series:
     """
     量比：当日成交量 / 过去N日平均量

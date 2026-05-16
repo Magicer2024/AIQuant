@@ -1,5 +1,5 @@
 """
-services/stock_service.py —— 股票数据服务
+services/stock_service.py —— 股票数据服务（Qlib 集成版）
 """
 import traceback
 from typing import List, Dict, Any, Optional
@@ -17,7 +17,104 @@ from strategy.strategies import (
     strategy_whale_accumulation,
     fuse_signals,
 )
-from backtest.backtest import Backtester
+
+# Backtester: prefer Qlib adapter, fall back to legacy engine
+try:
+    from qlib_engine.strategy_adapter import backtest_single_rule, BacktestConfig
+    _HAS_QLIB_BACKTEST = True
+except ImportError:
+    _HAS_QLIB_BACKTEST = False
+
+try:
+    from backtest.backtest import Backtester
+    _HAS_LEGACY_BACKTEST = True
+except ImportError:
+    Backtester = None
+    _HAS_LEGACY_BACKTEST = False
+
+
+def _backtest_via_qlib(df_s, symbol, capital, strategy_label="composite"):
+    """Run backtest via Qlib SimulatorExecutor.
+
+    Converts DataFrame BUY_SIGNAL rows to Qlib signal list,
+    runs backtest_single_rule, and returns a result object
+    compatible with the legacy Backtester interface.
+    """
+    from dataclasses import dataclass, field
+
+    signals = []
+    for idx, row in df_s.iterrows():
+        if row.get("BUY_SIGNAL", False):
+            trade_date = str(idx.date()) if hasattr(idx, "date") else str(idx)[:10]
+            signals.append({
+                "code": symbol,
+                "trade_date": trade_date,
+                "score": float(row.get("COMPOSITE_SCORE", row.get("BUY_SCORE", 50))),
+            })
+
+    if len(signals) < 2:
+        return _empty_backtest_result()
+
+    start_date = str(df_s.index[0].date()) if hasattr(df_s.index[0], "date") else str(df_s.index[0])[:10]
+    end_date = str(df_s.index[-1].date()) if hasattr(df_s.index[-1], "date") else str(df_s.index[-1])[:10]
+
+    config = BacktestConfig(
+        start_time=start_date,
+        end_time=end_date,
+        account=capital,
+        topk=1,
+        n_drop=0,
+    )
+
+    perf = backtest_single_rule(symbol, signals, config)
+
+    @dataclass
+    class QlibBacktestResult:
+        total_return: float = 0.0
+        annual_return: float = 0.0
+        max_drawdown: float = 0.0
+        sharpe_ratio: float = 0.0
+        win_rate: float = 0.0
+        profit_factor: float = 0.0
+        total_trades: int = 0
+        benchmark_return: float = 0.0
+        alpha: float = 0.0
+        avg_holding_days: float = 0.0
+        trades: list = field(default_factory=list)
+        equity_dates: list = field(default_factory=list)
+        equity_curve: list = field(default_factory=list)
+
+    return QlibBacktestResult(
+        total_return=perf.get("annual_return", 0),
+        annual_return=perf.get("annual_return", 0),
+        max_drawdown=perf.get("max_drawdown", 0),
+        sharpe_ratio=perf.get("sharpe_ratio", 0),
+        win_rate=perf.get("win_rate", 0),
+        total_trades=perf.get("total_trades", 0),
+    )
+
+
+def _empty_backtest_result():
+    """Return a null backtest result compatible with Backtester interface."""
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class EmptyResult:
+        total_return: float = 0.0
+        annual_return: float = 0.0
+        max_drawdown: float = 0.0
+        sharpe_ratio: float = 0.0
+        win_rate: float = 0.0
+        profit_factor: float = 0.0
+        total_trades: int = 0
+        benchmark_return: float = 0.0
+        alpha: float = 0.0
+        avg_holding_days: float = 0.0
+        trades: list = field(default_factory=list)
+        equity_dates: list = field(default_factory=list)
+        equity_curve: list = field(default_factory=list)
+
+    return EmptyResult()
 
 
 def get_stock_list(with_score: bool = True) -> Dict[str, Any]:
@@ -145,49 +242,101 @@ _STRATEGY_MAP = {
 
 def run_single_backtest(symbol: str, start_date: str = "20220101",
                         strategy_name: str = "composite", capital: float = 100000) -> Dict[str, Any]:
-    """单股策略回测"""
+    """单股策略回测（优先使用 Qlib 引擎）"""
     strategy_name = strategy_name if strategy_name in _STRATEGY_MAP else "composite"
     strategy_label, strategy_fn = _STRATEGY_MAP[strategy_name]
 
     df = get_stock_history(symbol=symbol, start_date=start_date)
     df_s = strategy_fn(df)
 
-    bt = Backtester(initial_capital=capital)
-    result = bt.run(df_s)
-    summary = bt.get_summary(result)
+    # Try Qlib first, fall back to legacy Backtester
+    if _HAS_QLIB_BACKTEST:
+        try:
+            result = _backtest_via_qlib(df_s, symbol, capital, strategy_name)
+            summary = {
+                "total_trades": result.total_trades,
+                "win_rate": result.win_rate,
+                "total_return": result.total_return,
+                "annual_return": result.annual_return,
+                "max_drawdown": result.max_drawdown,
+                "sharpe_ratio": result.sharpe_ratio,
+            }
+            return {
+                "symbol": symbol,
+                "summary": summary,
+                "metrics": {
+                    "total_return": result.total_return,
+                    "annual_return": result.annual_return,
+                    "max_drawdown": result.max_drawdown,
+                    "sharpe_ratio": result.sharpe_ratio,
+                    "win_rate": result.win_rate,
+                    "profit_factor": result.profit_factor,
+                    "total_trades": result.total_trades,
+                    "benchmark_return": result.benchmark_return,
+                    "alpha": result.alpha,
+                    "avg_holding_days": result.avg_holding_days,
+                },
+                "equity_curve": [
+                    {"date": d, "value": v}
+                    for d, v in zip(result.equity_dates, result.equity_curve)
+                ],
+                "trades": [{
+                    "entry_date": t.entry_date if hasattr(t, "entry_date") else "",
+                    "entry_price": t.entry_price if hasattr(t, "entry_price") else 0,
+                    "exit_date": t.exit_date if hasattr(t, "exit_date") else "",
+                    "exit_price": t.exit_price if hasattr(t, "exit_price") else 0,
+                    "shares": t.shares if hasattr(t, "shares") else 0,
+                    "exit_reason": t.exit_reason if hasattr(t, "exit_reason") else "signal",
+                    "pnl": t.pnl if hasattr(t, "pnl") else 0,
+                    "pnl_pct": t.pnl_pct if hasattr(t, "pnl_pct") else 0,
+                    "holding_days": t.holding_days if hasattr(t, "holding_days") else 0,
+                } for t in (result.trades or [])],
+                "engine": "qlib",
+            }
+        except Exception:
+            pass
 
-    trades_list = []
-    for t in result.trades:
-        trades_list.append({
-            "entry_date": t.entry_date,
-            "entry_price": t.entry_price,
-            "exit_date": t.exit_date,
-            "exit_price": t.exit_price,
-            "shares": t.shares,
-            "exit_reason": t.exit_reason,
-            "pnl": t.pnl,
-            "pnl_pct": t.pnl_pct,
-            "holding_days": t.holding_days,
-        })
+    # Fallback to legacy Backtester
+    if _HAS_LEGACY_BACKTEST:
+        bt = Backtester(initial_capital=capital)
+        result = bt.run(df_s)
+        summary = bt.get_summary(result)
 
-    return {
-        "symbol": symbol,
-        "summary": summary,
-        "metrics": {
-            "total_return": result.total_return,
-            "annual_return": result.annual_return,
-            "max_drawdown": result.max_drawdown,
-            "sharpe_ratio": result.sharpe_ratio,
-            "win_rate": result.win_rate,
-            "profit_factor": result.profit_factor,
-            "total_trades": result.total_trades,
-            "benchmark_return": result.benchmark_return,
-            "alpha": result.alpha,
-            "avg_holding_days": result.avg_holding_days,
-        },
-        "equity_curve": [
-            {"date": d, "value": v}
-            for d, v in zip(result.equity_dates, result.equity_curve)
-        ],
-        "trades": trades_list,
-    }
+        trades_list = []
+        for t in result.trades:
+            trades_list.append({
+                "entry_date": t.entry_date,
+                "entry_price": t.entry_price,
+                "exit_date": t.exit_date,
+                "exit_price": t.exit_price,
+                "shares": t.shares,
+                "exit_reason": t.exit_reason,
+                "pnl": t.pnl,
+                "pnl_pct": t.pnl_pct,
+                "holding_days": t.holding_days,
+            })
+
+        return {
+            "symbol": symbol,
+            "summary": summary,
+            "metrics": {
+                "total_return": result.total_return,
+                "annual_return": result.annual_return,
+                "max_drawdown": result.max_drawdown,
+                "sharpe_ratio": result.sharpe_ratio,
+                "win_rate": result.win_rate,
+                "profit_factor": result.profit_factor,
+                "total_trades": result.total_trades,
+                "benchmark_return": result.benchmark_return,
+                "alpha": result.alpha,
+                "avg_holding_days": result.avg_holding_days,
+            },
+            "equity_curve": [
+                {"date": d, "value": v}
+                for d, v in zip(result.equity_dates, result.equity_curve)
+            ],
+            "trades": trades_list,
+            "engine": "legacy",
+        }
+
+    raise RuntimeError("No backtest engine available (Qlib or legacy)")
