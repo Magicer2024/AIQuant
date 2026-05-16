@@ -10,7 +10,6 @@ ministries/ -- 六部职能模块
   工部(works)     -- 基础设施、配置管理、监控告警、策略部署
 """
 
-# 六部注册表
 MINISTRY_REGISTRY = {
     "personnel": {
         "name": "吏部",

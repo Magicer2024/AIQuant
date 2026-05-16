@@ -153,7 +153,6 @@ class DataSourceManager:
     def get_daily_price(self, code: str, start_date: str = None, end_date: str = None,
                         source_type: DataSourceType = None) -> list[dict]:
         """获取日线数据（自动切换数据源）"""
-        # 先尝试主数据源
         source = self.get_source(source_type)
         if source:
             try:
@@ -163,7 +162,6 @@ class DataSourceManager:
             except Exception:
                 pass
 
-        # 主数据源失败，尝试备用
         for st, src in self.sources.items():
             if st == (source_type or self.primary):
                 continue

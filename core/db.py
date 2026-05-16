@@ -12,6 +12,7 @@ import sqlite3
 import os
 import math
 import json
+import warnings
 import pandas as pd
 from datetime import datetime, date
 from contextlib import contextmanager
@@ -355,68 +356,9 @@ CREATE TABLE IF NOT EXISTS stock_mgmt_holding (
 CREATE INDEX IF NOT EXISTS idx_mh_date ON stock_mgmt_holding(trade_date);
 CREATE INDEX IF NOT EXISTS idx_mh_code ON stock_mgmt_holding(code);
 
--- 风控事件记录表
-CREATE TABLE IF NOT EXISTS risk_events (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id   TEXT,
-    rule_name     TEXT    NOT NULL,
-    category      TEXT    NOT NULL,
-    level         TEXT    NOT NULL,
-    message       TEXT    NOT NULL,
-    metric_value  REAL,
-    threshold     REAL,
-    suggestion    TEXT,
-    created_at    TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_risk_events_time ON risk_events(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_risk_events_level ON risk_events(level);
-
--- 风控状态快照表
-CREATE TABLE IF NOT EXISTS risk_status (
-    account_id        TEXT PRIMARY KEY,
-    overall_level     TEXT    NOT NULL,
-    active_rules      TEXT,
-    current_drawdown  REAL DEFAULT 0,
-    current_positions INTEGER DEFAULT 0,
-    total_exposure    REAL DEFAULT 0,
-    available_capital REAL DEFAULT 0,
-    last_check        TEXT    NOT NULL,
-    block_reason      TEXT,
-    updated_at        TEXT
-);
-
--- 黑名单表
-CREATE TABLE IF NOT EXISTS blacklist (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    stock_code    TEXT    NOT NULL,
-    reason        TEXT    NOT NULL,
-    created_by    TEXT    DEFAULT 'system',
-    created_at    TEXT    NOT NULL,
-    expiry_date   TEXT,
-    removed_at    TEXT,
-    UNIQUE(stock_code)
-);
-CREATE INDEX IF NOT EXISTS idx_blacklist_expiry ON blacklist(expiry_date);
-
--- 风控豁免表
-CREATE TABLE IF NOT EXISTS risk_overrides (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    rule_name     TEXT    NOT NULL,
-    reason        TEXT,
-    operator      TEXT,
-    approver      TEXT,
-    status        TEXT    DEFAULT 'pending',
-    created_at    TEXT    NOT NULL,
-    expires_at    TEXT,
-    approved_at   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_override_status ON risk_overrides(status);
-CREATE INDEX IF NOT EXISTS idx_override_expires ON risk_overrides(expires_at);
-
--- 审计日志表
+-- 审计日志
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     TEXT,
     action      TEXT NOT NULL,
     resource    TEXT,
     detail      TEXT,
@@ -608,12 +550,13 @@ def get_stock_name(code: str) -> str:
 
 def upsert_daily_price(code: str, df: pd.DataFrame) -> int:
     """
-    将 DataFrame 行情数据写入数据库（冲突则更新）
-    df 需含列: open/high/low/close/volume/amount/pct_change/turnover
-    index 为 datetime
-    注意：策略评分通过 update_strategy_scores_batch 单独写入
-    返回实际写入行数
+    [DEPRECATED] 将 DataFrame 行情数据写入数据库（冲突则更新）
+    Use qlib_engine.data_bridge.append_daily_data() instead.
     """
+    warnings.warn(
+        "upsert_daily_price is deprecated — use qlib_engine.data_bridge.append_daily_data()",
+        DeprecationWarning, stacklevel=2
+    )
     if df.empty:
         return 0
     records = []
@@ -697,9 +640,13 @@ def update_strategy_scores_batch(code: str, scores_df: pd.DataFrame):
 def get_daily_price(code: str, start_date: str = None, end_date: str = None,
                     min_rows: int = 30) -> pd.DataFrame:
     """
-    从数据库读取某只股票行情，返回 DataFrame（index=date）
-    start_date / end_date: "YYYY-MM-DD" 或 "YYYYMMDD"
+    [DEPRECATED] 从数据库读取某只股票行情，返回 DataFrame（index=date）
+    Use Qlib DataHandler or qlib.data.D.features() instead.
     """
+    warnings.warn(
+        "get_daily_price is deprecated — use Qlib DataHandler or qlib.data.D.features()",
+        DeprecationWarning, stacklevel=2
+    )
     def _fmt(d):
         if d and len(d) == 8:
             return f"{d[:4]}-{d[4:6]}-{d[6:]}"
@@ -737,9 +684,13 @@ def get_daily_price(code: str, start_date: str = None, end_date: str = None,
 
 def upsert_index_daily(code: str, df: pd.DataFrame) -> int:
     """
-    将指数行情 DataFrame（index=date, columns=[open,high,low,close,volume,amount,pct_change]）
-    批量写入 index_daily 表。DataFrame 的 index 必须是可以转化的日期。
+    [DEPRECATED] 将指数行情 DataFrame 批量写入 index_daily 表。
+    Use qlib_engine.data_bridge pattern for index data.
     """
+    warnings.warn(
+        "upsert_index_daily is deprecated — Qlib handles index data via calendars/day.txt",
+        DeprecationWarning, stacklevel=2
+    )
     if df.empty:
         return 0
     records = []
@@ -774,9 +725,13 @@ def upsert_index_daily(code: str, df: pd.DataFrame) -> int:
 
 def get_index_daily(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
     """
-    从 index_daily 表读取指数行情，返回 DataFrame（index=trade_date）
-    start_date / end_date: "YYYY-MM-DD" 或 "YYYYMMDD"
+    [DEPRECATED] 从 index_daily 表读取指数行情，返回 DataFrame（index=trade_date）
+    Use Qlib DataHandler or qlib.data.D.features() instead.
     """
+    warnings.warn(
+        "get_index_daily is deprecated — use Qlib DataHandler or qlib.data.D.features()",
+        DeprecationWarning, stacklevel=2
+    )
     def _fmt(d):
         if d and len(d) == 8:
             return f"{d[:4]}-{d[4:6]}-{d[6:]}"
@@ -812,38 +767,13 @@ def get_latest_date(code: str) -> str | None:
     return row["d"] if row and row["d"] else None
 
 
-def get_latest_date_all(before_date: str = None) -> str | None:
-    """获取数据库中全市场最新交易日
-
-    :param before_date: 可选，只返回该日期之前的交易日（非交易日时排除当天）
-    """
-    where = "WHERE trade_date < ?" if before_date else ""
-    params = (before_date,) if before_date else ()
+def get_latest_date_all() -> str | None:
+    """获取数据库中全市场最新交易日"""
     with get_conn() as conn:
-        rows = conn.execute(
-            f"SELECT DISTINCT trade_date FROM daily_price {where} ORDER BY trade_date DESC LIMIT 30",
-            params,
-        ).fetchall()
-    if not rows:
-        return None
-    candidates = [r["trade_date"] for r in rows]
-    # 优先用 akshare 交易日历精确匹配
-    try:
-        import akshare as ak
-        import pandas as pd
-        df = ak.tool_trade_date_hist_sina()
-        trade_dates = set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
-        for d in candidates:
-            if d in trade_dates:
-                return d
-    except Exception:
-        pass
-    # Fallback: 返回最近的工作日
-    from datetime import datetime as _dt
-    for d in candidates:
-        if _dt.strptime(d, "%Y-%m-%d").weekday() < 5:
-            return d
-    return candidates[0]
+        row = conn.execute(
+            "SELECT MAX(trade_date) as d FROM daily_price"
+        ).fetchone()
+    return row["d"] if row and row["d"] else None
 
 
 def has_today_data(code: str) -> bool:
@@ -1289,11 +1219,6 @@ from core.repository.lhb_repo import (
 from core.repository.mgmt_repo import (
     upsert_mgmt_holding, get_mgmt_holding, get_latest_mgmt_holding_date,
 )
-
-
-# ─────────────────────────────────────────────
-# 策略规则/信号/活跃策略 — Phase 1-4 自动策略生成
-# ─────────────────────────────────────────────
 
 
 def upsert_strategy_rule(rule: dict) -> int:

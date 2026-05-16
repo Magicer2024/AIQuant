@@ -25,7 +25,6 @@ from core.db import (
 
 logger = logging.getLogger(__name__)
 
-# Try to import signal_overlap from genetic_evolver (Task 4 — may not exist yet)
 try:
     from strategy.genetic_evolver import signal_overlap as _ge_signal_overlap
     _HAS_GE_SIGNAL_OVERLAP = True
@@ -105,33 +104,21 @@ def apply_constraints(rule_perf: dict) -> Tuple[bool, str]:
     Returns (passed, reason).  If passed is False the rule should be excluded.
 
     Checks:
-        1. Minimum total trades >= 3 (avoid noise from per-stock normalization)
+        1. Minimum total trades >= 3
         2. Max drawdown < 20 %
         3. 60-day return > -5 %
-        4. (Max consecutive loss days <= 12 — SKIPPED: evaluate_rule does
-           not return equity_curve data. Requires backtester upgrade.)
     """
-    # 1. Minimum total trades — use absolute count instead of per-stock ratio.
-    #    In short windows (60d/120d), per-stock trades are often 0~1 which
-    #    was filtering out all rules. A total of 3+ trades is a reasonable
-    #    noise floor.
     total_trades = rule_perf.get("total_trades", 0) or 0
     if total_trades < 3:
         return False, f"insufficient_trades(total={total_trades}<3)"
 
-    # 2. Max drawdown
     mdd = abs(rule_perf.get("max_drawdown", 0) or 0)
     if mdd >= 20.0:
         return False, f"max_drawdown_exceeded({mdd:.1f}%>=20%)"
 
-    # 3. 60-day return floor
     ret_60 = rule_perf.get("total_return", 0) or 0
     if ret_60 <= -5.0:
         return False, f"return_too_low({ret_60:.1f}%<=-5%)"
-
-    # 4. Consecutive-loss check skipped — RuleMiner.evaluate_rule() does
-    #    not return equity_curve data. Requires backtester upgrade to
-    #    surface per-trade equity curves before this check can be enabled.
 
     return True, "ok"
 
@@ -139,15 +126,8 @@ def apply_constraints(rule_perf: dict) -> Tuple[bool, str]:
 def get_turnover_penalty(rule_perf: dict) -> float:
     """Return a multiplier (<= 1.0) for turnover penalty.
 
-    Estimates turnover from total_trades / sample_count since the backtester
-    does not yet surface turnover_rate directly.
-
-    - estimated turnover > 5.0  → eliminated (return 0.0)
-    - 3.0 < estimated turnover <= 5.0 → score * 0.7
-    - otherwise → 1.0
+    Estimates turnover from total_trades / sample_count.
     """
-    # NOTE: turnover_rate is not returned by RuleMiner.evaluate_rule().
-    # Estimate from trades-per-stock as a proxy until backtester is upgraded.
     total_trades = rule_perf.get("total_trades", 0) or 0
     sample_count = rule_perf.get("sample_count", 1) or 1
     if sample_count < 1:
@@ -165,11 +145,7 @@ def get_turnover_penalty(rule_perf: dict) -> float:
 # ═══════════════════════════════════════════════════════════════
 
 def _calc_signal_strength(rule: StrategyRule, factor_df: pd.DataFrame) -> float:
-    """Calculate signal strength as normalized deviation from threshold.
-
-    For each condition: |value - threshold| / (|threshold| + eps), capped at 1.0.
-    Returns 1.0 - mean deviation (higher = signal closer to threshold = more reliable).
-    """
+    """Calculate signal strength as normalized deviation from threshold."""
     if not rule.conditions or factor_df is None or factor_df.empty:
         return 0.5
     strengths = []
@@ -191,12 +167,7 @@ def _calc_signal_strength(rule: StrategyRule, factor_df: pd.DataFrame) -> float:
 
 def _compute_signal_overlap(rule_a: StrategyRule, rule_b: StrategyRule,
                              stock_data: Dict) -> float:
-    """Compute signal overlap between two strategies across all stocks.
-
-    Uses genetic_evolver.signal_overlap per stock when available (operates on a
-    single factor_df), then averages.  Falls back to a pure-Python Jaccard
-    implementation otherwise.
-    """
+    """Compute signal overlap between two strategies across all stocks."""
     if not stock_data:
         return 0.0
     overlaps = []
@@ -238,11 +209,7 @@ def _slice_stock_data(stock_data: Dict, window_days: int) -> Dict:
 # ═══════════════════════════════════════════════════════════════
 
 def _rule_from_db_row(row: dict) -> Optional[StrategyRule]:
-    """Deserialize a StrategyRule from a DB row (strategy_rules or active_strategies).
-
-    Handles JSON-decoding of conditions and sell_conditions fields.
-    Returns None on parse failure.
-    """
+    """Deserialize a StrategyRule from a DB row."""
     try:
         conds_data = json.loads(row.get("conditions", "[]"))
         conds = [RuleCondition(**c) for c in conds_data]
@@ -281,7 +248,7 @@ class DynamicSelector:
         self.k_min = k_min
         self.k_max = k_max
         self.miner = RuleMiner()
-        self._consecutive_low_weeks = 0   # L2/L3 tracker
+        self._consecutive_low_weeks = 0
 
     # ── Public API ───────────────────────────────────────────
 
@@ -396,7 +363,6 @@ class DynamicSelector:
                 valid_until,
             ))
         try:
-            # 清除所有当前有效的策略（同一周期内多次执行应覆盖旧结果）
             with get_conn() as conn:
                 conn.execute("DELETE FROM active_strategies WHERE valid_until >= ?", (today,))
             upsert_active_strategies(selections)
@@ -457,14 +423,7 @@ class DynamicSelector:
     # ── L1 fallback ──────────────────────────────────────────
 
     def _fallback_l1(self) -> List[dict]:
-        """L1 fallback: return 5 manual baseline strategies.
-
-        These mirror the original five-strategy framework using factor-library
-        conditions so they can be evaluated even with an empty template library.
-
-        Each baseline is persisted into strategy_rules to obtain a real ID,
-        which allows the backtest pipeline to load them by ID later.
-        """
+        """L1 fallback: return 5 manual baseline strategies."""
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         valid_until = (now + timedelta(days=7)).strftime("%Y-%m-%d")
@@ -532,8 +491,6 @@ class DynamicSelector:
                         0.0, 0.0, 0.0, 0.0, 0, 0.0,
                         now_str,
                     ))
-                    # lastrowid gives the inserted row id; for UPDATE on conflict,
-                    # re-query to be safe
                     rule_id = cur.lastrowid
                     if rule_id == 0:
                         row = conn.execute(
@@ -564,11 +521,7 @@ class DynamicSelector:
     # ── L2 / L3 checks ───────────────────────────────────────
 
     def _handle_l2_l3(self, k: int) -> List[dict]:
-        """L2/L3 escalation when active-strategy count stays low.
-
-        L2: 3+ consecutive weeks with < 3 active strategies (non-bear).
-        L3: 4+ consecutive weeks still in L2 → suggest relaxing entry threshold.
-        """
+        """L2/L3 escalation when active-strategy count stays low."""
         alerts = []
         if k < self.k_min:
             self._consecutive_low_weeks += 1
@@ -610,7 +563,7 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
     try:
         ranker = get_ranker()
     except Exception:
-        logger.warning("LGBMRanker unavailable (lightgbm may not be installed) — using fallback")
+        logger.warning("LGBMRanker unavailable — using fallback")
         ranker = None
 
     # 1. Get active strategies
@@ -634,7 +587,7 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
                 rule = item["rule"]
                 rule_map[0] = (rule, item)
         else:
-            for rule in templates[:10]:  # top 10 by fitness
+            for rule in templates[:10]:
                 rule_map[0] = (rule, {"rule_id": 0, "rule_name": rule.name,
                                        "rule_type": rule.rule_type})
 
@@ -642,7 +595,7 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
         return []
 
     # 3-4. Per-stock signal check + feature building
-    stock_signals: Dict[str, List[dict]] = {}  # code -> list of signal dicts
+    stock_signals: Dict[str, List[dict]] = {}
 
     for code, (price_df, factor_df) in stock_data.items():
         if factor_df is None or factor_df.empty:
@@ -656,13 +609,10 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
             except Exception:
                 continue
 
-            # Signal triggered — compute strength
             strength = _calc_signal_strength(rule, factor_df)
-
-            # Build stock-state features
             stock_state = _build_stock_state(price_df, factor_df)
 
-            # Build meta-features for ranker
+            # Build meta-features for ranker with Qlib score support
             features = build_meta_features(
                 rule_id=rule_id,
                 rule_name=rule.name,
@@ -708,7 +658,7 @@ def generate_daily_signals(stock_data: Dict, market_data: dict,
                 sig["confidence"] = sig.get("signal_strength", 0.5) * 100.0
                 sig["raw_score"] = sig["confidence"]
 
-        # Apply bear-market discount to all confidence scores
+        # Apply bear-market discount
         if index_df is not None and is_bear_market(index_df):
             bear_discount = 0.85
             for sig in all_signals_flat:

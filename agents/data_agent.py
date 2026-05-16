@@ -1,12 +1,13 @@
 """
-agents/data_agent.py —— 数据管家
+agents/data_agent.py —— 数据管家（Qlib 集成版）
 
 职责：
-  1. 交易日判断（跳过周末/节假日）
-  2. 全市场行情同步（收盘后全量 / 盘中增量）
-  3. 指数数据同步
-  4. 数据质量检查（缺失率、异常值检测）
-  5. 清理旧缓存
+  1. Qlib 数据完整性验证
+  2. 交易日判断（跳过周末/节假日）
+  3. 全市场行情同步（收盘后全量 / 盘中增量）
+  4. 指数数据同步
+  5. 数据质量检查（缺失率、异常值检测）
+  6. 清理旧缓存
 """
 
 from __future__ import annotations
@@ -34,6 +35,10 @@ class DataAgent(BaseAgent):
         run_dt = datetime.strptime(today, "%Y-%m-%d").date()
         ctx.set("today", today)
 
+        # 0. Qlib data integrity check
+        qlib_status = self._check_qlib_data()
+        ctx.set("qlib_status", qlib_status)
+
         # 1. 交易日判断
         if not is_trading_day(today):
             init_db()
@@ -50,6 +55,7 @@ class DataAgent(BaseAgent):
                 "skip_reason": msg,
                 "today": today,
                 "latest_in_db": latest_in_db,
+                "qlib_status": qlib_status,
             }
 
         init_db()
@@ -65,9 +71,10 @@ class DataAgent(BaseAgent):
                 "latest_in_db": latest_in_db,
                 "stock_count": stats.get("有行情股票数", 0),
                 "record_count": stats.get("行情记录总数", 0),
+                "qlib_status": qlib_status,
             }
 
-        # 2.5 历史日期：不拉取实时数据，检验 DB 是否有足够数据
+        # 2.5 历史日期
         is_historical = run_dt < date.today()
         if is_historical:
             if latest_in_db and latest_in_db >= today:
@@ -80,6 +87,7 @@ class DataAgent(BaseAgent):
                     "latest_in_db": latest_in_db,
                     "stock_count": stats.get("有行情股票数", 0),
                     "record_count": stats.get("行情记录总数", 0),
+                    "qlib_status": qlib_status,
                 }
             else:
                 return {
@@ -90,12 +98,12 @@ class DataAgent(BaseAgent):
                     "today": today,
                     "latest_in_db": latest_in_db,
                     "skip_reason": f"数据库中最新数据为 {latest_in_db}，早于请求日期 {today}，无法为历史日期拉取实时数据",
+                    "qlib_status": qlib_status,
                 }
 
         # 3. 执行同步（仅当天）
         is_after_close = is_after_market_close()
 
-        # 收盘前：今日数据尚未产生，跳过同步，直接使用已有最新数据
         if not is_after_close:
             print(f"  [DataAgent] 市场未收盘，跳过同步，使用已有数据 (最新: {latest_in_db})", flush=True)
             ctx.log("info", f"市场未收盘，跳过同步，使用已有数据 (最新: {latest_in_db})")
@@ -108,6 +116,7 @@ class DataAgent(BaseAgent):
                 "stock_count": stats.get("有行情股票数", 0),
                 "record_count": stats.get("行情记录总数", 0),
                 "note": "market not closed, sync skipped",
+                "qlib_status": qlib_status,
             }
 
         sync_report = self._run_sync(today, full=is_after_close, ctx=ctx)
@@ -126,7 +135,46 @@ class DataAgent(BaseAgent):
             "sync": sync_report,
             "quality": quality,
             "cache_cleaned": cache_cleaned,
+            "qlib_status": qlib_status,
         }
+
+    def _check_qlib_data(self) -> dict:
+        """Validate Qlib data integrity: features exist, calendars populated."""
+        try:
+            from qlib_engine import init_qlib, get_provider_uri
+            from qlib.data import D
+            import os
+
+            init_qlib()
+
+            provider_uri = get_provider_uri()
+            features_dir = os.path.join(provider_uri, "features")
+            feature_count = 0
+            if os.path.exists(features_dir):
+                feature_count = len(os.listdir(features_dir))
+
+            try:
+                calendar = D.calendar()
+                instruments = D.instruments(market="all")
+                calendar_count = len(calendar) if calendar is not None else 0
+                instruments_count = len(instruments) if instruments is not None else 0
+            except Exception:
+                calendar_count = 0
+                instruments_count = 0
+
+            ctx = {
+                "available": feature_count > 0,
+                "feature_dirs": feature_count,
+                "calendar_days": calendar_count,
+                "instruments": instruments_count,
+            }
+
+            if calendar_count > 0:
+                ctx["latest_date"] = str(calendar[-1])
+
+            return ctx
+        except Exception as e:
+            return {"available": False, "error": str(e)}
 
     def _run_sync(self, today: str, full: bool, ctx: AgentContext = None) -> dict:
         """执行数据同步，返回统计"""
@@ -136,7 +184,6 @@ class DataAgent(BaseAgent):
             success_n, fail_n = 0, 0
             total = len(stocks)
 
-            # 批量同步：只登录一次，大幅提升速度
             lg = bs.login()
             if lg.error_code != '0':
                 if ctx:
@@ -193,7 +240,6 @@ class DataAgent(BaseAgent):
             if total == 0:
                 return {"status": "no_data", "missing_ratio": 1.0}
 
-            # 随机抽查100只股票，检查最新数据日期
             sample = stocks.sample(min(100, total)) if total > 100 else stocks
             missing_count = 0
             stale_count = 0

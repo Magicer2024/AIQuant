@@ -155,10 +155,68 @@ def degrade_rule_action(rule_id: int) -> dict:
     return {"success": True, "rule_id": rule_id, "action": "degraded"}
 
 
+# ── Qlib data loading ──────────────────────────────────
+
+def _load_ohlcv_from_qlib(codes: List[str], start_date: str) -> "Optional[pd.DataFrame]":
+    """Try loading OHLCV data via Qlib DataHandler.
+
+    Returns DataFrame with columns [code, trade_date, open, high, low, close, volume]
+    or None if Qlib data is unavailable.
+    """
+    import pandas as pd
+    try:
+        from qlib_engine import init_qlib
+        from qlib.data import D
+
+        init_qlib()
+
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        instruments = [c for c in codes if D.features(
+            [c], ["$close"], start_time=start_date, end_time=end_date
+        ).size > 0]
+
+        if not instruments:
+            return None
+
+        fields = ["$open", "$high", "$low", "$close", "$volume"]
+        df = D.features(instruments, fields, start_time=start_date, end_time=end_date)
+
+        if df is None or df.empty:
+            return None
+
+        df = df.reset_index()
+        df.columns = ["trade_date", "code"] + [f.lstrip("$") for f in fields]
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        return df[["code", "trade_date", "open", "high", "low", "close", "volume"]]
+    except Exception as e:
+        logger.info("Qlib data not available: %s", e)
+        return None
+
+
+def _load_ohlcv_from_sqlite(codes: List[str], start_date: str) -> "pd.DataFrame":
+    """Fallback: load OHLCV data from SQLite daily_price table."""
+    import pandas as pd
+    with get_conn() as conn:
+        placeholders = ",".join(["?" for _ in codes])
+        rows = conn.execute(
+            f"SELECT code, trade_date, open, high, low, close, volume FROM daily_price "
+            f"WHERE code IN ({placeholders}) AND trade_date >= ? "
+            f"ORDER BY code, trade_date",
+            codes + [start_date],
+        ).fetchall()
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
 # ── 数据加载辅助 ──────────────────────────────────
 
 def _load_stock_data_for_pipeline(max_stocks: int = 100) -> tuple:
-    """为 Phase 1/2/4 加载股票行情数据，返回 (stock_data, factor_df, forward_returns, index_df)"""
+    """为 Phase 1/2/4 加载股票行情数据，返回 (stock_data, factor_df, forward_returns, index_df)
+
+    优先使用 Qlib DataHandler，数据不可用时回退到 SQLite daily_price 表。
+    """
     import time
     import pandas as pd
     from core.db import get_all_stocks
@@ -168,65 +226,89 @@ def _load_stock_data_for_pipeline(max_stocks: int = 100) -> tuple:
     codes = stocks_df["code"].tolist()[:max_stocks]
     print(f"[Pipeline] 开始加载 {len(codes)} 只股票数据...")
 
-    with get_conn() as conn:
-        placeholders = ",".join(["?" for _ in codes])
-        rows = conn.execute(
-            f"SELECT code, trade_date, open, high, low, close, volume FROM daily_price "
-            f"WHERE code IN ({placeholders}) AND trade_date >= ? "
-            f"ORDER BY code, trade_date",
-            codes + ["2024-01-01"],
-        ).fetchall()
+    # Try Qlib first, fall back to SQLite
+    df = _load_ohlcv_from_qlib(codes, "2024-01-01")
+    if df is None or df.empty:
+        print("[Pipeline] Qlib 数据不可用，回退到 SQLite daily_price")
+        df = _load_ohlcv_from_sqlite(codes, "2024-01-01")
 
-        if not rows:
-            print("[Pipeline] 没有找到行情数据")
-            return {}, pd.DataFrame(), pd.Series(), pd.DataFrame()
+    if df.empty:
+        print("[Pipeline] 没有找到行情数据")
+        return {}, pd.DataFrame(), pd.Series(), pd.DataFrame()
 
-        df = pd.DataFrame([dict(r) for r in rows])
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        df = df.sort_values(["code", "trade_date"])
-        print(f"[Pipeline] 加载 {len(df)} 条行情记录")
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = df.sort_values(["code", "trade_date"])
+    print(f"[Pipeline] 加载 {len(df)} 条行情记录")
 
-        stock_data = {}
-        t0 = time.time()
-        for code, group in df.groupby("code"):
-            if len(group) < 60:
-                continue
-            group = group.sort_values("trade_date")
-            factor_df = compute_all_factors(group, index_close=None)
-            stock_data[code] = (group, factor_df)
-        print(f"[Pipeline] 因子计算完成: {len(stock_data)} 只股票 (耗时 {time.time()-t0:.1f}s)")
+    stock_data = {}
+    t0 = time.time()
+    for code, group in df.groupby("code"):
+        if len(group) < 60:
+            continue
+        group = group.sort_values("trade_date")
+        factor_df = compute_all_factors(group, index_close=None)
+        stock_data[code] = (group, factor_df)
+    print(f"[Pipeline] 因子计算完成: {len(stock_data)} 只股票 (耗时 {time.time()-t0:.1f}s)")
 
-        factor_df_all = pd.concat(
-            [fd for _, fd in stock_data.values()], keys=list(stock_data.keys()), names=["code", "idx"]
-        ) if stock_data else pd.DataFrame()
+    factor_df_all = pd.concat(
+        [fd for _, fd in stock_data.values()], keys=list(stock_data.keys()), names=["code", "idx"]
+    ) if stock_data else pd.DataFrame()
 
-        fr_list = []
-        for code, (price_df, _) in stock_data.items():
-            fr = price_df["close"].shift(-5) / price_df["close"] - 1
-            fr.name = "forward_return"
-            fr_list.append(fr)
-        forward_returns = pd.concat(
-            fr_list, keys=list(stock_data.keys()), names=["code", "idx"]
-        ) if fr_list else pd.Series(dtype=float)
+    fr_list = []
+    for code, (price_df, _) in stock_data.items():
+        fr = price_df["close"].shift(-5) / price_df["close"] - 1
+        fr.name = "forward_return"
+        fr_list.append(fr)
+    forward_returns = pd.concat(
+        fr_list, keys=list(stock_data.keys()), names=["code", "idx"]
+    ) if fr_list else pd.Series(dtype=float)
 
-        index_df = pd.DataFrame()
-        try:
-            idx_rows = conn.execute(
-                "SELECT trade_date, close FROM index_daily WHERE code=? AND trade_date >= ? ORDER BY trade_date",
-                ("000001.SH", "2024-01-01"),
-            ).fetchall()
-            if not idx_rows:
-                idx_rows = conn.execute(
-                    "SELECT trade_date, close FROM index_daily WHERE code=? AND trade_date >= ? ORDER BY trade_date",
-                    ("000001", "2024-01-01"),
-                ).fetchall()
-            if idx_rows:
-                index_df = pd.DataFrame([dict(r) for r in idx_rows])
-                index_df["trade_date"] = pd.to_datetime(index_df["trade_date"])
-        except Exception:
-            pass
+    # Index data — try Qlib first
+    index_df = _load_index_data("2024-01-01")
 
     return stock_data, factor_df_all, forward_returns, index_df
+
+
+def _load_index_data(start_date: str) -> "pd.DataFrame":
+    """Load index (benchmark) data, trying Qlib first then SQLite."""
+    import pandas as pd
+
+    # Try Qlib
+    try:
+        from qlib_engine import init_qlib
+        from qlib.data import D
+        init_qlib()
+        for benchmark in ["SH000300", "000001.SH", "000001"]:
+            try:
+                idx = D.features([benchmark], ["$close"],
+                                 start_time=start_date,
+                                 end_time=datetime.now().strftime("%Y-%m-%d"))
+                if idx is not None and not idx.empty:
+                    idx = idx.reset_index()
+                    idx.columns = ["trade_date", "code", "close"]
+                    idx["trade_date"] = pd.to_datetime(idx["trade_date"])
+                    return idx[["trade_date", "close"]]
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Fallback to SQLite
+    try:
+        with get_conn() as conn:
+            for code in ["000001.SH", "000001"]:
+                idx_rows = conn.execute(
+                    "SELECT trade_date, close FROM index_daily WHERE code=? AND trade_date >= ? ORDER BY trade_date",
+                    (code, start_date),
+                ).fetchall()
+                if idx_rows:
+                    idx_df = pd.DataFrame([dict(r) for r in idx_rows])
+                    idx_df["trade_date"] = pd.to_datetime(idx_df["trade_date"])
+                    return idx_df
+    except Exception:
+        pass
+
+    return pd.DataFrame()
 
 
 # ── Phase 流水线 ──────────────────────────────────
@@ -260,7 +342,7 @@ def run_phase1_mine() -> dict:
 
 def run_phase2_evolve(rule_ids: Optional[List[int]] = None, generations: int = 20) -> dict:
     from strategy.genetic_evolver import GeneticEvolver
-    from strategy.rule_miner import StrategyRule
+    from strategy.rule_miner import StrategyRule, RuleCondition
     import json as _json
 
     start = _dt.now()
@@ -306,11 +388,11 @@ def run_phase2_evolve(rule_ids: Optional[List[int]] = None, generations: int = 2
 def run_lgbm_train() -> dict:
     import pandas as pd
     from strategy.lgbm_ranker import get_ranker
-    from core.db import get_signals_for_training, get_conn, update_signal_labels
+    from core.db import get_signals_for_training
 
     start = _dt.now()
 
-    # 1. 自动回填未打标的信号（用5日后价格计算超额收益）
+    # 1. 自动回填未打标的信号
     _backfill_signal_labels()
 
     # 2. 查询已打标信号
@@ -320,13 +402,13 @@ def run_lgbm_train() -> dict:
         return {"phase": 3, "error": "No training signals available", "samples": 0}
 
     ranker = get_ranker()
-    metrics = ranker.train(signals)
+    success = ranker.train()
 
     elapsed = (_dt.now() - start).total_seconds()
     return {
         "phase": 3,
         "samples": len(signals),
-        "metrics": metrics if isinstance(metrics, dict) else {"score": str(metrics)},
+        "trained": success,
         "elapsed_seconds": round(elapsed, 1),
     }
 
@@ -334,8 +416,7 @@ def run_lgbm_train() -> dict:
 def _backfill_signal_labels(horizon: int = 5):
     """回填 strategy_signals 表中 label_return 和 is_win 字段。
 
-    用信号触发日 + horizon 天后的实际收盘价计算未来超额收益。
-    对已打标的记录跳过。
+    优先使用 Qlib 数据，回退到 SQLite daily_price。
     """
     import pandas as pd
 
@@ -353,44 +434,22 @@ def _backfill_signal_labels(horizon: int = 5):
 
     print(f"[Phase3] 需要回填 {len(unlabeled)} 条信号的 label_return")
 
-    # 批量加载相关股票价格数据
     codes = list(set(r["code"] for r in unlabeled))
     dates = list(set(r["trade_date"] for r in unlabeled))
+    max_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
 
-    with get_conn() as conn:
-        placeholders = ",".join(["?" for _ in codes])
-        rows = conn.execute(f"""
-            SELECT code, trade_date, close
-            FROM daily_price
-            WHERE code IN ({placeholders})
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY code, trade_date
-        """, (codes, min(dates), (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"))
-        ).fetchall()
+    # Try Qlib first, fall back to SQLite
+    price_df = _load_prices_for_backfill(codes, min(dates), max_date)
 
-    if not rows:
+    if price_df is None or price_df.empty:
         print("[Phase3] 无法加载价格数据，跳过回填")
         return
 
-    price_df = pd.DataFrame([dict(r) for r in rows])
     price_df["trade_date"] = pd.to_datetime(price_df["trade_date"])
     price_df = price_df.sort_values(["code", "trade_date"])
 
-    # 加载指数数据用于计算超额收益（可选，没有则用绝对收益）
-    index_close = {}
-    try:
-        with get_conn() as conn:
-            idx_rows = conn.execute("""
-                SELECT trade_date, close FROM index_daily
-                WHERE code = '000001.SH' OR code = '000001'
-                ORDER BY trade_date
-            """).fetchall()
-        if idx_rows:
-            for r in idx_rows:
-                index_close[str(r["trade_date"])] = r["close"]
-    except Exception:
-        pass
+    # Load index data
+    index_close = _load_index_dict()
 
     # 逐条计算 label_return
     updates = []
@@ -406,13 +465,12 @@ def _backfill_signal_labels(horizon: int = 5):
         ].sort_values("trade_date")
 
         if len(stock_prices) <= horizon:
-            continue  # 价格数据不足，跳过
+            continue
 
         entry_price = stock_prices.iloc[0]["close"]
         exit_price = stock_prices.iloc[horizon]["close"]
         stock_return = exit_price / entry_price - 1
 
-        # 计算同期的指数收益（超额收益）
         sig_date_str = sig["trade_date"]
         exit_date = stock_prices.iloc[horizon]["trade_date"]
         exit_date_str = str(exit_date.date()) if hasattr(exit_date, "date") else str(exit_date)
@@ -430,11 +488,86 @@ def _backfill_signal_labels(horizon: int = 5):
         backfilled += 1
 
     if updates:
+        from core.db import update_signal_labels
         update_signal_labels(updates)
         print(f"[Phase3] 回填完成: {backfilled}/{len(unlabeled)} 条信号已打标")
     else:
         print(f"[Phase3] 无有效数据可回填 (所有信号价格数据不足)")
 
+
+def _load_prices_for_backfill(codes: List[str], min_date: str, max_date: str) -> "pd.DataFrame":
+    """Load close prices for label backfill. Tries Qlib first, then SQLite."""
+    import pandas as pd
+
+    # Try Qlib
+    try:
+        from qlib_engine import init_qlib
+        from qlib.data import D
+        init_qlib()
+        df = D.features(codes, ["$close"], start_time=min_date, end_time=max_date)
+        if df is not None and not df.empty:
+            df = df.reset_index()
+            df.columns = ["trade_date", "code", "close"]
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            return df
+    except Exception:
+        pass
+
+    # Fallback to SQLite
+    try:
+        with get_conn() as conn:
+            placeholders = ",".join(["?" for _ in codes])
+            rows = conn.execute(f"""
+                SELECT code, trade_date, close
+                FROM daily_price
+                WHERE code IN ({placeholders})
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY code, trade_date
+            """, (codes, min_date, max_date)).fetchall()
+
+        if rows:
+            return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        pass
+
+    return pd.DataFrame()
+
+
+def _load_index_dict() -> dict:
+    """Load index close prices as {date_str: close} dict for excess return calc."""
+    try:
+        from qlib_engine import init_qlib
+        from qlib.data import D
+        init_qlib()
+        for benchmark in ["SH000300", "000001.SH"]:
+            try:
+                idx = D.features([benchmark], ["$close"],
+                                 start_time="2020-01-01",
+                                 end_time=datetime.now().strftime("%Y-%m-%d"))
+                if idx is not None and not idx.empty:
+                    idx = idx.reset_index()
+                    return {str(row["datetime"]).split("T")[0]: row["$close"]
+                            for _, row in idx.iterrows()}
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Fallback to SQLite
+    try:
+        with get_conn() as conn:
+            idx_rows = conn.execute("""
+                SELECT trade_date, close FROM index_daily
+                WHERE code = '000001.SH' OR code = '000001'
+                ORDER BY trade_date
+            """).fetchall()
+        if idx_rows:
+            return {str(r["trade_date"]): r["close"] for r in idx_rows}
+    except Exception:
+        pass
+
+    return {}
 
 
 def run_full_pipeline() -> dict:

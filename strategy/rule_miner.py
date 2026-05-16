@@ -21,7 +21,7 @@ from strategy.factor_lib import (
 )
 from config.strategy_params import PHASE1_CONFIG, CROSS_PAIRS
 from core.db import upsert_strategy_rule, get_active_rules
-from backtest.backtest import Backtester
+from qlib_engine.strategy_adapter import backtest_single_rule, BacktestConfig
 
 
 @dataclass
@@ -99,18 +99,11 @@ class TemplateBuilder:
 
     @staticmethod
     def _op_for_factor(factor: str, *, default: str = ">") -> str:
-        """Heuristic operator selection for a given factor name.
-
-        - Volume factors: ">" for VOL_RATIO, OBV (rising volume is bullish);
-          "<" for VOL_波动率 (high vol-of-vol is bearish).
-        - HV_* and BB_PCT_B: "<" (overbought / high volatility signals caution).
-        - Default: the caller-supplied default.
-        """
         upper = factor.upper()
         if "VOL" in upper:
             if "波动" in factor or "STD" in upper or "VOLATILITY" in upper:
                 return "<"
-            return ">"  # VOL_RATIO, OBV, etc.
+            return ">"
         if upper.startswith("HV_") or "HV_" in upper:
             return "<"
         if "PCT_B" in upper:
@@ -118,7 +111,6 @@ class TemplateBuilder:
         return default
 
     def build_t1(self) -> List[StrategyRule]:
-        """单因子阈值模板"""
         rules = []
         for f in self.factors:
             for t in self.thresholds:
@@ -132,7 +124,6 @@ class TemplateBuilder:
         return rules
 
     def build_t2(self) -> List[StrategyRule]:
-        """双因子组合模板 — 跨类别配对"""
         rules = []
         cat_factors = {}
         for f in self.factors:
@@ -158,7 +149,6 @@ class TemplateBuilder:
         return rules
 
     def build_t3(self) -> List[StrategyRule]:
-        """交叉信号模板"""
         rules = []
         for f_fast, f_slow in CROSS_PAIRS:
             if f_fast not in self.factors or f_slow not in self.factors:
@@ -172,7 +162,6 @@ class TemplateBuilder:
         return rules
 
     def build_t4(self) -> List[StrategyRule]:
-        """三因子确认模板"""
         t2_rules = self.build_t2()
         if len(t2_rules) > 80:
             t2_rules = random.sample(t2_rules, 80)
@@ -202,7 +191,6 @@ class RuleMiner:
 
     def prune_factors(self, factor_df: pd.DataFrame,
                       forward_returns: pd.Series) -> List[str]:
-        """① IC 筛选 + ② 聚类去重"""
         passing = filter_by_ic(factor_df, forward_returns, self.config["ic_min_abs"])
         ic = calc_all_ic(factor_df[passing] if passing else factor_df, forward_returns)
         cat_best = {}
@@ -218,7 +206,6 @@ class RuleMiner:
         return result
 
     def generate_candidates(self, factor_names: List[str]) -> List[StrategyRule]:
-        """③④ 生成候选条件 + 模板穷举"""
         builder = TemplateBuilder(factor_names, self.config["thresholds"])
         rules = []
         rules.extend(builder.build_t1())
@@ -227,36 +214,36 @@ class RuleMiner:
         rules.extend(builder.build_t4())
         return rules
 
-    def quick_backtest(self, rule: StrategyRule, stock_df: pd.DataFrame,
+    def quick_backtest(self, rule: StrategyRule, code: str, stock_df: pd.DataFrame,
                        factor_df: pd.DataFrame) -> Optional[dict]:
-        """⑤ 单只股票单条规则快速回测"""
+        """单只股票单条规则快速回测 (Qlib adapter)"""
         buy_signal = rule.get_buy_signal(factor_df)
         sell_signal = rule.get_sell_signal(factor_df)
         if buy_signal.sum() < 2:
             return None
-        signal_df = stock_df[["trade_date", "close", "volume"]].copy()
-        signal_df["trade_date"] = pd.to_datetime(signal_df["trade_date"])
-        signal_df = signal_df.set_index("trade_date")
-        signal_df["BUY_SIGNAL"] = buy_signal.astype(int).values
-        signal_df["SELL_SIGNAL"] = sell_signal.astype(int).values
-        signal_df["BUY_SCORE"] = buy_signal.astype(float).values
-        signal_df["STRATEGY"] = rule.name
-        if "open" in stock_df.columns:
-            signal_df["open"] = stock_df["open"].values
+
+        # Convert buy signals to Qlib-compatible signal list
+        trade_dates = pd.to_datetime(stock_df["trade_date"])
+        signals = []
+        for i in range(len(trade_dates)):
+            if buy_signal.iloc[i]:
+                signals.append({
+                    "code": code,
+                    "trade_date": str(trade_dates.iloc[i].date()),
+                    "score": 1.0,
+                })
+
+        if len(signals) < 2:
+            return None
+
         try:
-            bt = Backtester(initial_capital=100000,
-                           use_stop_loss=False, use_take_profit=False,
-                           use_drawdown_guard=False, use_market_timing=False,
-                           use_dynamic_position=False)
-            result = bt.run(signal_df)
-            return {
-                "total_return": result.total_return,
-                "annual_return": result.annual_return,
-                "win_rate": result.win_rate,
-                "sharpe_ratio": result.sharpe_ratio,
-                "max_drawdown": result.max_drawdown,
-                "total_trades": result.total_trades,
-            }
+            config = BacktestConfig(
+                start_time=str(trade_dates.iloc[0].date()),
+                end_time=str(trade_dates.iloc[-1].date()),
+                topk=1,
+                n_drop=0,
+            )
+            return backtest_single_rule(rule.name, signals, config)
         except Exception:
             return None
 
@@ -268,10 +255,9 @@ class RuleMiner:
         results = []
         for i, code in enumerate(codes):
             price_df, factor_df = stock_data[code]
-            perf = self.quick_backtest(rule, price_df, factor_df)
+            perf = self.quick_backtest(rule, code, price_df, factor_df)
             if perf:
                 results.append(perf)
-            # 早期终止：评估15只后仍无有效回测则跳过
             if i >= 15 and len(results) < 1:
                 return None
         if not results or len(results) < 2:
@@ -288,7 +274,6 @@ class RuleMiner:
         }
 
     def score_rule(self, perf: dict) -> float:
-        """⑥ 综合评分: 0.3*收益 + 0.3*胜率 + 0.25*夏普 - 0.15*最大回撤"""
         return (0.3 * perf["total_return"] / 100.0
                 + 0.3 * perf["win_rate"] / 100.0
                 + 0.25 * perf["sharpe_ratio"]
@@ -297,7 +282,6 @@ class RuleMiner:
     def run_phase1(self, stock_data: Dict,
                    forward_returns: pd.Series,
                    factor_df: pd.DataFrame) -> List[dict]:
-        """执行完整 Phase 1 流程"""
         import time
         t0 = time.time()
         if self.seed is not None:
@@ -308,7 +292,6 @@ class RuleMiner:
         candidates = self.generate_candidates(active_factors)
         print(f"[Phase1] 候选规则生成: {len(candidates)} 条 (耗时 {time.time()-t0:.1f}s)")
         scored = []
-        # 数据抽查：打印第一只股票的前几个因子值
         if stock_data:
             sample_code = next(iter(stock_data))
             _, sample_fd = stock_data[sample_code]
@@ -320,7 +303,6 @@ class RuleMiner:
         for i, rule in enumerate(candidates):
             if i > 0 and i % 200 == 0:
                 print(f"[Phase1] 评估进度: {i}/{len(candidates)} (找到 {len(scored)} 条有效规则, 耗时 {time.time()-t0:.1f}s)")
-            # 调试：前3条规则输出详细信息
             if i < 3 and stock_data:
                 sc = next(iter(stock_data))
                 _, sfd = stock_data[sc]
@@ -364,7 +346,6 @@ class RuleMiner:
 
 
 def load_template_library() -> List[StrategyRule]:
-    """加载模板库 (供 Phase 2 初始化)"""
     active = get_active_rules(min_fitness=0.3, limit=100)
     rules = []
     for row in active:

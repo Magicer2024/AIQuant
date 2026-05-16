@@ -1,5 +1,5 @@
 """
-services/strategy_service.py —— 策略运行、批量筛选、多策略并联回测
+services/strategy_service.py —— 策略运行、批量筛选、多策略并联回测（Qlib 集成版）
 """
 import math
 import traceback
@@ -19,7 +19,20 @@ from strategy.strategies import (
     strategy_whale_accumulation,
     fuse_signals,
 )
-from backtest.backtest import Backtester
+
+# Backtester: prefer Qlib adapter, fall back to legacy engine
+try:
+    from services.stock_service import _backtest_via_qlib, _empty_backtest_result
+    _HAS_QLIB_BACKTEST = True
+except ImportError:
+    _HAS_QLIB_BACKTEST = False
+
+try:
+    from backtest.backtest import Backtester
+    _HAS_LEGACY_BACKTEST = True
+except ImportError:
+    Backtester = None
+    _HAS_LEGACY_BACKTEST = False
 
 
 _DEFAULT_SCREEN_POOL = [
@@ -41,6 +54,35 @@ _DEFAULT_SCREEN_POOL = [
     "601939", "601988", "601989", "601995", "603259",
     "603288", "603501", "603799", "603986",
 ]
+
+
+def _run_backtest_for_strategy(df_copy, name, symbol, capital):
+    """Run backtest for a single strategy, preferring Qlib."""
+    if _HAS_QLIB_BACKTEST:
+        try:
+            return _backtest_via_qlib(df_copy, symbol, capital, name)
+        except Exception:
+            pass
+    if _HAS_LEGACY_BACKTEST:
+        bt = Backtester(initial_capital=capital)
+        return bt.run(df_copy)
+    return _empty_backtest_result()
+
+
+def _result_to_dict(r):
+    """Convert backtest result (Qlib or legacy) to dict."""
+    return {
+        "total_return": getattr(r, "total_return", 0),
+        "annual_return": getattr(r, "annual_return", 0),
+        "max_drawdown": getattr(r, "max_drawdown", 0),
+        "sharpe_ratio": getattr(r, "sharpe_ratio", 0),
+        "win_rate": getattr(r, "win_rate", 0),
+        "total_trades": getattr(r, "total_trades", 0),
+        "equity_curve": list(zip(
+            getattr(r, "equity_dates", []),
+            getattr(r, "equity_curve", []),
+        )),
+    }
 
 
 def run_all_strategies(symbol: str, start_date: str = "",
@@ -215,7 +257,7 @@ def screen_stocks_generator(symbols_str: str = "", use_v4: bool = True,
 
 def multi_strategy_backtest(symbol: str, start_date: str = "20220101",
                             capital: float = 100000) -> Dict[str, Any]:
-    """多策略并联回测"""
+    """多策略并联回测（优先使用 Qlib 引擎）"""
     df = get_stock_history(symbol=symbol, start_date=start_date)
 
     strategies = [
@@ -233,32 +275,14 @@ def multi_strategy_backtest(symbol: str, start_date: str = "20220101",
         df_copy["BUY_SIGNAL"] = s["BUY_SIGNAL"]
         df_copy["SELL_SIGNAL"] = s["SELL_SIGNAL"]
         df_copy["STRATEGY"] = name
-        bt = Backtester(initial_capital=capital)
-        r = bt.run(df_copy)
-        results[name] = {
-            "total_return": r.total_return,
-            "annual_return": r.annual_return,
-            "max_drawdown": r.max_drawdown,
-            "sharpe_ratio": r.sharpe_ratio,
-            "win_rate": r.win_rate,
-            "total_trades": r.total_trades,
-            "equity_curve": list(zip(r.equity_dates, r.equity_curve)),
-        }
+        r = _run_backtest_for_strategy(df_copy, name, symbol, capital)
+        results[name] = _result_to_dict(r)
 
     fused = fuse_signals([strat_fn(df.copy()) for _, strat_fn in strategies])
     df_fused = fused[["close", "volume", "BUY_SIGNAL", "SELL_SIGNAL"]].copy()
     df_fused["STRATEGY"] = "融合策略"
-    bt_f = Backtester(initial_capital=capital)
-    r_f = bt_f.run(df_fused)
-    results["融合策略"] = {
-        "total_return": r_f.total_return,
-        "annual_return": r_f.annual_return,
-        "max_drawdown": r_f.max_drawdown,
-        "sharpe_ratio": r_f.sharpe_ratio,
-        "win_rate": r_f.win_rate,
-        "total_trades": r_f.total_trades,
-        "equity_curve": list(zip(r_f.equity_dates, r_f.equity_curve)),
-    }
+    r_f = _run_backtest_for_strategy(df_fused, "融合策略", symbol, capital)
+    results["融合策略"] = _result_to_dict(r_f)
 
     return {
         "symbol": symbol,

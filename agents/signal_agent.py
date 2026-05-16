@@ -1,10 +1,10 @@
 """
-agents/signal_agent.py —— 信号猎手
+agents/signal_agent.py —— 信号猎手（Qlib 集成版）
 
 职责：
   1. 运行5策略融合扫描
   2. 运行v4超跌反弹策略扫描
-  3. 生成候选股票列表（按评分排序）
+  3. Qlib 模型预测增强融合评分
   4. 保存到 stock_signal 表供面板展示
 """
 
@@ -46,12 +46,14 @@ class SignalAgent(BaseAgent):
         if stocks_df.empty:
             return {"status": "no_stocks", "hits_fusion": [], "hits_v4": []}
 
-        # 排除科创板和创业板
         stocks_df = stocks_df[
             ~stocks_df["code"].str.startswith("688") &
             ~stocks_df["code"].str.startswith("301")
         ]
         total = len(stocks_df)
+
+        # ── Qlib 模型预测（批量，供后续融合使用） ──
+        qlib_preds = self._get_qlib_predictions(run_date, stocks_df["code"].tolist()[:500])
 
         # ── 1. 5策略融合扫描 ──────────────────────────────
         fusion_hits = []
@@ -60,12 +62,10 @@ class SignalAgent(BaseAgent):
         for i, row in stocks_df.iterrows():
             code, name = row["code"], row["name"]
 
-            # 5策略融合
-            item_f = self._analyze_fusion(code, name, run_date)
+            item_f = self._analyze_fusion(code, name, run_date, qlib_preds)
             if item_f:
                 fusion_hits.append(item_f)
 
-            # v4 超跌反弹
             item_v4 = self._analyze_v4(code, name, run_date)
             if item_v4:
                 v4_hits.append(item_v4)
@@ -74,23 +74,19 @@ class SignalAgent(BaseAgent):
                 ctx.log("info", f"扫描进度: {i+1}/{total}，融合命中:{len(fusion_hits)}，v4命中:{len(v4_hits)}")
                 print(f"  [SignalAgent] 扫描进度: {i+1}/{total}，融合命中:{len(fusion_hits)}，v4命中:{len(v4_hits)}", flush=True)
 
-        # 排序取Top
         fusion_top = sorted(fusion_hits, key=lambda x: x["score"], reverse=True)[:POSITION_NUM]
         v4_top = sorted(v4_hits, key=lambda x: x["score"], reverse=True)[:POSITION_NUM]
         fusion_all = sorted(fusion_hits, key=lambda x: x["score"], reverse=True)
         v4_all = sorted(v4_hits, key=lambda x: x["score"], reverse=True)
 
-        # 保存到数据库（供面板展示）
         sig_limit = 200
         if fusion_all:
             save_scan_signals(fusion_all[:sig_limit], sent_wechat=False, scan_date=run_date)
         if v4_all:
-            # v4也保存到 stock_signal，但用不同的标识
             for item in v4_all[:sig_limit]:
                 item["strategy_type"] = "v4_oversold"
             save_scan_signals(v4_all[:sig_limit], sent_wechat=False, scan_date=run_date)
 
-        # 写入上下文供下游Agent使用
         ctx.set("fusion_candidates", fusion_top)
         ctx.set("v4_candidates", v4_top)
         ctx.set("fusion_all_count", len(fusion_hits))
@@ -105,8 +101,34 @@ class SignalAgent(BaseAgent):
             "v4_top": v4_top,
         }
 
-    def _analyze_fusion(self, code: str, name: str, run_date: str) -> dict | None:
-        """5策略融合分析"""
+    def _get_qlib_predictions(self, run_date: str, codes: list) -> dict:
+        """Get Qlib model predictions for candidate stocks.
+
+        Returns {code: score} dict. Empty dict if Qlib is unavailable.
+        """
+        try:
+            from qlib_engine.model_runner import ModelRunner
+            runner = ModelRunner()
+            preds = runner.predict(
+                start_date=run_date,
+                end_date=run_date,
+                stock_list=codes,
+            )
+            if preds is not None and not preds.empty:
+                result = {}
+                for code in codes:
+                    try:
+                        result[code] = float(preds.xs(code, level=1).iloc[-1])
+                    except (KeyError, IndexError):
+                        result[code] = 0.0
+                return result
+        except Exception:
+            pass
+        return {}
+
+    def _analyze_fusion(self, code: str, name: str, run_date: str,
+                        qlib_preds: dict = None) -> dict | None:
+        """5策略融合分析（含 Qlib 预测增强）"""
         try:
             import pandas as pd
             df = get_data_source_manager().get_daily_price_df(code, end_date=run_date)
@@ -129,7 +151,7 @@ class SignalAgent(BaseAgent):
             s4_sc = last_score(s4)
             s5_sc = last_score(s5)
 
-            # Try Phase 3/4 dynamic scoring
+            # Phase 3/4 dynamic scoring
             phase34_score = None
             try:
                 from strategy.dynamic_selector import generate_daily_signals
@@ -140,7 +162,7 @@ class SignalAgent(BaseAgent):
                 if signals and signals[0].get("fusion_score", 0) > 0:
                     phase34_score = signals[0]
             except Exception:
-                pass  # Silent degradation when Phase 3/4 unavailable
+                pass
 
             fused = fuse_with_phase34(
                 [s1, s2, s3, s4, s5],
@@ -149,6 +171,15 @@ class SignalAgent(BaseAgent):
             )
             last = fused.iloc[-1]
             fusion_score = round(float(last.get("FUSION_SCORE", 0)), 2)
+
+            # ── Qlib prediction boost ──
+            qlib_score = (qlib_preds or {}).get(code, 0.0)
+            if abs(qlib_score) > 0.01:
+                import numpy as np
+                qlib_weight = 1.0 / (1.0 + np.exp(-abs(qlib_score)))
+                qlib_boost = qlib_score * qlib_weight * 5.0
+                fusion_score = round(fusion_score + qlib_boost, 2)
+
             fusion_score = max(0.0, min(50.0, fusion_score))
 
             if fusion_score < FUSION_THRESHOLD:
@@ -182,6 +213,7 @@ class SignalAgent(BaseAgent):
                 "s3_pv_div": s3_sc,
                 "s4_bottom": s4_sc,
                 "s5_whale": s5_sc,
+                "qlib_score": round(qlib_score, 4),
                 "trigger_list": trigger_list,
             }
         except Exception:

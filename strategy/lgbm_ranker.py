@@ -2,7 +2,7 @@
 lgbm_ranker.py —— Phase 3: LightGBM 排序学习二次筛选与融合
 =============================================================
 功能：
-- 7类元特征构建
+- 8类元特征构建（含 Qlib 预测分）
 - LightGBM Ranker 训练与推理
 - 滚动预测（t-1 → t）避免未来函数
 - 置信度归一化 (0-100)
@@ -30,8 +30,9 @@ def build_meta_features(
     stock_state: dict,
     signal_strength: float,
     sector_crowd: dict,
+    qlib_pred_score: Optional[float] = None,
 ) -> dict:
-    """为单条触发信号构建元特征向量"""
+    """为单条触发信号构建元特征向量（含 Qlib 预测分）"""
     features = {
         "rule_id": rule_id,
         "rule_type_hash": hash(rule_type) % 1000,
@@ -53,16 +54,24 @@ def build_meta_features(
         "signal_strength": signal_strength,
         "sector_trigger_count": sector_crowd.get("trigger_count", 0),
         "sector_trigger_ratio": sector_crowd.get("trigger_ratio", 0),
+        "qlib_score": qlib_pred_score if qlib_pred_score is not None else 0.0,
     }
     return features
 
 
 def build_features_df(signals: List[dict], market_data: dict,
-                      stock_data: dict) -> pd.DataFrame:
+                      stock_data: dict,
+                      qlib_preds: Optional[pd.Series] = None) -> pd.DataFrame:
     """批量构建特征 DataFrame（带 1% 缩尾处理）"""
     rows = []
     for sig in signals:
         code = sig["code"]
+        qlib_score = 0.0
+        if qlib_preds is not None:
+            try:
+                qlib_score = float(qlib_preds.xs(code, level=1).mean())
+            except (KeyError, IndexError, TypeError):
+                pass
         feats = build_meta_features(
             rule_id=sig["rule_id"],
             rule_name=sig.get("rule_name", ""),
@@ -74,6 +83,7 @@ def build_features_df(signals: List[dict], market_data: dict,
             stock_state=stock_data.get(code, {}),
             signal_strength=sig.get("signal_strength", 0.5),
             sector_crowd=sig.get("sector_crowd", {}),
+            qlib_pred_score=qlib_score,
         )
         feats["code"] = code
         feats["trade_date"] = sig["trade_date"]
@@ -140,7 +150,7 @@ class LGBMRanker:
         from sklearn.model_selection import TimeSeriesSplit
         tscv = TimeSeriesSplit(n_splits=3)
         splits = list(tscv.split(X))
-        train_idx, valid_idx = splits[-1]  # use last split: most recent data for validation
+        train_idx, valid_idx = splits[-1]
         X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
         y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
         from collections import Counter
@@ -213,10 +223,10 @@ def get_ranker() -> LGBMRanker:
     global _ranker_instance
     if _ranker_instance is None:
         with _lock:
-            if _ranker_instance is None:  # double-check
+            if _ranker_instance is None:
                 _ranker_instance = LGBMRanker()
                 if not _ranker_instance.load_model():
-                    pass  # Will use fallback, needs training
+                    pass
     return _ranker_instance
 
 

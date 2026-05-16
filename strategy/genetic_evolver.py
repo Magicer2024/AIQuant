@@ -23,7 +23,6 @@ from strategy.factor_lib import (
     FACTOR_REGISTRY, get_factor_names_by_categories,
 )
 from core.db import upsert_strategy_rule, get_active_rules, degrade_rule
-from backtest.backtest import Backtester
 
 
 # ═══════════════════════════════════════════════════════
@@ -75,10 +74,7 @@ DEFAULT_ELITE_COUNT = 5
 # ═══════════════════════════════════════════════════════
 
 def encode_rule(conditions: List[RuleCondition]) -> list:
-    """将条件列表编码为前缀表达式列表。
-
-    示例: [RSI_6 > 0.5, KDJ_K < 0.3] -> ["AND", ">", "RSI_6", 0.5, "<", "KDJ_K", 0.3]
-    """
+    """将条件列表编码为前缀表达式列表。"""
     if not conditions:
         return ["NONE"]
     if len(conditions) == 1:
@@ -91,19 +87,10 @@ def encode_rule(conditions: List[RuleCondition]) -> list:
 
 
 def decode_rule(encoded) -> List[RuleCondition]:
-    """将前缀表达式解码为条件列表。
-
-    支持列表和旧版字符串两种格式:
-    - 列表: ["AND", ">", "RSI_6", 0.5, "<", "KDJ_K", 0.3]
-    - 字符串: "AND > RSI_6 0.5 < KDJ_K 0.3"
-
-    Returns:
-        RuleCondition 列表
-    """
+    """将前缀表达式解码为条件列表。"""
     if not encoded or encoded == "NONE" or encoded == ["NONE"]:
         return []
 
-    # 兼容旧版字符串格式
     if isinstance(encoded, list):
         tokens = encoded
     else:
@@ -112,7 +99,6 @@ def decode_rule(encoded) -> List[RuleCondition]:
     conds: List[RuleCondition] = []
     i = 0
 
-    # 跳过开头的 "AND" 连接符
     if i < len(tokens) and tokens[i] == "AND":
         i += 1
 
@@ -128,22 +114,18 @@ def decode_rule(encoded) -> List[RuleCondition]:
             conds.append(RuleCondition(factor=factor, operator=str(op), threshold=threshold))
             i += 3
         else:
-            # 跳过不识别的 token（如嵌套的 AND/OR 等）
             i += 1
 
     return conds[:MAX_CONDITIONS]
 
 
 def _get_factor_range(factor_name: str) -> Tuple[float, float]:
-    """获取某个因子的有效阈值范围。"""
     if factor_name in FACTOR_RANGES:
         return FACTOR_RANGES[factor_name]
-    # 归一化后的因子默认在 [0, 1] 范围
     return FACTOR_DEFAULT_RANGE
 
 
 def _heuristic_op_for_factor(factor: str) -> str:
-    """启发式算子选择，与 TemplateBuilder._op_for_factor 保持一致。"""
     upper = factor.upper()
     if "VOL" in upper:
         if "波动" in factor or "STD" in upper or "VOLATILITY" in upper:
@@ -157,23 +139,14 @@ def _heuristic_op_for_factor(factor: str) -> str:
 
 
 def random_rule(depth: int = 3) -> StrategyRule:
-    """生成一条随机的有效规则树。
-
-    Args:
-        depth: 规则深度，控制条件数量（1 ~ min(2^depth-1, MAX_CONDITIONS)）
-
-    Returns:
-        新的 StrategyRule 实例
-    """
     max_n = min(2 ** depth - 1, MAX_CONDITIONS)
     n_conditions = random.randint(1, max(max_n, 1))
     conditions = []
     used_factors = set()
     for _ in range(n_conditions):
-        # 避免同一因子重复出现
         available = [f for f in _ALL_FACTOR_NAMES if f not in used_factors]
         if not available:
-            available = _ALL_FACTOR_NAMES  # 已用完不重复因子，回退到全量池
+            available = _ALL_FACTOR_NAMES
         factor = random.choice(available)
         used_factors.add(factor)
         op = _heuristic_op_for_factor(factor)
@@ -195,7 +168,6 @@ def random_rule(depth: int = 3) -> StrategyRule:
 
 
 def _gen_unique_id() -> str:
-    """生成 5 位唯一 ID。"""
     return f"{random.randint(0, 99999):05d}"
 
 
@@ -204,18 +176,9 @@ def _gen_unique_id() -> str:
 # ═══════════════════════════════════════════════════════
 
 def crossover(parent1: StrategyRule, parent2: StrategyRule) -> StrategyRule:
-    """交叉算子：在随机分割点交换两个父代的条件列表。
-
-    Args:
-        parent1, parent2: 父代规则
-
-    Returns:
-        子代规则（继承 parent1 的元信息）
-    """
     conds1 = list(parent1.conditions)
     conds2 = list(parent2.conditions)
     if not conds1 or not conds2:
-        # 无法交叉，返回较好的父代
         return _copy_rule(
             parent1 if len(conds1) >= len(conds2) else parent2
         )
@@ -224,7 +187,6 @@ def crossover(parent1: StrategyRule, parent2: StrategyRule) -> StrategyRule:
     split2 = random.randint(1, len(conds2)) if len(conds2) > 1 else 1
 
     new_conds = conds1[:split1] + conds2[split2:]
-    # 截断到 MAX_CONDITIONS
     new_conds = new_conds[:MAX_CONDITIONS]
 
     unique_id = _gen_unique_id()
@@ -240,21 +202,12 @@ def crossover(parent1: StrategyRule, parent2: StrategyRule) -> StrategyRule:
 
 
 def mutate_subtree(rule: StrategyRule) -> StrategyRule:
-    """子树变异：随机替换一个条件。
-
-    Args:
-        rule: 待变异的规则
-
-    Returns:
-        变异后的新规则
-    """
     if not rule.conditions:
         return random_rule(depth=2)
 
     new_conds = list(rule.conditions)
     idx = random.randint(0, len(new_conds) - 1)
 
-    # 生成一个替换条件
     existing_factors = {c.factor for c in new_conds}
     available = [f for f in _ALL_FACTOR_NAMES if f not in existing_factors]
     if not available:
@@ -279,15 +232,6 @@ def mutate_subtree(rule: StrategyRule) -> StrategyRule:
 
 
 def mutate_threshold(rule: StrategyRule, sigma: float = 0.03) -> StrategyRule:
-    """阈值变异：对每个条件的阈值施加 N(0, sigma) 高斯扰动，裁剪到因子范围。
-
-    Args:
-        rule: 待变异的规则
-        sigma: 扰动标准差
-
-    Returns:
-        阈值扰动后的新规则
-    """
     if not rule.conditions:
         return _copy_rule(rule)
 
@@ -316,19 +260,10 @@ def mutate_threshold(rule: StrategyRule, sigma: float = 0.03) -> StrategyRule:
 
 
 def mutate_factor(rule: StrategyRule) -> StrategyRule:
-    """因子替换：随机选一个条件，换为同类别下的另一个因子。
-
-    Args:
-        rule: 待变异的规则
-
-    Returns:
-        因子替换后的新规则
-    """
     if not rule.conditions:
         return _copy_rule(rule)
 
     new_conds = list(rule.conditions)
-    # 随机选一个可替换的条件（该类别至少有 2 个因子）
     replaceable = []
     for i, c in enumerate(new_conds):
         cat = FACTOR_REGISTRY.get(c.factor, {}).get("category", "unknown")
@@ -337,7 +272,6 @@ def mutate_factor(rule: StrategyRule) -> StrategyRule:
             replaceable.append(i)
 
     if not replaceable:
-        # 无可替换的类别，回退到阈值变异
         return mutate_threshold(rule, sigma=0.02)
 
     idx = random.choice(replaceable)
@@ -367,15 +301,6 @@ def tournament_select(
     population: List[Tuple[StrategyRule, float]],
     tournament_size: int = 3,
 ) -> StrategyRule:
-    """锦标赛选择：随机抽 tournament_size 个个体，返回适应度最高的规则。
-
-    Args:
-        population: [(rule, fitness), ...] 列表
-        tournament_size: 锦标赛规模
-
-    Returns:
-        胜出的 StrategyRule
-    """
     if not population:
         raise ValueError("population cannot be empty")
     contestants = random.sample(population, min(tournament_size, len(population)))
@@ -392,17 +317,6 @@ def signal_overlap(
     rule2: StrategyRule,
     factor_df: pd.DataFrame,
 ) -> float:
-    """计算两条规则买入信号的重叠率 (Jaccard 指数)。
-
-    overlap = |signal1 ∩ signal2| / |signal1 ∪ signal2|
-
-    Args:
-        rule1, rule2: 两条规则
-        factor_df: 因子 DataFrame
-
-    Returns:
-        重叠率 [0, 1]
-    """
     s1 = rule1.get_buy_signal(factor_df).astype(bool)
     s2 = rule2.get_buy_signal(factor_df).astype(bool)
     intersection = (s1 & s2).sum()
@@ -417,23 +331,8 @@ def novelty_bonus(
     existing_rules: List[StrategyRule],
     factor_df: pd.DataFrame,
 ) -> float:
-    """计算新颖性奖励因子。
-
-    - 与任意已有规则的信号重叠 < 20% -> 1.2
-    - 20%-40% -> 1.0
-    - 40%-70% -> 0.7
-    - > 70% -> 0.3
-
-    Args:
-        new_rule: 新规则
-        existing_rules: 已有规则列表
-        factor_df: 因子 DataFrame
-
-    Returns:
-        新颖性奖励因子
-    """
     if not existing_rules:
-        return 1.2  # 没有任何已有规则时，视为高度新颖
+        return 1.2
     max_overlap = 0.0
     for existing in existing_rules:
         try:
@@ -452,18 +351,6 @@ def novelty_bonus(
 
 
 def simplicity_penalty(n_conditions: int) -> float:
-    """计算简洁性惩罚因子。
-
-    - n <= 3 -> 1.0
-    - 4 <= n <= 5 -> 0.85^(n-3)
-    - n > 5 -> 0.7^(n-3)
-
-    Args:
-        n_conditions: 条件数量
-
-    Returns:
-        简洁性因子 (0, 1]
-    """
     if n_conditions <= 3:
         return 1.0
     elif n_conditions <= 5:
@@ -473,29 +360,14 @@ def simplicity_penalty(n_conditions: int) -> float:
 
 
 def legality_check(rule: StrategyRule) -> float:
-    """合法性检查：检测逻辑矛盾和阈值越界。
-
-    返回值:
-        0.0 — 存在逻辑矛盾（如 RSI > 80 AND RSI < 30）
-        0.1 — 阈值越界
-        1.0 — 干净规则
-
-    Args:
-        rule: 待检查的规则
-
-    Returns:
-        合法性因子 {0.0, 0.1, 1.0}
-    """
     if not rule.conditions:
         return 0.1
 
-    # 检查每个条件的阈值是否在因子有效范围内
     for c in rule.conditions:
         lo, hi = _get_factor_range(c.factor)
         if c.threshold < lo or c.threshold > hi:
             return 0.1
 
-    # 检查同一因子的矛盾条件
     factor_conds: Dict[str, List[RuleCondition]] = {}
     for c in rule.conditions:
         factor_conds.setdefault(c.factor, []).append(c)
@@ -503,11 +375,9 @@ def legality_check(rule: StrategyRule) -> float:
     for factor, conds in factor_conds.items():
         if len(conds) < 2:
             continue
-        # 提取 > 和 < 条件的阈值
         gt_thresholds = [c.threshold for c in conds if c.operator == ">"]
         lt_thresholds = [c.threshold for c in conds if c.operator == "<"]
 
-        # 存在 >X 且 <Y 且 X >= Y -> 逻辑矛盾
         for gt in gt_thresholds:
             for lt in lt_thresholds:
                 if gt >= lt:
@@ -517,23 +387,10 @@ def legality_check(rule: StrategyRule) -> float:
 
 
 def _composite_score(perf: dict) -> float:
-    """计算复合回测评分。
-
-    composite = 0.3 * annual_return/100 + 0.3 * win_rate/100
-              + 0.25 * sharpe - 0.15 * |max_drawdown|/100
-
-    Args:
-        perf: evaluate_rule 返回的性能字典
-
-    Returns:
-        复合评分
-    """
     ar = perf.get("annual_return", 0) / 100.0
     wr = perf.get("win_rate", 0) / 100.0
     sr = perf.get("sharpe_ratio", 0)
     md = abs(perf.get("max_drawdown", 0)) / 100.0
-    # NOTE: turnover_rate 的 -0.1 惩罚项已移除，因为 RuleMiner.evaluate_rule()
-    # 目前不返回 turnover_rate，该项始终为 0。待 evaluate_rule 支持换手率后可恢复。
     return 0.3 * ar + 0.3 * wr + 0.25 * sr - 0.15 * md
 
 
@@ -542,14 +399,6 @@ def _stability_penalty(
     valid_perf: Optional[dict],
     test_perf: Optional[dict],
 ) -> float:
-    """计算稳定性惩罚：三段收益率波动超过 30% 则惩罚。
-
-    Args:
-        train_perf, valid_perf, test_perf: 三个分段的性能
-
-    Returns:
-        稳定性因子: 0.6 或 1.0
-    """
     returns = []
     for perf in [train_perf, valid_perf, test_perf]:
         if perf is not None:
@@ -561,10 +410,8 @@ def _stability_penalty(
     returns_arr = np.array(returns, dtype=float)
     if np.std(returns_arr) == 0:
         return 1.0
-    # 使用变异系数 (CV = std/|mean|) 判断波动
     mean_abs = abs(np.mean(returns_arr))
     if mean_abs < 1e-9:
-        # 均值接近0, 直接用标准差判断 (除以1避免除零)
         cv = np.std(returns_arr)
     else:
         cv = np.std(returns_arr) / mean_abs
@@ -580,40 +427,16 @@ def compute_fitness(
     valid_perf: Optional[dict] = None,
     test_perf: Optional[dict] = None,
 ) -> float:
-    """计算完整的多目标适应度。
-
-    fitness = composite_score x novelty_bonus x simplicity_penalty
-            x legality_penalty
-
-    Args:
-        perf: 回测性能字典（来自 evaluate_rule 或 quick_backtest）
-        rule: 策略规则
-        existing_rules: 已有规则列表（用于新颖性计算）
-        factor_df: 因子 DataFrame（用于信号重叠计算）
-        train_perf, valid_perf, test_perf: 预留参数，用于未来稳定性惩罚
-
-    Returns:
-        适应度评分
-    """
     cs = _composite_score(perf)
 
-    # 新颖性
     if factor_df is not None and existing_rules:
         nb = novelty_bonus(rule, existing_rules, factor_df)
     else:
         nb = 1.0
 
-    # 简洁性
     sp = simplicity_penalty(len(rule.conditions))
-
-    # 合法性
     lp = legality_check(rule)
 
-    # NOTE: 稳定性惩罚 (_stability_penalty) 暂未启用。
-    # run_evolution 当前不传递 train_perf/valid_perf/test_perf，
-    # 导致惩罚始终为 1.0。待呼方提供三段性能数据后可恢复：
-    #   stp = _stability_penalty(train_perf, valid_perf, test_perf)
-    #   return cs * nb * sp * stp * lp
     return cs * nb * sp * lp
 
 
@@ -622,18 +445,7 @@ def compute_fitness(
 # ═══════════════════════════════════════════════════════
 
 class GeneticEvolver:
-    """Phase 2: 遗传进化器。
-
-    流程:
-    1. 初始化种群: 30 条来自 Phase 1 模板库 + 20 条随机规则
-    2. 逐代进化 (最多 max_generations 代):
-       a. 适应度评估
-       b. 精英保留
-       c. 遗传算子生成新个体
-       d. 适应度再评估
-       e. 早停检查
-    3. 合格规则入库
-    """
+    """Phase 2: 遗传进化器。"""
 
     def __init__(
         self,
@@ -644,16 +456,6 @@ class GeneticEvolver:
         seed: int = None,
         seed_population: List[StrategyRule] = None,
     ):
-        """初始化进化器。
-
-        Args:
-            population_size: 种群规模
-            max_generations: 最大进化代数
-            early_stop_generations: 连续无改进代数阈值
-            early_stop_threshold: 适应度改进的最小阈值
-            seed: 随机种子
-            seed_population: 种子种群（从 Phase 1 结果加载）
-        """
         self.population_size = population_size
         self.max_generations = max_generations
         self.early_stop_generations = early_stop_generations
@@ -661,9 +463,6 @@ class GeneticEvolver:
         self.seed = seed
         self.seed_population = seed_population
 
-        # 遗传算子概率（累加区间）
-        # reproduction: 0.05, crossover: 0.35, subtree: 0.15, threshold: 0.20,
-        # factor_swap: 0.15, random_reset: 0.10
         self._op_probs = [
             (ELITE_PROB, "reproduction"),
             (ELITE_PROB + CROSSOVER_PROB, "crossover"),
@@ -676,22 +475,14 @@ class GeneticEvolver:
         ]
         self.elite_count = DEFAULT_ELITE_COUNT
 
-        # RuleMiner 实例（用于回测评估）
         self._miner: Optional[RuleMiner] = None
 
     def _get_miner(self) -> RuleMiner:
-        """延迟创建 RuleMiner 实例。"""
         if self._miner is None:
             self._miner = RuleMiner(seed=self.seed)
         return self._miner
 
     def _select_operator(self) -> str:
-        """按概率选择遗传算子。
-
-        Returns:
-            算子名称: "reproduction" | "crossover" | "subtree_mutate" | "threshold_mutate"
-                      | "factor_swap" | "random_reset"
-        """
         r = random.random()
         for threshold, name in self._op_probs:
             if r < threshold:
@@ -699,18 +490,11 @@ class GeneticEvolver:
         return "random_reset"
 
     def initialize_population(self) -> List[StrategyRule]:
-        """初始化种群: 种子种群 + 模板库 + 随机规则。
-
-        Returns:
-            初始种群列表
-        """
         population = []
 
-        # 优先使用传入的种子种群
         if self.seed_population:
             population.extend(self.seed_population[:30])
 
-        # 从模板库补充
         if len(population) < 30:
             try:
                 templates = load_template_library()
@@ -718,52 +502,37 @@ class GeneticEvolver:
             except Exception:
                 pass
 
-        # 补充到 30 条模板（如模板库不足）
         while len(population) < 30:
             population.append(random_rule(depth=3))
 
-        # 20 条随机规则
         for _ in range(20):
             population.append(random_rule(depth=random.randint(2, 4)))
 
-        # 裁剪到 population_size
         return population[:self.population_size]
 
     def evolve_one_generation(
         self,
         population: List[Tuple[StrategyRule, float]],
     ) -> List[StrategyRule]:
-        """对一代种群执行遗传操作。
-
-        Args:
-            population: [(rule, fitness), ...] 已按适应度降序排列
-
-        Returns:
-            新一代规则列表（未评估适应度）
-        """
         if not population:
             return []
 
         new_population: List[StrategyRule] = []
 
-        # 精英保留：前 elite_count 直接进入下一代
         elite_count = min(self.elite_count, len(population))
         for i in range(elite_count):
             new_population.append(_copy_rule(population[i][0]))
 
-        # 生成新个体直到种群满
         while len(new_population) < self.population_size:
             op = self._select_operator()
 
             if op == "reproduction":
-                # 锦标赛选择并复制一个个体
                 pick = tournament_select(population, tournament_size=3)
                 new_population.append(_copy_rule(pick))
 
             elif op == "crossover":
                 p1 = tournament_select(population, tournament_size=3)
                 p2 = tournament_select(population, tournament_size=3)
-                # 确保父代不相同
                 attempts = 0
                 while p1.name == p2.name and attempts < 5:
                     p2 = tournament_select(population, tournament_size=3)
@@ -787,7 +556,6 @@ class GeneticEvolver:
                 new_population.append(child)
 
             elif op == "random_reset":
-                # 生成全新随机规则注入种群
                 new_population.append(random_rule(depth=random.randint(2, 4)))
 
         return new_population[:self.population_size]
@@ -798,16 +566,6 @@ class GeneticEvolver:
         factor_df: Optional[pd.DataFrame] = None,
         forward_returns: Optional[pd.Series] = None,
     ) -> List[dict]:
-        """执行完整的遗传进化流程。
-
-        Args:
-            stock_data: 股票数据字典 {code: (price_df, factor_df)}
-            factor_df: 用于计算信号重叠的因子 DataFrame
-            forward_returns: 前向收益率（保留以兼容 RuleMiner 接口）
-
-        Returns:
-            结果列表 [{rule_id, rule, fitness, generation}, ...]
-        """
         if self.seed is not None:
             random.seed(self.seed)
             np.random.seed(self.seed)
@@ -815,13 +573,11 @@ class GeneticEvolver:
         miner = self._get_miner()
         results: List[dict] = []
 
-        # 1. 初始化种群
         t_init = time.time()
         population = self.initialize_population()
         print(f"[Phase2] 初始种群: {len(population)} 条规则")
 
-        # 2. 初始适应度评估
-        evaluated: List[Tuple[StrategyRule, float, dict]] = []  # (rule, fitness, perf)
+        evaluated: List[Tuple[StrategyRule, float, dict]] = []
         for i, rule in enumerate(population):
             perf = miner.evaluate_rule(rule, stock_data)
             if perf is None:
@@ -830,27 +586,22 @@ class GeneticEvolver:
                     "max_drawdown": -50, "total_trades": 0, "total_return": 0,
                     "sample_count": 0,
                 }
-            # 获取已有规则用于新颖性
             existing_rules = [r for r, _, _ in evaluated]
             ft = compute_fitness(perf, rule, existing_rules, factor_df)
             evaluated.append((rule, ft, perf))
             if (i + 1) % 10 == 0:
                 print(f"[Phase2] 初始评估: {i+1}/{len(population)} (耗时 {time.time()-t_init:.1f}s)")
 
-        # 按适应度排序
         evaluated.sort(key=lambda x: x[1], reverse=True)
         best_fitness = evaluated[0][1] if evaluated else 0.0
         no_improve_count = 0
 
-        # 3. 进化循环
         for gen in range(1, self.max_generations + 1):
             t_gen = time.time()
-            # 生成新一代
             new_rules = self.evolve_one_generation(
                 [(r, f) for r, f, _ in evaluated]
             )
 
-            # 评估新一代
             new_evaluated: List[Tuple[StrategyRule, float, dict]] = []
             for rule in new_rules:
                 perf = miner.evaluate_rule(rule, stock_data)
@@ -877,24 +628,21 @@ class GeneticEvolver:
             else:
                 no_improve_count += 1
 
-            # 早停
             print(f"[Phase2] 第{gen}代: best={current_best:.4f} imp={improvement:+.4f} 无改进={no_improve_count}/{self.early_stop_generations} (耗时 {time.time()-t_gen:.1f}s)")
             if no_improve_count >= self.early_stop_generations:
                 print(f"[Phase2] 早停于第{gen}代")
                 break
 
         print(f"[Phase2] 进化完成，开始入库 (总耗时 {time.time()-t_init:.1f}s)")
-        # 4. 入库合格规则 (fitness > 0.15, 胜率 >= 50%, 成交次数 >= 5, 信号重叠 < 75%)
         inserted = 0
         for rule, fitness, perf in evaluated:
-            if fitness <= 0.15:        # 原 0.5 → 0.15，过滤综合得分过低的规则
+            if fitness <= 0.15:
                 continue
-            if perf.get("win_rate", 0) < 50:  # 强制最低胜率，确保策略具备正期望
+            if perf.get("win_rate", 0) < 50:
                 continue
-            if perf.get("total_trades", 0) < 5:  # 排除样本量过少的噪声规则
+            if perf.get("total_trades", 0) < 5:
                 continue
 
-            # 检查与已入库规则的信号重叠
             if factor_df is not None:
                 existing_in_db = []
                 for r in get_active_rules(min_fitness=0.3, limit=100):
@@ -962,19 +710,6 @@ def feedback_to_phase1(
     phase2_results: List[dict],
     top_n: int = 20,
 ) -> int:
-    """Phase 2 优质规则回流至 Phase 1 模板库。
-
-    将进化产生的高适应度规则以 source="template" 重新入库，供下一轮
-    Phase 1 模板穷举使用。
-
-    Args:
-        phase2_results: Phase 2 run_evolution 返回的结果列表
-        top_n: 回流的规则数量
-
-    Returns:
-        回流成功的规则数
-    """
-    # 按适应度降序
     sorted_results = sorted(
         phase2_results, key=lambda x: x.get("fitness", 0), reverse=True
     )
@@ -994,7 +729,7 @@ def feedback_to_phase1(
                 ),
                 "holding_min": rule.holding_min,
                 "holding_max": rule.holding_max,
-                "source": "template",  # 以模板身份回流
+                "source": "template",
                 "generation": 1,
                 "fitness": item.get("fitness", 0),
                 "annual_return": perf.get("annual_return", 0),
@@ -1011,15 +746,6 @@ def feedback_to_phase1(
 
 
 def cleanup_template_library() -> int:
-    """清理模板库中的劣化规则。
-
-    降级标准:
-    - sharpe_ratio < 1.0
-    - max_drawdown > 30% (绝对值)
-
-    Returns:
-        降级的规则数
-    """
     active_rules = get_active_rules(min_fitness=0.0, limit=500)
     count = 0
     for row in active_rules:
@@ -1039,7 +765,6 @@ def cleanup_template_library() -> int:
 # ═══════════════════════════════════════════════════════
 
 def _copy_rule(rule: StrategyRule) -> StrategyRule:
-    """深拷贝一条规则，生成新的名字。"""
     unique_id = _gen_unique_id()
     return StrategyRule(
         name=f"GEN_{unique_id}",
