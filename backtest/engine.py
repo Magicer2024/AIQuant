@@ -1,173 +1,270 @@
 """
-backtest/engine.py —— Backtrader 回测引擎
+engine.py —— 统一回测引擎
 
-职责：
-  1. 封装 Backtrader 回测流程
-  2. 策略适配器
-  3. 结果分析
+封装 Qlib SimulatorExecutor，提取汇总指标 + 逐笔交易明细
 """
-
-import backtrader as bt
+import json
+import io
+import sys
+import logging
 import pandas as pd
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 from datetime import datetime
-from typing import Optional
+
+from qlib_engine import init_qlib
+from qlib.log import set_global_logger_level
+from qlib_engine.strategy_adapter import BacktestConfig
+from config.settings import BACKTEST
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class BacktestResult:
-    """回测结果"""
-    strategy_name: str
-    start_date: str
-    end_date: str
-    initial_capital: float
-    final_value: float
-    total_return: float
-    annual_return: float
-    sharpe_ratio: float
-    max_drawdown: float
-    max_drawdown_duration: int
-    total_trades: int
-    win_rate: float
-    profit_factor: float
-    avg_profit: float
-    avg_loss: float
-    equity_curve: list[dict] = field(default_factory=list)
-    trades: list[dict] = field(default_factory=list)
+def run_backtest(
+    rule_name: str,
+    rule_id: str,
+    conditions_json: str,
+    start_date: str,
+    end_date: str,
+    save: bool = True,
+) -> dict:
+    """执行回测并提取汇总指标和逐笔交易"""
+    init_qlib()
+    set_global_logger_level(logging.ERROR)
 
+    signals = _generate_backtest_signals(conditions_json, start_date, end_date)
+    if not signals:
+        return {"summary": {}, "trades": [], "error": "No signals generated"}
 
-class FusionStrategy(bt.Strategy):
-    """
-    融合策略的 Backtrader 适配器
-    基于多因子评分进行买卖决策
-    """
-
-    params = (
-        ("score_threshold", 20.0),
-        ("stop_loss", -0.06),
-        ("take_profit", 0.20),
-        ("max_positions", 5),
-        ("single_pos_ratio", 0.20),
+    config = BacktestConfig(
+        start_time=start_date,
+        end_time=end_date,
+        account=BACKTEST["account"],
+        benchmark=BACKTEST["benchmark"],
+        deal_price=BACKTEST["deal_price"],
+        open_cost=BACKTEST["open_cost"],
+        close_cost=BACKTEST["close_cost"],
+        min_cost=BACKTEST["min_cost"],
+        topk=BACKTEST["topk"],
+        n_drop=BACKTEST["n_drop"],
     )
 
-    def __init__(self):
-        self.orders = {}
-        self.positions_count = 0
+    summary = _run_qlib_backtest(signals, config)
+    trades = _build_trade_details(signals)
 
-    def next(self):
-        """每个bar执行"""
-        # 这里简化处理，实际应接入多因子评分
-        # TODO: 接入 strategy_engine 的评分逻辑
-        pass
+    result_id = None
+    if save and summary:
+        from backtest.trade_store import save_result, save_trades
+        result_id = save_result(rule_id, rule_name, start_date, end_date, summary)
+        if trades:
+            save_trades(result_id, trades)
 
-    def notify_order(self, order):
-        """订单状态回调"""
-        if order.status in [order.Completed]:
-            if order.isbuy():
-                self.positions_count += 1
-            else:
-                self.positions_count -= 1
+    return {
+        "result_id": result_id,
+        "summary": summary,
+        "trades": trades,
+    }
 
 
-class BacktestEngine:
-    """回测引擎"""
+def _generate_backtest_signals(
+    conditions_json: str,
+    start_date: str,
+    end_date: str,
+) -> List[dict]:
+    """根据规则条件在整个回测区间生成每日信号"""
+    try:
+        conditions = json.loads(conditions_json)
+    except json.JSONDecodeError:
+        return []
 
-    def __init__(self):
-        self.cerebro = bt.Cerebro()
-        self.results = []
+    if not conditions:
+        return []
 
-    def run_backtest(self, data: pd.DataFrame, strategy_params: dict = None,
-                     initial_cash: float = 100000.0,
-                     commission: float = 0.0003) -> BacktestResult:
-        """
-        执行回测
+    from core.db import get_conn
+    from strategy.factor_lib import compute_all_factors
 
-        :param data: DataFrame 含 open/high/low/close/volume
-        :param strategy_params: 策略参数字典
-        :param initial_cash: 初始资金
-        :param commission: 手续费率
-        :return: 回测结果
-        """
-        cerebro = bt.Cerebro()
+    with get_conn() as conn:
+        dates = conn.execute("""
+            SELECT DISTINCT trade_date FROM daily_price
+            WHERE trade_date BETWEEN ? AND ?
+            ORDER BY trade_date
+        """, (start_date, end_date)).fetchall()
 
-        # 设置初始资金
-        cerebro.broker.setcash(initial_cash)
-        cerebro.broker.setcommission(commission=commission)
+        signals = []
+        for (trade_date,) in dates:
+            trade_date = trade_date if isinstance(trade_date, str) else str(trade_date)
 
-        # 添加数据
-        data_feed = bt.feeds.PandasData(dataname=data)
-        cerebro.adddata(data_feed)
+            codes = conn.execute("""
+                SELECT DISTINCT code FROM daily_price WHERE trade_date = ?
+            """, (trade_date,)).fetchall()
 
-        # 添加策略
-        params = strategy_params or {}
-        cerebro.addstrategy(FusionStrategy, **params)
+            for (code,) in codes:
+                history = conn.execute("""
+                    SELECT trade_date, open, high, low, close, volume, amount, turnover
+                    FROM daily_price WHERE code = ? AND trade_date <= ?
+                    ORDER BY trade_date
+                """, (code, trade_date)).fetchall()
 
-        # 添加分析器
-        cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe")
-        cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
-        cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
+                if len(history) < 60:
+                    continue
 
-        # 运行回测
-        results = cerebro.run()
-        strat = results[0]
+                df = pd.DataFrame([dict(r) for r in history]).set_index("trade_date")
+                try:
+                    factor_df = compute_all_factors(df)
+                    factor_row = factor_df.iloc[-1].to_dict()
+                except Exception:
+                    continue
 
-        # 提取结果
-        sharpe = strat.analyzers.sharpe.get_analysis()
-        drawdown = strat.analyzers.drawdown.get_analysis()
-        trades = strat.analyzers.trades.get_analysis()
-        returns = strat.analyzers.returns.get_analysis()
+                if _evaluate_condition(factor_row, conditions):
+                    signals.append({
+                        "trade_date": trade_date,
+                        "code": code,
+                        "score": 1.0,
+                    })
 
-        # 构建结果
-        result = BacktestResult(
-            strategy_name="fusion",
-            start_date=str(data.index[0]),
-            end_date=str(data.index[-1]),
-            initial_capital=initial_cash,
-            final_value=cerebro.broker.getvalue(),
-            total_return=(cerebro.broker.getvalue() / initial_cash - 1) * 100,
-            annual_return=returns.get("rnorm100", 0),
-            sharpe_ratio=sharpe.get("sharperatio", 0) or 0,
-            max_drawdown=drawdown.get("max", {}).get("drawdown", 0),
-            max_drawdown_duration=drawdown.get("max", {}).get("len", 0),
-            total_trades=trades.get("total", {}).get("total", 0) if trades else 0,
-            win_rate=(trades.get("won", {}).get("total", 0) / trades.get("total", {}).get("total", 1) * 100) if trades else 0,
-            profit_factor=0,
-            avg_profit=0,
-            avg_loss=0,
-        )
-
-        return result
-
-    def optimize(self, data: pd.DataFrame, param_grid: list[dict],
-                 initial_cash: float = 100000.0) -> list[BacktestResult]:
-        """
-        参数优化
-
-        :param data: 行情数据
-        :param param_grid: 参数网格列表
-        :param initial_cash: 初始资金
-        :return: 各参数组合的回测结果
-        """
-        results = []
-        for params in param_grid:
-            try:
-                result = self.run_backtest(data, params, initial_cash)
-                result.strategy_name = f"fusion_{params.get('name', 'default')}"
-                results.append(result)
-            except Exception as e:
-                print(f"[Backtest] 参数 {params} 回测失败: {e}")
-
-        return results
+        return signals
 
 
-# 全局单例
-_backtest_engine: BacktestEngine | None = None
+def _evaluate_condition(factor_values: dict, conditions: dict) -> bool:
+    """评估单只股票是否满足条件"""
+    for fname, op_dict in conditions.items():
+        value = factor_values.get(fname)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return False
+        for op, threshold in op_dict.items():
+            if op == ">" and not (value > threshold):
+                return False
+            if op == "<" and not (value < threshold):
+                return False
+            if op == ">=" and not (value >= threshold):
+                return False
+            if op == "<=" and not (value <= threshold):
+                return False
+    return True
 
 
-def get_backtest_engine() -> BacktestEngine:
-    """获取回测引擎单例"""
-    global _backtest_engine
-    if _backtest_engine is None:
-        _backtest_engine = BacktestEngine()
-    return _backtest_engine
+def _run_qlib_backtest(signals: List[dict], config: BacktestConfig) -> dict:
+    """执行 Qlib 回测，返回汇总指标"""
+    from qlib_engine.strategy_adapter import _signals_to_prediction_df
+    from qlib.utils import init_instance_by_config
+
+    if not signals:
+        return {}
+
+    pred_df = _signals_to_prediction_df(signals, [], [])
+    if pred_df.empty:
+        return {}
+
+    bt_config = {
+        "strategy": {
+            "class": "TopkDropoutStrategy",
+            "module_path": "qlib.contrib.strategy",
+            "kwargs": {"signal": pred_df, "topk": config.topk, "n_drop": config.n_drop},
+        },
+        "executor": {
+            "class": "SimulatorExecutor",
+            "module_path": "qlib.backtest.executor",
+            "kwargs": {"time_per_step": "day", "generate_portfolio_metrics": True},
+        },
+        "backtest": {
+            "start_time": config.start_time,
+            "end_time": config.end_time,
+            "account": config.account,
+            "benchmark": config.benchmark,
+            "exchange_kwargs": {
+                "limit_threshold": config.limit_threshold,
+                "deal_price": config.deal_price,
+                "open_cost": config.open_cost,
+                "close_cost": config.close_cost,
+                "min_cost": config.min_cost,
+            },
+        },
+    }
+
+    _stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        strategy = init_instance_by_config(bt_config["strategy"])
+        executor = init_instance_by_config(bt_config["executor"])
+        portfolio_metrics, indicator = executor.backtest(strategy=strategy, **bt_config["backtest"])
+    finally:
+        sys.stderr = _stderr
+
+    report = indicator.get_latest_report() if hasattr(indicator, "get_latest_report") else {}
+
+    return {
+        "annual_return": round(float(report.get("excess_return_with_cost.annualized_return", 0) or 0) * 100, 2),
+        "cumulative_return": round(float(report.get("excess_return_without_cost.cumulative_return", 0) or 0) * 100, 2),
+        "win_rate": round(float(report.get("excess_return_without_cost.win_rate", 0) or 0) * 100, 2),
+        "sharpe_ratio": round(float(report.get("excess_return_with_cost.information_ratio", 0) or 0), 2),
+        "max_drawdown": round(float(report.get("excess_return_with_cost.max_drawdown", 0) or 0) * 100, 2),
+        "total_trades": int(report.get("total_trades", 0) or 0),
+        "win_trades": 0,
+    }
+
+
+def _build_trade_details(signals: List[dict]) -> List[dict]:
+    """从信号列表重建逐笔交易明细：按股票分组，最早信号为买入，最后信号为卖出"""
+    from core.db import get_conn
+
+    by_code: Dict[str, List[dict]] = {}
+    for s in signals:
+        code = s["code"]
+        if code not in by_code:
+            by_code[code] = []
+        by_code[code].append(s)
+
+    trades = []
+    with get_conn() as conn:
+        for code, sigs in by_code.items():
+            sigs.sort(key=lambda s: s["trade_date"])
+            entry_date = sigs[0]["trade_date"]
+            exit_date = sigs[-1]["trade_date"]
+
+            name_row = conn.execute("SELECT name FROM stock_info WHERE code = ?", (code,)).fetchone()
+            name = name_row["name"] if name_row else ""
+
+            entry_price = 0.0
+            exit_price = 0.0
+            price_row = conn.execute(
+                "SELECT close FROM daily_price WHERE code = ? AND trade_date = ?",
+                (code, entry_date)
+            ).fetchone()
+            if price_row:
+                entry_price = float(price_row["close"])
+
+            price_row = conn.execute(
+                "SELECT close FROM daily_price WHERE code = ? AND trade_date = ?",
+                (code, exit_date)
+            ).fetchone()
+            if price_row:
+                exit_price = float(price_row["close"])
+
+            holding_days = 0
+            pnl_pct = 0.0
+            if entry_price > 0:
+                pnl_pct = round((exit_price / entry_price - 1) * 100, 2) if exit_price > 0 else 0.0
+                try:
+                    holding_days = (datetime.strptime(exit_date, "%Y-%m-%d") - datetime.strptime(entry_date, "%Y-%m-%d")).days
+                except Exception:
+                    pass
+
+            exit_reason = "expire"
+            if pnl_pct <= -8:
+                exit_reason = "stop_loss"
+            elif pnl_pct >= 20:
+                exit_reason = "take_profit"
+
+            trades.append({
+                "code": code,
+                "name": name,
+                "entry_date": entry_date,
+                "entry_price": round(entry_price, 2),
+                "exit_date": exit_date if exit_date != entry_date else "",
+                "exit_price": round(exit_price, 2),
+                "holding_days": holding_days,
+                "pnl_pct": pnl_pct,
+                "exit_reason": exit_reason,
+            })
+
+    trades.sort(key=lambda t: t["entry_date"])
+    return trades
