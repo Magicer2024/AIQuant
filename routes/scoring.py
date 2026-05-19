@@ -1,178 +1,113 @@
 """
-routes/scoring.py —— 多因子评分API
-
-路由：
-  POST /api/scoring/evaluate       → 单股评分
-  POST /api/scoring/batch          → 批量评分
-  GET  /api/scoring/factors        → 可用因子列表
-  POST /api/scoring/weights        → 设置权重
-  GET  /api/scoring/weights        → 获取当前权重
+routes/scoring.py —— 打分排名 API
 """
-
-from datetime import datetime, timedelta
-
-from flask import Blueprint, jsonify, request
-
-from governance.chancellery.scoring_engine import get_scoring_engine, MultiFactorScoringEngine
-from ministries.rites.data_source_manager import get_data_source_manager
+import json
+import math
+from flask import Blueprint, request, jsonify
+from strategy.scorer import score_stocks, get_daily_scores, get_latest_score_date
+from core.db import get_conn
 
 scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
-_engine = get_scoring_engine()
 
 
-def _get_date_range(days: int) -> tuple[str, str]:
-    """根据天数计算日期范围"""
-    end = datetime.now()
-    start = end - timedelta(days=days + 30)  # 多取一些数据用于计算均线
-    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+def _sanitize(obj):
+    """递归替换 NaN/Inf 为 None"""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
 
 
-@scoring_bp.route("/evaluate", methods=["POST"])
-def evaluate_stock():
-    """对单只股票进行多因子评分"""
-    data = request.get_json() or {}
-    code = data.get("code", "").strip()
-    name = data.get("name", code)
-    days = data.get("days", 120)
-
-    if not code:
-        return jsonify({"success": False, "error": "缺少股票代码"}), 400
-
-    # 获取数据
-    ds = get_data_source_manager()
-    start_date, end_date = _get_date_range(days)
-    raw_data = ds.get_daily_price(code, start_date=start_date, end_date=end_date)
-
-    if not raw_data or len(raw_data) < 20:
-        return jsonify({
-            "success": False,
-            "error": f"股票 {code} 数据不足（仅 {len(raw_data) if raw_data else 0} 条）",
-        }), 400
-
-    import pandas as pd
-    df = pd.DataFrame(raw_data)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date")
-
-    # 评分
-    result = _engine.score(code, name, df)
-
-    return jsonify({
-        "success": True,
-        "code": result.code,
-        "name": result.name,
-        "total_score": result.total_score,
-        "grade": result.grade,
-        "recommendation": result.recommendation,
-        "signals": result.signals,
-        "factors": [
-            {
-                "name": f.name,
-                "score": f.score,
-                "weight": f.weight,
-                "raw_value": f.raw_value,
-                "description": f.description,
-            }
-            for f in result.factors
-        ],
-    })
+@scoring_bp.route("/daily", methods=["GET"])
+def daily_scores():
+    """获取某日打分排名 GET /api/scoring/daily?date=2025-01-15"""
+    trade_date = request.args.get("date") or get_latest_score_date()
+    if not trade_date:
+        return jsonify({"success": True, "data": [], "error": None})
+    results = get_daily_scores(trade_date)
+    return jsonify({"success": True, "data": _sanitize(results), "error": None})
 
 
-@scoring_bp.route("/batch", methods=["POST"])
-def batch_evaluate():
-    """批量评分"""
-    data = request.get_json() or {}
-    stocks = data.get("stocks", [])
-    days = data.get("days", 120)
-    top_n = data.get("top_n", 20)
+@scoring_bp.route("/run", methods=["POST"])
+def run_scoring():
+    """触发打分 POST /api/scoring/run"""
+    body = request.get_json(silent=True) or {}
+    trade_date = body.get("date") or _get_latest_trade_date()
+    if not trade_date:
+        return jsonify({"success": False, "data": None, "error": "No trade_date provided"}), 400
+    try:
+        results = score_stocks(trade_date, save=True)
+        return jsonify({"success": True, "data": {"count": len(results), "date": trade_date}, "error": None})
+    except Exception as e:
+        return jsonify({"success": False, "data": None, "error": str(e)}), 500
 
-    if not stocks:
-        return jsonify({"success": False, "error": "缺少股票列表"}), 400
 
-    ds = get_data_source_manager()
-    results = []
-
-    for stock in stocks:
-        code = stock.get("code", "").strip()
-        name = stock.get("name", code)
-        if not code:
-            continue
-
+@scoring_bp.route("/stock/<code>", methods=["GET"])
+def stock_factors(code: str):
+    """获取单股因子明细 GET /api/scoring/stock/000001?date=2025-01-15"""
+    trade_date = request.args.get("date")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM stock_score WHERE code = ? AND trade_date = ?",
+            (code, trade_date)
+        ).fetchone()
+        if not row:
+            return jsonify({"success": True, "data": None, "error": "Not found"})
+        data = dict(row)
         try:
-            start_date, end_date = _get_date_range(days)
-            raw_data = ds.get_daily_price(code, start_date=start_date, end_date=end_date)
-            if not raw_data or len(raw_data) < 20:
-                continue
-
-            import pandas as pd
-            df = pd.DataFrame(raw_data)
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"])
-                df = df.sort_values("date")
-
-            result = _engine.score(code, name, df)
-            results.append({
-                "code": result.code,
-                "name": result.name,
-                "total_score": result.total_score,
-                "grade": result.grade,
-                "signals": result.signals,
-            })
-        except Exception as e:
-            print(f"[Scoring] {code} 评分失败: {e}")
-            continue
-
-    # 排序并截取
-    results.sort(key=lambda x: x["total_score"], reverse=True)
-    top_results = results[:top_n]
-
-    return jsonify({
-        "success": True,
-        "evaluated": len(results),
-        "top_n": top_n,
-        "results": top_results,
-    })
+            data["factors"] = json.loads(data.get("factors_json", "{}"))
+        except json.JSONDecodeError:
+            data["factors"] = {}
+        return jsonify({"success": True, "data": _sanitize(data), "error": None})
 
 
-@scoring_bp.route("/factors", methods=["GET"])
-def list_factors():
-    """获取可用因子列表"""
-    return jsonify({
-        "success": True,
-        "factors": _engine.get_available_factors(),
-    })
+@scoring_bp.route("/kline/<code>", methods=["GET"])
+def kline_data(code: str):
+    """获取 K 线数据（含回测买卖点标注）GET /api/scoring/kline/000001?start=2024-01-01&end=2024-12-31&result_id=1"""
+    start = request.args.get("start", "2024-01-01")
+    end = request.args.get("end", "2025-12-31")
+    result_id = request.args.get("result_id")
+
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT trade_date, open, high, low, close, volume
+            FROM daily_price WHERE code = ? AND trade_date BETWEEN ? AND ?
+            ORDER BY trade_date
+        """, (code, start, end)).fetchall()
+
+        kline = []
+        for r in rows:
+            d = dict(r)
+            kline.append([
+                d["trade_date"],
+                _sanitize(d.get("open")),
+                _sanitize(d.get("close")),
+                _sanitize(d.get("low")),
+                _sanitize(d.get("high")),
+                _sanitize(d.get("volume")),
+            ])
+
+        marks = []
+        if result_id:
+            trades = conn.execute("""
+                SELECT * FROM backtest_trades WHERE result_id = ? AND code = ?
+            """, (int(result_id), code)).fetchall()
+            for t in trades:
+                t = dict(t)
+                if t.get("entry_date"):
+                    marks.append({"date": t["entry_date"], "price": _sanitize(t.get("entry_price")), "type": "buy"})
+                if t.get("exit_date"):
+                    marks.append({"date": t["exit_date"], "price": _sanitize(t.get("exit_price")), "type": "sell"})
+
+        return jsonify({"success": True, "data": {"kline": kline, "marks": marks}, "error": None})
 
 
-@scoring_bp.route("/weights", methods=["GET"])
-def get_weights():
-    """获取当前权重配置"""
-    return jsonify({
-        "success": True,
-        "weights": _engine.weights,
-    })
-
-
-@scoring_bp.route("/weights", methods=["POST"])
-def set_weights():
-    """设置因子权重"""
-    data = request.get_json() or {}
-    weights = data.get("weights", {})
-
-    if not weights:
-        return jsonify({"success": False, "error": "缺少权重配置"}), 400
-
-    # 验证权重
-    total = sum(weights.values())
-    if abs(total - 1.0) > 0.01:
-        return jsonify({
-            "success": False,
-            "error": f"权重总和必须为1.0，当前为 {total:.2f}",
-        }), 400
-
-    _engine.set_weights(weights)
-    return jsonify({
-        "success": True,
-        "message": "权重已更新",
-        "weights": _engine.weights,
-    })
+def _get_latest_trade_date() -> str:
+    with get_conn() as conn:
+        row = conn.execute("SELECT MAX(trade_date) as d FROM daily_price").fetchone()
+        return row["d"] if row else ""
