@@ -19,7 +19,7 @@ if %errorlevel% neq 0 (
 netstat -ano | findstr ":5000" | findstr "LISTENING" >nul
 if %errorlevel% equ 0 (
     echo Service already running.
-    start http://localhost:5000/dashboard
+    start http://localhost:5000/
     exit /b 0
 )
 
@@ -29,7 +29,7 @@ start /min "AIQuant-Backend" pythonw app.py
 timeout /t 2 >nul
 
 echo Opening dashboard...
-start http://localhost:5000/dashboard
+start http://localhost:5000/
 
 echo Done! Service running in background.
 timeout /t 3 >nul

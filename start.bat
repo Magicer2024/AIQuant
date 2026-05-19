@@ -66,18 +66,15 @@ if %errorlevel% equ 0 (
 
 :: --- Step 4: Start service ---
 echo [4/5] Starting Flask service...
-echo         Dashboard : http://localhost:5000/dashboard
-echo         Governance: http://localhost:5000/governance
-echo         Agent     : http://localhost:5000/agent
-echo         Market    : http://localhost:5000/market
+echo         Dashboard : http://localhost:5000/
 echo         API       : http://localhost:5000/api/health
 echo.
 echo [5/5] Opening browser...
-start http://localhost:5000/dashboard
+start http://localhost:5000/
 
 echo ========================================
 echo  Service starting... Do NOT close this window.
-echo  Three Provinces ^& Six Ministries governance enabled
+echo  AIQuant 个人股票评分系统
 echo ========================================
 echo.
 
