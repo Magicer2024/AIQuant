@@ -31,4 +31,9 @@ data_cache/
 reports/
 
 config/llm_config.yaml
-.qoder\
+.qoder/
+
+# Skills / agents config (local only)
+.agents/
+.claude/
+.codebuddy/
