@@ -12,7 +12,9 @@ import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
+import logging, os, io, sys
 from qlib_engine import init_qlib
+from qlib.log import set_global_logger_level
 
 
 @dataclass
@@ -72,6 +74,7 @@ def backtest_single_rule(
     Returns dict with annual_return, sharpe_ratio, max_drawdown, win_rate, total_trades, etc.
     """
     init_qlib()
+    set_global_logger_level(logging.ERROR)
 
     pred_df = _signals_to_prediction_df(signals, [], [])
 
@@ -79,7 +82,8 @@ def backtest_single_rule(
         return {
             "rule_name": rule_name,
             "annual_return": 0, "sharpe_ratio": 0, "max_drawdown": 0,
-            "win_rate": 0, "total_trades": 0, "error": "No signals",
+            "win_rate": 0, "total_trades": 0, "total_return": 0,
+            "error": "No signals",
         }
 
     # Build Qlib backtest config
@@ -119,8 +123,14 @@ def backtest_single_rule(
     try:
         from qlib.utils import init_instance_by_config
 
-        strategy = init_instance_by_config(bt_config["strategy"])
-        executor = init_instance_by_config(bt_config["executor"])
+        # Suppress gym deprecation notice during qlib contrib imports
+        _stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            strategy = init_instance_by_config(bt_config["strategy"])
+            executor = init_instance_by_config(bt_config["executor"])
+        finally:
+            sys.stderr = _stderr
 
         portfolio_metrics, indicator = executor.backtest(
             strategy=strategy,
@@ -147,7 +157,7 @@ def backtest_single_rule(
             "rule_name": rule_name,
             "error": str(e),
             "annual_return": 0, "sharpe_ratio": 0, "max_drawdown": 0,
-            "win_rate": 0, "total_trades": 0,
+            "win_rate": 0, "total_trades": 0, "total_return": 0,
         }
 
 

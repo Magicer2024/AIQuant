@@ -9,6 +9,7 @@ rule_miner.py —— Phase 1: 模板穷举规则生成
 - 模板库回流更新
 """
 import pandas as pd
+pd.set_option('future.no_silent_downcasting', True)
 import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field, asdict
@@ -264,20 +265,20 @@ class RuleMiner:
             return None
         n = len(results)
         return {
-            "total_return": np.mean([r["total_return"] for r in results]),
-            "annual_return": np.mean([r["annual_return"] for r in results]),
-            "win_rate": np.mean([r["win_rate"] for r in results]),
-            "sharpe_ratio": np.mean([r["sharpe_ratio"] for r in results]),
-            "max_drawdown": np.max([r["max_drawdown"] for r in results]),
-            "total_trades": np.sum([r["total_trades"] for r in results]),
+            "total_return": np.mean([r.get("total_return", 0) for r in results]),
+            "annual_return": np.mean([r.get("annual_return", 0) for r in results]),
+            "win_rate": np.mean([r.get("win_rate", 0) for r in results]),
+            "sharpe_ratio": np.mean([r.get("sharpe_ratio", 0) for r in results]),
+            "max_drawdown": np.max([r.get("max_drawdown", 0) for r in results]),
+            "total_trades": np.sum([r.get("total_trades", 0) for r in results]),
             "sample_count": n,
         }
 
     def score_rule(self, perf: dict) -> float:
-        return (0.3 * perf["total_return"] / 100.0
-                + 0.3 * perf["win_rate"] / 100.0
-                + 0.25 * perf["sharpe_ratio"]
-                - 0.15 * abs(perf["max_drawdown"]) / 100.0)
+        return (0.3 * (perf.get("total_return", 0) or 0) / 100.0
+                + 0.3 * (perf.get("win_rate", 0) or 0) / 100.0
+                + 0.25 * (perf.get("sharpe_ratio", 0) or 0)
+                - 0.15 * abs(perf.get("max_drawdown", 0) or 0) / 100.0)
 
     def run_phase1(self, stock_data: Dict,
                    forward_returns: pd.Series,

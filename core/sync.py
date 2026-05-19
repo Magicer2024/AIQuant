@@ -11,8 +11,9 @@ sync.py  ——  数据同步模块（akshare 版）
 import pandas as pd
 import time
 import os
+import signal
 from datetime import datetime, date, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from core.data_fetcher import get_market_index
 from core.db import (
     init_db, upsert_stock_list, update_strategy_scores_batch,
@@ -218,6 +219,22 @@ def _format_code_for_baostock(code: str) -> str:
         return f"sh.{code}"
 
 
+def sync_one_stock_with_timeout(code: str, start_date: str = HISTORY_START,
+                                end_date: str = None, verbose: bool = False,
+                                auto_login: bool = True, timeout: float = 30.0) -> bool:
+    """带超时的单股票同步，防止网络请求永久阻塞"""
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(sync_one_stock, code, start_date, end_date, verbose, auto_login)
+        try:
+            return fut.result(timeout=timeout)
+        except FutureTimeoutError:
+            if verbose:
+                print(f"  [{code}] 超时 ({timeout}s)，跳过")
+            return False
+        except Exception:
+            return False
+
+
 def sync_one_stock(code: str, start_date: str = HISTORY_START,
                    end_date: str = None, verbose: bool = False,
                    auto_login: bool = True) -> bool:
@@ -246,88 +263,117 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
             print(f"  [{code}] 跳过：baostock 不支持北交所股票")
         return False
 
-    # 主数据源：baostock
-    try:
-        import baostock as bs
-        # 仅在 auto_login=True 时自行管理登录
-        if auto_login:
-            lg = bs.login()
-            if lg.error_code != '0':
-                if verbose:
-                    print(f"  [{code}] baostock 登录失败: {lg.error_msg}")
+    # 主数据源：baostock（带断线重连）
+    import baostock as bs
+    baostock_failed = False
+    for bs_attempt in range(2):
+        try:
+            # 会话管理：
+            # - auto_login=True：每次调用自己 login/logout
+            # - auto_login=False + 首次尝试：用外部会话
+            # - auto_login=False + 重试（socket 断开后）：重新 login 并保留给外部
+            own_login = auto_login or bs_attempt > 0
+            if own_login:
+                lg = bs.login()
+                if lg.error_code != '0':
+                    if verbose:
+                        print(f"  [{code}] baostock 登录失败: {lg.error_msg}")
+                    bs.logout()
+                    raise Exception("baostock login failed")
+
+            bs_start = start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:]
+            bs_end = end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
+
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg",
+                start_date=bs_start, end_date=bs_end,
+                frequency="d", adjustflag="2"
+            )
+
+            data_list = []
+            while (rs.error_code == '0') & rs.next():
+                data_list.append(rs.get_row_data())
+
+            # auto_login=True 时登出；auto_login=False 时保留会话给外部
+            if auto_login:
                 bs.logout()
-                raise Exception("baostock login failed")
 
-        # 转换日期格式
-        bs_start = start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:]
-        bs_end = end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
-
-        rs = bs.query_history_k_data_plus(
-            bs_code,
-            "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg",
-            start_date=bs_start, end_date=bs_end,
-            frequency="d", adjustflag="2"  # 前复权
-        )
-
-        data_list = []
-        while (rs.error_code == '0') & rs.next():
-            data_list.append(rs.get_row_data())
-
-        if auto_login:
-            bs.logout()
-
-        if data_list:
-            df = pd.DataFrame(data_list, columns=rs.fields)
-            # 转换数据类型
-            numeric_cols = ['open', 'high', 'low', 'close', 'preclose', 'volume', 'amount', 'turn', 'pctChg']
-            for col in numeric_cols:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            df.rename(columns={
-                "date": "date", "open": "open", "high": "high", "low": "low",
-                "close": "close", "volume": "volume", "amount": "amount",
-                "pctChg": "pct_change", "turn": "turnover"
-            }, inplace=True)
-            
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-            # Write to Qlib binary format
-            df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
-            n = append_daily_data(code, df_qlib)
+            if data_list:
+                df = pd.DataFrame(data_list, columns=rs.fields)
+                numeric_cols = ['open', 'high', 'low', 'close', 'preclose', 'volume', 'amount', 'turn', 'pctChg']
+                for col in numeric_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                df.rename(columns={
+                    "date": "date", "open": "open", "high": "high", "low": "low",
+                    "close": "close", "volume": "volume", "amount": "amount",
+                    "pctChg": "pct_change", "turn": "turnover"
+                }, inplace=True)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+                n = append_daily_data(code, df_qlib)
+                if verbose:
+                    print(f"  [{code}] baostock OK (+{n} 行)")
+                return True
+        except Exception as e:
+            baostock_failed = True
+            msg = str(e)
+            is_socket_err = any(kw in msg for kw in (
+                '10038', '10053', '10054', '非套接字', 'socket',
+                '网络接收错误', '接收数据异常', 'network',
+            ))
+            if bs_attempt == 0 and is_socket_err:
+                if verbose:
+                    print(f"  [{code}] baostock socket 断开，重连...")
+                try:
+                    bs.logout()
+                except Exception:
+                    pass
+                continue
             if verbose:
-                print(f"  [{code}] baostock OK (+{n} 行)")
-            return True
-    except Exception as e:
-        if verbose:
-            print(f"  [{code}] baostock 失败: {str(e)[:60]}")
-    
+                print(f"  [{code}] baostock 失败: {msg[:60]}")
+            if auto_login:
+                try:
+                    bs.logout()
+                except Exception:
+                    pass
+            break
+
     # 备用数据源：akshare
-    try:
-        import akshare as ak
-        # akshare 格式不需要交易所后缀
-        ak_code = code.replace('.SH', '').replace('.SZ', '')
-        df = ak.stock_zh_a_hist(
-            symbol=ak_code, period="daily",
-            start_date=start_date, end_date=end_date, adjust="qfq"
-        )
-        if df is not None and not df.empty:
-            df.rename(columns={
-                "日期":"date","开盘":"open","收盘":"close","最高":"high","最低":"low",
-                "成交量":"volume","成交额":"amount","涨跌幅":"pct_change","换手率":"turnover"
-            }, inplace=True)
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-            # Write to Qlib binary format
-            df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
-            n = append_daily_data(code, df_qlib)
+    if baostock_failed:
+        try:
+            ok = _sync_one_stock_akshare(code, start_date, end_date, verbose)
+            if ok:
+                return True
+        except Exception as e:
             if verbose:
-                print(f"  [{code}] akshare OK (+{n} 行)")
-            return True
-    except Exception as e:
-        if verbose:
-            print(f"  [{code}] akshare 失败: {str(e)[:60]}")
+                print(f"  [{code}] akshare 也失败: {str(e)[:60]}")
 
+    return False
+
+
+def _sync_one_stock_akshare(code: str, start_date: str, end_date: str, verbose: bool = False) -> bool:
+    """akshare 备用数据源"""
+    import akshare as ak
+    ak_code = code.replace('.SH', '').replace('.SZ', '')
+    df = ak.stock_zh_a_hist(
+        symbol=ak_code, period="daily",
+        start_date=start_date, end_date=end_date, adjust="qfq"
+    )
+    if df is not None and not df.empty:
+        df.rename(columns={
+            "日期":"date","开盘":"open","收盘":"close","最高":"high","最低":"low",
+            "成交量":"volume","成交额":"amount","涨跌幅":"pct_change","换手率":"turnover"
+        }, inplace=True)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+        n = append_daily_data(code, df_qlib)
+        if verbose:
+            print(f"  [{code}] akshare OK (+{n} 行)")
+        return True
     return False
 
 

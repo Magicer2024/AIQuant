@@ -10,6 +10,9 @@ factor_lib.py —— 因子库
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Callable
+
+pd.set_option('future.no_silent_downcasting', True)
+
 from strategy.indicators import (
     calc_ma, calc_macd, calc_rsi, calc_kdj, calc_cci, calc_dpo,
     calc_obv, calc_atr, calc_bollinger, calc_historical_volatility, calc_dmi,
@@ -333,7 +336,7 @@ def _detect_hammer(open_: pd.Series, high: pd.Series, low: pd.Series,
     lower_shadow = (open_.combine(close, min) - low)
     upper_shadow = (high - open_.combine(close, max))
     is_hammer = (lower_shadow > body * 2) & (upper_shadow < body * 0.3)
-    return is_hammer.fillna(False)
+    return is_hammer.infer_objects(copy=False).fillna(False)
 
 
 def _detect_engulf(df: pd.DataFrame, direction: str) -> pd.Series:
@@ -341,10 +344,10 @@ def _detect_engulf(df: pd.DataFrame, direction: str) -> pd.Series:
     prev_open, prev_close = open_.shift(1), close.shift(1)
     if direction == "bull":
         return ((prev_close < prev_open) & (close > open_) &
-                (open_ <= prev_close) & (close >= prev_open)).fillna(False)
+                (open_ <= prev_close) & (close >= prev_open)).infer_objects(copy=False).fillna(False)
     else:
         return ((prev_close > prev_open) & (close < open_) &
-                (open_ >= prev_close) & (close <= prev_open)).fillna(False)
+                (open_ >= prev_close) & (close <= prev_open)).infer_objects(copy=False).fillna(False)
 
 
 def _detect_morning_star(df: pd.DataFrame) -> pd.Series:
@@ -353,7 +356,7 @@ def _detect_morning_star(df: pd.DataFrame) -> pd.Series:
     body2 = (close.shift(1) - open_.shift(1)).abs()
     body3 = close - open_
     return ((body1 < 0) & (body2 < body1.abs() * 0.3) & (body3 > 0) &
-            (close > (open_.shift(2) + close.shift(2)) / 2)).fillna(False)
+            (close > (open_.shift(2) + close.shift(2)) / 2)).infer_objects(copy=False).fillna(False)
 
 
 def _detect_evening_star(df: pd.DataFrame) -> pd.Series:
@@ -362,7 +365,7 @@ def _detect_evening_star(df: pd.DataFrame) -> pd.Series:
     body2 = (close.shift(1) - open_.shift(1)).abs()
     body3 = close - open_
     return ((body1 > 0) & (body2 < body1.abs() * 0.3) & (body3 < 0) &
-            (close < (open_.shift(2) + close.shift(2)) / 2)).fillna(False)
+            (close < (open_.shift(2) + close.shift(2)) / 2)).infer_objects(copy=False).fillna(False)
 
 
 def _detect_double_pattern(close: pd.Series, pattern: str) -> pd.Series:
@@ -371,12 +374,12 @@ def _detect_double_pattern(close: pd.Series, pattern: str) -> pd.Series:
     mid = (high_20 + low_20) / 2
     if pattern == "bottom":
         near_low = (close - low_20).abs() / low_20.clip(lower=1e-9) < 0.03
-        prev_near = near_low.shift(10).fillna(False)
-        return (near_low & prev_near & (close > mid)).fillna(False)
+        prev_near = near_low.shift(10).infer_objects(copy=False).fillna(False)
+        return (near_low & prev_near & (close > mid)).infer_objects(copy=False).fillna(False)
     else:
         near_high = (close - high_20).abs() / high_20.clip(lower=1e-9) < 0.03
-        prev_near = near_high.shift(10).fillna(False)
-        return (near_high & prev_near & (close < mid)).fillna(False)
+        prev_near = near_high.shift(10).infer_objects(copy=False).fillna(False)
+        return (near_high & prev_near & (close < mid)).infer_objects(copy=False).fillna(False)
 
 
 # ── 因子 IC 计算 ──────────────────────────────

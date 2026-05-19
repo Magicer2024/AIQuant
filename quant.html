@@ -1030,7 +1030,7 @@
                                 <th data-sort="close">最新价 <span class="sort-icon"></span></th>
                                 <th data-sort="pct_change">涨跌幅 <span class="sort-icon"></span></th>
                                 <th data-sort="volume">成交量 <span class="sort-icon"></span></th>
-                                <th data-sort="fusion_score">融合评分 <span class="sort-icon">▼</span></th>
+                                <th data-sort="combined_score">综合评分 <span class="sort-icon">▼</span></th>
                             </tr>
                         </thead>
                         <tbody id="stock-tbody"></tbody>
@@ -1294,7 +1294,7 @@
         // ========== 股票列表模块 ==========
         let stockList = [];
         let filteredList = [];
-        let sortField = 'fusion_score';
+        let sortField = 'combined_score';
         let sortOrder = 'desc';
         let selectedCode = null;
 
@@ -1662,17 +1662,26 @@
             empty.style.display = 'none';
             tbody.innerHTML = filteredList.map(s => {
                 const pctClass = s.pct_change > 0 ? 'price-up' : s.pct_change < 0 ? 'price-down' : '';
-                const scoreClass = s.fusion_score >= 30 ? 'score-high' : s.fusion_score >= 20 ? 'score-mid' : 'score-low';
+                const combined = s.combined_score || (s.fusion_score || 0) + (s.qlib_confidence || 0);
+                const scoreClass = combined >= 30 ? 'score-high' : combined >= 20 ? 'score-mid' : 'score-low';
                 const sel = s.code === selectedCode ? 'selected' : '';
-                const vol = s.volume >= 10000 ? (s.volume / 10000).toFixed(1) + '万' : s.volume;
-                const pctStr = s.pct_change > 0 ? '+' + s.pct_change.toFixed(2) : s.pct_change.toFixed(2);
-                return `<tr class="${sel}" data-code="${s.code}">
+                const volVal = s.volume || 0;
+                const vol = volVal >= 10000 ? (volVal / 10000).toFixed(1) + '万' : volVal;
+                const pctVal = s.pct_change || 0;
+                const pctStr = pctVal > 0 ? '+' + pctVal.toFixed(2) : pctVal.toFixed(2);
+                const qlibTip = s.qlib_confidence != null
+                    ? `Qlib策略: ${s.qlib_confidence.toFixed(1)} (${s.qlib_trigger_count || 0}条触发)`
+                    : '';
+                const scoreDisplay = s.qlib_confidence != null
+                    ? `${combined.toFixed(1)}<br><span style="font-size:10px;color:#9aa0a6;">融合${(s.fusion_score||0).toFixed(1)} + Qlib${s.qlib_confidence.toFixed(1)}</span>`
+                    : combined.toFixed(1);
+                return `<tr class="${sel}" data-code="${s.code}" title="${qlibTip}">
                     <td>${s.code}</td>
                     <td>${s.name}</td>
-                    <td class="${pctClass}">${s.close.toFixed(2)}</td>
+                    <td class="${pctClass}">${(s.close || 0).toFixed(2)}</td>
                     <td class="${pctClass}">${pctStr}%</td>
                     <td>${vol}</td>
-                    <td class="${scoreClass}">${(s.fusion_score || 0).toFixed(1)}</td>
+                    <td class="${scoreClass}">${scoreDisplay}</td>
                 </tr>`;
             }).join('');
 

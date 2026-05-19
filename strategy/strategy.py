@@ -8,6 +8,7 @@
 3. 布林带突破策略（波动率突破）
 4. 综合评分策略（多因子打分）
 """
+import math
 import pandas as pd
 import numpy as np
 from strategy.indicators import calc_all_indicators
@@ -317,23 +318,30 @@ def get_latest_signal(df_strategy: pd.DataFrame) -> dict:
         action = "立即减仓"
         color = "#40a9ff"
 
+    def _safe(v, default=0.0):
+        try:
+            f = float(v)
+            return default if math.isnan(f) or math.isinf(f) else f
+        except (ValueError, TypeError):
+            return default
+
     return {
         "date": str(df_strategy.index[-1].date()),
-        "close": float(latest["close"]),
+        "close": _safe(latest["close"]),
         "action": action,
         "color": color,
         "score": round(score, 1),
         "buy_signal": bool(latest.get("BUY_SIGNAL", False)),
         "sell_signal": bool(latest.get("SELL_SIGNAL", False)),
         "strong_buy": bool(latest.get("STRONG_BUY", False)),
-        "stop_loss": round(float(latest.get("STOP_LOSS", 0)), 2),
-        "take_profit": round(float(latest.get("TAKE_PROFIT", 0)), 2),
-        "stop_pct": round(float(latest.get("STOP_PCT", 0)), 2),
-        "target_pct": round(float(latest.get("TARGET_PCT", 0)), 2),
-        "rsi14": round(float(latest.get("RSI14", 50)), 1),
-        "macd_dif": round(float(latest.get("MACD_DIF", 0)), 4),
-        "kdj_k": round(float(latest.get("KDJ_K", 50)), 1),
-        "kdj_d": round(float(latest.get("KDJ_D", 50)), 1),
+        "stop_loss": round(_safe(latest.get("STOP_LOSS")), 2),
+        "take_profit": round(_safe(latest.get("TAKE_PROFIT")), 2),
+        "stop_pct": round(_safe(latest.get("STOP_PCT")), 2),
+        "target_pct": round(_safe(latest.get("TARGET_PCT")), 2),
+        "rsi14": round(_safe(latest.get("RSI14"), 50), 1),
+        "macd_dif": round(_safe(latest.get("MACD_DIF")), 4),
+        "kdj_k": round(_safe(latest.get("KDJ_K"), 50), 1),
+        "kdj_d": round(_safe(latest.get("KDJ_D"), 50), 1),
     }
 
 

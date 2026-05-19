@@ -43,6 +43,29 @@ def _bs_ensure_login():
     """调用前确保已登录"""
     _bs_login()
 
+
+def _bs_relogin():
+    """强制重新登录（socket 断开后恢复）"""
+    global _bs_logged_in
+    with _bs_lock:
+        try:
+            bs.logout()
+        except Exception:
+            pass
+        _bs_logged_in = False
+    _bs_login()
+
+
+def _is_socket_error(exc: Exception) -> bool:
+    """检测是否为 socket 断开错误（含 baostock 中文错误信息）"""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in (
+        '10038', '10053', '10054', '10060', '10061',
+        '非套接字', 'socket', 'connection', 'timeout',
+        'reset', 'aborted', 'refused',
+        '网络接收错误', '接收数据异常', 'network',
+    ))
+
 # ─────────────────────────────────────────────
 # 代码格式转换
 # ─────────────────────────────────────────────
@@ -82,55 +105,63 @@ def _fetch_baostock(symbol: str, start_date: str, end_date: str,
     用 baostock 拉取日线行情
     adjust: qfq=前复权(adjustflag=2), hfq=后复权(adjustflag=1), none=不复权(adjustflag=3)
     """
-    _bs_ensure_login()
+    for attempt in range(2):
+        try:
+            _bs_ensure_login()
 
-    adjustflag_map = {"qfq": "2", "hfq": "1", "": "3", "none": "3"}
-    adjustflag = adjustflag_map.get(adjust, "2")
+            adjustflag_map = {"qfq": "2", "hfq": "1", "": "3", "none": "3"}
+            adjustflag = adjustflag_map.get(adjust, "2")
 
-    bs_code = _to_bs_code(symbol)
-    # baostock 日期格式 YYYY-MM-DD
-    start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}" if len(start_date) == 8 else start_date
-    end   = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"       if len(end_date) == 8   else end_date
+            bs_code = _to_bs_code(symbol)
+            # baostock 日期格式 YYYY-MM-DD
+            start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}" if len(start_date) == 8 else start_date
+            end   = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"       if len(end_date) == 8   else end_date
 
-    fields = "date,open,high,low,close,volume,amount,turn,pctChg"
-    rs = bs.query_history_k_data_plus(
-        bs_code, fields,
-        start_date=start, end_date=end,
-        frequency='d', adjustflag=adjustflag
-    )
-    if rs.error_code != '0':
-        raise RuntimeError(f"baostock query failed: {rs.error_msg}")
+            fields = "date,open,high,low,close,volume,amount,turn,pctChg"
+            rs = bs.query_history_k_data_plus(
+                bs_code, fields,
+                start_date=start, end_date=end,
+                frequency='d', adjustflag=adjustflag
+            )
+            if rs.error_code != '0':
+                raise RuntimeError(f"baostock query failed: {rs.error_msg}")
 
-    data = []
-    while rs.next():
-        data.append(rs.get_row_data())
+            data = []
+            while rs.next():
+                data.append(rs.get_row_data())
 
-    if not data:
-        return pd.DataFrame()
+            if not data:
+                return pd.DataFrame()
 
-    df = pd.DataFrame(data, columns=rs.fields)
+            df = pd.DataFrame(data, columns=rs.fields)
 
-    # 数据类型转换
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turn', 'pctChg']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            # 数据类型转换
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turn', 'pctChg']
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df['date'] = pd.to_datetime(df['date'])
-    df.set_index('date', inplace=True)
-    df.sort_index(inplace=True)
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            df.sort_index(inplace=True)
 
-    # 统一列名
-    df.rename(columns={
-        'turn':    'turnover',
-        'pctChg':  'pct_change',
-    }, inplace=True)
+            # 统一列名
+            df.rename(columns={
+                'turn':    'turnover',
+                'pctChg':  'pct_change',
+            }, inplace=True)
 
-    # 补充 amount 为 0 时的处理
-    df.dropna(subset=['close'], inplace=True)
-    df = df[df['close'] > 0]
+            # 补充 amount 为 0 时的处理
+            df.dropna(subset=['close'], inplace=True)
+            df = df[df['close'] > 0]
 
-    return df
+            return df
+        except Exception as e:
+            if attempt == 0 and _is_socket_error(e):
+                print(f"  [baostock] socket 断开 ({e})，重连中...")
+                _bs_relogin()
+                continue
+            raise
 
 
 def _fetch_akshare_fallback(symbol: str, start_date: str, end_date: str,
