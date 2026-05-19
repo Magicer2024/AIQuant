@@ -432,6 +432,70 @@ CREATE TABLE IF NOT EXISTS active_strategies (
 );
 CREATE INDEX IF NOT EXISTS idx_active_date ON active_strategies(select_date);
 CREATE INDEX IF NOT EXISTS idx_active_valid ON active_strategies(valid_until);
+
+-- 每日因子值缓存
+CREATE TABLE IF NOT EXISTS factor_daily (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT    NOT NULL,
+    trade_date  TEXT    NOT NULL,
+    factor_name TEXT    NOT NULL,
+    factor_value REAL,
+    UNIQUE(code, trade_date, factor_name)
+);
+CREATE INDEX IF NOT EXISTS idx_factor_code_date ON factor_daily(code, trade_date);
+CREATE INDEX IF NOT EXISTS idx_factor_name_date ON factor_daily(factor_name, trade_date);
+
+-- 每日打分排名
+CREATE TABLE IF NOT EXISTS stock_score (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date  TEXT    NOT NULL,
+    code        TEXT    NOT NULL,
+    name        TEXT,
+    score       REAL    DEFAULT 0,
+    rule_id     TEXT,
+    rule_name   TEXT,
+    factors_json TEXT,
+    created_at  TEXT    DEFAULT (datetime('now','localtime')),
+    UNIQUE(trade_date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_score_date ON stock_score(trade_date);
+CREATE INDEX IF NOT EXISTS idx_stock_score_code ON stock_score(code);
+
+-- 回测结果汇总
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id             TEXT    NOT NULL,
+    rule_name           TEXT,
+    start_date          TEXT    NOT NULL,
+    end_date            TEXT    NOT NULL,
+    annual_return       REAL    DEFAULT 0,
+    cumulative_return   REAL    DEFAULT 0,
+    win_rate            REAL    DEFAULT 0,
+    sharpe_ratio        REAL    DEFAULT 0,
+    max_drawdown        REAL    DEFAULT 0,
+    total_trades        INTEGER DEFAULT 0,
+    win_trades          INTEGER DEFAULT 0,
+    created_at          TEXT    DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_bt_results_rule ON backtest_results(rule_id);
+
+-- 回测逐笔交易明细
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_id       INTEGER,
+    code            TEXT    NOT NULL,
+    name            TEXT,
+    entry_date      TEXT    NOT NULL,
+    entry_price     REAL,
+    exit_date       TEXT,
+    exit_price      REAL,
+    holding_days    INTEGER DEFAULT 0,
+    pnl_pct         REAL    DEFAULT 0,
+    exit_reason     TEXT,
+    FOREIGN KEY (result_id) REFERENCES backtest_results(id)
+);
+CREATE INDEX IF NOT EXISTS idx_bt_trades_result ON backtest_trades(result_id);
+CREATE INDEX IF NOT EXISTS idx_bt_trades_code ON backtest_trades(code);
         """)
 
         # ── 2. 迁移：为旧版 daily_price 补充策略评分列 ────────────
