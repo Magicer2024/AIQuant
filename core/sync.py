@@ -22,6 +22,55 @@ from core.db import (
 )
 from qlib_engine.data_bridge import append_daily_data, batch_append_daily, append_calendar_dates
 from qlib_engine import init_qlib as _init_qlib
+
+
+def _write_daily_price(code: str, df: pd.DataFrame) -> int:
+    """写入 daily_price 表（与 Qlib 二进制并行写入，供仪表板/打分读取）"""
+    if df.empty:
+        return 0
+
+    # Guard: detect obviously wrong data (e.g. index prices stored as stock)
+    first_close = float(df.iloc[0].get("close", 0) or 0)
+    if first_close > 3000:
+        first_dt = df.index[0]
+        dt_str = str(first_dt.date()) if hasattr(first_dt, "date") else str(first_dt)[:10]
+        with get_conn() as conn:
+            prev = conn.execute(
+                "SELECT close FROM daily_price WHERE code=? AND trade_date < ? ORDER BY trade_date DESC LIMIT 1",
+                (code, dt_str)
+            ).fetchone()
+        if prev and prev["close"] and prev["close"] > 0:
+            ratio = first_close / prev["close"]
+            if ratio > 5:
+                print(f"  [WARN] {code} close={first_close:.1f} is {ratio:.0f}x prev close={prev['close']:.2f}, likely bad data — skipped")
+                return 0
+
+    records = []
+    for dt, row in df.iterrows():
+        records.append({
+            "code":       code,
+            "trade_date": str(dt.date()) if hasattr(dt, "date") else str(dt)[:10],
+            "open":       float(row.get("open", 0) or 0),
+            "high":       float(row.get("high", 0) or 0),
+            "low":        float(row.get("low", 0) or 0),
+            "close":      float(row.get("close", 0) or 0),
+            "volume":     float(row.get("volume", 0) or 0),
+            "amount":     float(row.get("amount", 0) or 0),
+            "pct_change": float(row.get("pct_change", 0) or 0),
+            "turnover":   float(row.get("turnover", 0) or 0),
+        })
+    with get_conn() as conn:
+        conn.executemany("""
+            INSERT INTO daily_price
+              (code,trade_date,open,high,low,close,volume,amount,pct_change,turnover)
+            VALUES
+              (:code,:trade_date,:open,:high,:low,:close,:volume,:amount,:pct_change,:turnover)
+            ON CONFLICT(code, trade_date) DO UPDATE SET
+              open=excluded.open, high=excluded.high, low=excluded.low,
+              close=excluded.close, volume=excluded.volume, amount=excluded.amount,
+              pct_change=excluded.pct_change, turnover=excluded.turnover
+        """, records)
+    return len(records)
 from strategy.strategies import (
     strategy_volume_breakout, strategy_ma_convergence,
     strategy_price_volume_divergence, strategy_bottom_fishing,
@@ -313,7 +362,8 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
                 df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
-                n = append_daily_data(code, df_qlib)
+                append_daily_data(code, df_qlib)
+                n = _write_daily_price(code, df)
                 if verbose:
                     print(f"  [{code}] baostock OK (+{n} 行)")
                 return True
@@ -351,6 +401,15 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
             if verbose:
                 print(f"  [{code}] akshare 也失败: {str(e)[:60]}")
 
+        # 第三数据源：腾讯财经
+        try:
+            ok = _sync_one_stock_tencent(code, start_date, end_date, verbose)
+            if ok:
+                return True
+        except Exception as e:
+            if verbose:
+                print(f"  [{code}] 腾讯财经 也失败: {str(e)[:60]}")
+
     return False
 
 
@@ -370,9 +429,53 @@ def _sync_one_stock_akshare(code: str, start_date: str, end_date: str, verbose: 
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
         df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
-        n = append_daily_data(code, df_qlib)
+        append_daily_data(code, df_qlib)
+        n = _write_daily_price(code, df)
         if verbose:
             print(f"  [{code}] akshare OK (+{n} 行)")
+        return True
+    return False
+
+
+def _format_code_for_tencent(code: str) -> str:
+    """转换股票代码为腾讯格式 (sh600000 / sz000001)"""
+    code = code.replace('.SH', '').replace('.SZ', '').replace('sh.', '').replace('sz.', '').strip()
+    if code.startswith(('600', '601', '603', '605', '688', '689')):
+        return f"sh{code}"
+    else:
+        return f"sz{code}"
+
+
+def _sync_one_stock_tencent(code: str, start_date: str, end_date: str, verbose: bool = False) -> bool:
+    """腾讯财经备用数据源（akshare stock_zh_a_hist_tx）"""
+    import akshare as ak
+    tx_code = _format_code_for_tencent(code)
+    df = ak.stock_zh_a_hist_tx(
+        symbol=tx_code,
+        start_date=start_date, end_date=end_date, adjust="qfq"
+    )
+    if df is not None and not df.empty:
+        # 腾讯源列名: date, open, close, high, low, amount
+        # 补充缺失列
+        if 'volume' not in df.columns:
+            df['volume'] = 0.0
+        if 'turnover' not in df.columns:
+            df['turnover'] = 0.0
+        if 'pct_change' not in df.columns:
+            # 用 close 和 open 估算涨跌幅
+            df['pct_change'] = ((df['close'] - df['open']) / df['open'].replace(0, float('nan')) * 100).fillna(0)
+        df.rename(columns={
+            "date": "date", "open": "open", "close": "close",
+            "high": "high", "low": "low", "volume": "volume",
+            "amount": "amount", "pct_change": "pct_change", "turnover": "turnover"
+        }, inplace=True)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+        append_daily_data(code, df_qlib)
+        n = _write_daily_price(code, df)
+        if verbose:
+            print(f"  [{code}] 腾讯财经 OK (+{n} 行)")
         return True
     return False
 
@@ -587,10 +690,10 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
             end_date -= timedelta(days=1)
         end_date = end_date.strftime("%Y-%m-%d")
 
-        if start_date > end_date:
-            if verbose:
-                print(f">>> 数据已是最新（{latest}），无需同步")
-            return {"total": 0, "success": 0, "failed": 0}
+        # Always re-sync at least the last 5 calendar days to catch bad data
+        min_start = (today - timedelta(days=5)).strftime("%Y-%m-%d")
+        if start_date > min_start:
+            start_date = min_start
 
     # 加载已同步的缓存
     synced_codes = _load_sync_cache(start_date, end_date)
@@ -611,23 +714,38 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         else:
             print(f"\n>>> 增量同步 [{start_date} ~ {end_date}]（共 {len(stocks)} 只，单线程）")
 
-    # 单线程同步，只登录一次
+    # 单线程同步，只登录一次 baostock
     lg = bs.login()
-    if lg.error_code != '0':
-        print(f"[ERROR] baostock 登录失败: {lg.error_msg}")
-        return {"total": len(stocks_to_sync), "success": 0, "failed": len(stocks_to_sync)}
-    
+    bs_available = (lg.error_code == '0')
+    if not bs_available:
+        if verbose:
+            print(f"[WARN] baostock 登录失败: {lg.error_msg}，将使用备用数据源")
+
     start_time = time.time()
     success_n = len(synced_codes)  # 已同步的也算成功
     failed_n = 0
     skipped_n = 0
     processed_n = len(synced_codes)  # 从已同步数量开始
     total_n = len(stocks)
-    
+
+    def _fallback_sync(code: str, start_date: str, end_date: str) -> bool:
+        """尝试 akshare → 腾讯财经 两级备用数据源"""
+        try:
+            if _sync_one_stock_akshare(code, start_date, end_date, verbose=False):
+                return True
+        except Exception:
+            pass
+        try:
+            if _sync_one_stock_tencent(code, start_date, end_date, verbose=False):
+                return True
+        except Exception:
+            pass
+        return False
+
     try:
         for idx, (code, name) in enumerate(stocks_to_sync):
             processed_n += 1
-            
+
             # 打印进度
             if verbose and processed_n % 10 == 0:
                 elapsed = time.time() - start_time
@@ -638,77 +756,80 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
                       f"成功:{success_n:4d} 失败:{failed_n:3d} 跳过:{skipped_n:3d} | "
                       f"速度:{speed:.1f}只/s | 预计剩余:{eta_str}",
                       end="", flush=True)
-            
+
             # 调用进度回调
             if progress_callback:
                 progress_callback(processed_n, total_n, f"{code} {name[:8]}")
-            
-            try:
-                # 转换代码格式为 baostock 格式
-                bs_code = _format_code_for_baostock(code)
-                
-                # 跳过北交所
-                if bs_code.startswith('bj.'):
-                    skipped_n += 1
-                    continue
-                
-                # 直接查询 baostock
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg",
-                    start_date=start_date,
-                    end_date=end_date,
-                    frequency="d",
-                    adjustflag="2"
-                )
-                
-                if rs.error_code != '0':
-                    failed_n += 1
-                    if verbose and processed_n % 100 == 0:
-                        print(f"\n  [{code}] 查询失败: {rs.error_msg}")
-                    continue
-                
-                # 解析数据
-                data_list = []
-                while (rs.error_code == '0') & rs.next():
-                    row = rs.get_row_data()
-                    if row[0]:  # date
-                        try:
-                            data_list.append({
-                                'date': pd.to_datetime(row[0]),
-                                'open': float(row[2]) if row[2] else None,
-                                'high': float(row[3]) if row[3] else None,
-                                'low': float(row[4]) if row[4] else None,
-                                'close': float(row[5]) if row[5] else None,
-                                'volume': float(row[7]) if row[7] else 0,
-                                'amount': float(row[8]) if row[8] else 0,
-                                'turnover': float(row[9]) if row[9] else 0,
-                                'pct_change': float(row[10]) if row[10] else 0
-                            })
-                        except (ValueError, TypeError):
-                            continue
-                
-                if data_list:
-                    df = pd.DataFrame(data_list)
-                    df.set_index('date', inplace=True)
-                    df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
-                    n = append_daily_data(code, df_qlib)
-                    success_n += 1
-                    synced_codes.add(code)
-                    
-                    # 实时保存缓存（每10只保存一次）
-                    if len(synced_codes) % 10 == 0:
-                        _save_sync_cache(start_date, end_date, synced_codes)
-                else:
-                    failed_n += 1
-                    
-            except Exception as e:
+
+            # 北交所跳过
+            bs_code = _format_code_for_baostock(code)
+            if bs_code.startswith('bj.'):
+                skipped_n += 1
+                continue
+
+            synced_ok = False
+
+            # 主数据源：baostock
+            if bs_available:
+                try:
+                    rs = bs.query_history_k_data_plus(
+                        bs_code,
+                        "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg",
+                        start_date=start_date,
+                        end_date=end_date,
+                        frequency="d",
+                        adjustflag="2"
+                    )
+
+                    if rs is not None and rs.error_code == '0':
+                        data_list = []
+                        while rs.next():
+                            row = rs.get_row_data()
+                            if row[0]:
+                                try:
+                                    data_list.append({
+                                        'date': pd.to_datetime(row[0]),
+                                        'open': float(row[2]) if row[2] else None,
+                                        'high': float(row[3]) if row[3] else None,
+                                        'low': float(row[4]) if row[4] else None,
+                                        'close': float(row[5]) if row[5] else None,
+                                        'volume': float(row[7]) if row[7] else 0,
+                                        'amount': float(row[8]) if row[8] else 0,
+                                        'turnover': float(row[9]) if row[9] else 0,
+                                        'pct_change': float(row[10]) if row[10] else 0
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+                        if data_list:
+                            df = pd.DataFrame(data_list)
+                            df.set_index('date', inplace=True)
+                            df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
+                            append_daily_data(code, df_qlib)
+                            _write_daily_price(code, df)
+                            synced_ok = True
+                except Exception:
+                    pass
+
+            # baostock 失败或不可用 → 备用数据源
+            if not synced_ok:
+                synced_ok = _fallback_sync(code, start_date, end_date)
+
+            if synced_ok:
+                success_n += 1
+                synced_codes.add(code)
+                if len(synced_codes) % 10 == 0:
+                    _save_sync_cache(start_date, end_date, synced_codes)
+            else:
                 failed_n += 1
-                if verbose and processed_n % 100 == 0:
-                    print(f"\n  [{code}] 异常: {str(e)[:60]}")
+                if verbose and failed_n % 100 == 0:
+                    print(f"\n  [{code}] 所有数据源均失败")
     finally:
         # 确保登出
-        bs.logout()
+        if bs_available:
+            try:
+                bs.logout()
+            except Exception:
+                pass
 
     # 同步完成后清除缓存（全部完成才清除，部分完成保留用于断点续传）
     if len(synced_codes) >= len(stocks):
@@ -724,7 +845,8 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
     # 同步主要指数（供大盘择时用）—— 始终同步到 end_date，不受股票覆盖率影响
     if verbose:
         print(f"\n>>> 同步主要指数...")
-    index_results = sync_all_indices(start_date=end_date, end_date=end_date, verbose=verbose)
+    end_date_nohyphen = end_date.replace("-", "")
+    index_results = sync_all_indices(start_date=end_date_nohyphen, end_date=end_date_nohyphen, verbose=verbose)
     if verbose:
         total_idx = sum(index_results.values())
         print(f">>> 指数同步完成，共写入 {total_idx} 行")
