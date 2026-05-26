@@ -7,14 +7,10 @@ qlib_engine/strategy_adapter.py —— 规则 → Qlib 回测适配层
   3. 返回 AIQuant 兼容的绩效 dict
 """
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional
 from dataclasses import dataclass
-
-import logging, os, io, sys
-from qlib_engine import init_qlib
-from qlib.log import set_global_logger_level
 
 
 @dataclass
@@ -71,14 +67,12 @@ def backtest_single_rule(
     """
     Backtest a single rule's signals and return performance metrics.
 
+    Computes metrics directly from signals (no longer depends on Qlib —
+    Qlib cn_data ends at 2020, incompatible with 2024+ dates).
+
     Returns dict with annual_return, sharpe_ratio, max_drawdown, win_rate, total_trades, etc.
     """
-    init_qlib()
-    set_global_logger_level(logging.ERROR)
-
-    pred_df = _signals_to_prediction_df(signals, [], [])
-
-    if pred_df.empty:
+    if not signals:
         return {
             "rule_name": rule_name,
             "annual_return": 0, "sharpe_ratio": 0, "max_drawdown": 0,
@@ -86,79 +80,90 @@ def backtest_single_rule(
             "error": "No signals",
         }
 
-    # Build Qlib backtest config
-    bt_config = {
-        "strategy": {
-            "class": "TopkDropoutStrategy",
-            "module_path": "qlib.contrib.strategy",
-            "kwargs": {
-                "signal": pred_df,
-                "topk": config.topk,
-                "n_drop": config.n_drop,
-            },
-        },
-        "executor": {
-            "class": "SimulatorExecutor",
-            "module_path": "qlib.backtest.executor",
-            "kwargs": {
-                "time_per_step": "day",
-                "generate_portfolio_metrics": True,
-            },
-        },
-        "backtest": {
-            "start_time": config.start_time,
-            "end_time": config.end_time,
-            "account": config.account,
-            "benchmark": config.benchmark,
-            "exchange_kwargs": {
-                "limit_threshold": config.limit_threshold,
-                "deal_price": config.deal_price,
-                "open_cost": config.open_cost,
-                "close_cost": config.close_cost,
-                "min_cost": config.min_cost,
-            },
-        },
-    }
+    # build trades from signals
+    by_code: Dict[str, List[dict]] = {}
+    for s in signals:
+        code = s["code"]
+        if code not in by_code:
+            by_code[code] = []
+        by_code[code].append(s)
 
-    try:
-        from qlib.utils import init_instance_by_config
+    from core.db import get_conn
 
-        # Suppress gym deprecation notice during qlib contrib imports
-        _stderr = sys.stderr
-        sys.stderr = io.StringIO()
-        try:
-            strategy = init_instance_by_config(bt_config["strategy"])
-            executor = init_instance_by_config(bt_config["executor"])
-        finally:
-            sys.stderr = _stderr
+    trade_returns = []
+    with get_conn() as conn:
+        for code, sigs in by_code.items():
+            sigs.sort(key=lambda s: s["trade_date"])
+            entry_date = sigs[0]["trade_date"]
+            exit_date = sigs[-1]["trade_date"]
+            # single signal → hold until end of backtest period
+            if exit_date == entry_date:
+                exit_date = config.end_time
 
-        portfolio_metrics, indicator = executor.backtest(
-            strategy=strategy,
-            **bt_config["backtest"],
-        )
+            entry_price = 0.0
+            exit_price = 0.0
+            price_row = conn.execute(
+                "SELECT close FROM daily_price WHERE code = ? AND trade_date = ?",
+                (code, entry_date),
+            ).fetchone()
+            if price_row:
+                entry_price = float(price_row["close"])
 
-        report = indicator.get_latest_report() if hasattr(indicator, "get_latest_report") else {}
+            price_row = conn.execute(
+                "SELECT close FROM daily_price WHERE code = ? AND trade_date <= ? ORDER BY trade_date DESC LIMIT 1",
+                (code, exit_date),
+            ).fetchone()
+            if price_row:
+                exit_price = float(price_row["close"])
 
+            if entry_price > 0 and exit_price > 0:
+                pnl = (exit_price / entry_price - 1) * 100
+                trade_returns.append(pnl)
+
+    if not trade_returns:
         return {
             "rule_name": rule_name,
-            "annual_return": round(float(report.get("excess_return_with_cost.annualized_return", 0) or 0) * 100, 2),
-            "sharpe_ratio": round(float(report.get("excess_return_with_cost.information_ratio", 0) or 0), 2),
-            "max_drawdown": round(float(report.get("excess_return_with_cost.max_drawdown", 0) or 0) * 100, 2),
-            "win_rate": round(float(report.get("excess_return_without_cost.win_rate", 0) or 0) * 100, 2),
-            "total_trades": int(report.get("total_trades", 0) or 0),
-            "calmar_ratio": round(
-                float(report.get("excess_return_with_cost.annualized_return", 0) or 0)
-                / max(abs(float(report.get("excess_return_with_cost.max_drawdown", 0) or 0)), 1e-9),
-                2,
-            ),
-        }
-    except Exception as e:
-        return {
-            "rule_name": rule_name,
-            "error": str(e),
             "annual_return": 0, "sharpe_ratio": 0, "max_drawdown": 0,
             "win_rate": 0, "total_trades": 0, "total_return": 0,
         }
+
+    r_arr = np.array(trade_returns) / 100.0
+
+    total_trades = len(trade_returns)
+    win_trades = int((r_arr > 0).sum())
+    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+
+    cum_return = float(np.prod(1 + r_arr) - 1) * 100
+
+    try:
+        from datetime import datetime as dt
+        start_dt = dt.strptime(config.start_time, "%Y-%m-%d")
+        end_dt = dt.strptime(config.end_time, "%Y-%m-%d")
+        years = max((end_dt - start_dt).days / 365.25, 0.1)
+        ann_return = float(((1 + cum_return / 100) ** (1 / years) - 1) * 100)
+    except Exception:
+        ann_return = cum_return
+
+    mean_r = float(np.mean(r_arr))
+    std_r = float(np.std(r_arr, ddof=1))
+    sharpe = float(mean_r / std_r * np.sqrt(total_trades / years)) if std_r > 0 and years > 0 else 0
+
+    cumulative = np.cumprod(1 + r_arr)
+    running_max = np.maximum.accumulate(cumulative)
+    drawdowns = (cumulative / running_max - 1) * 100
+    max_dd = float(np.min(drawdowns))
+
+    calmar = round(ann_return / max(abs(max_dd), 1e-9), 2)
+
+    return {
+        "rule_name": rule_name,
+        "annual_return": round(ann_return, 2),
+        "sharpe_ratio": round(sharpe, 2),
+        "max_drawdown": round(max_dd, 2),
+        "win_rate": round(win_rate, 2),
+        "total_trades": total_trades,
+        "calmar_ratio": calmar,
+    }
 
 
 def backtest_rules(
