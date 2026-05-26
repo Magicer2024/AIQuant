@@ -93,9 +93,24 @@ def _generate_signals_for_rule(
         return []
 
     signals = []
+    # Normalize to list format: [{factor, operator, threshold}]
+    if isinstance(conditions, list):
+        cond_list = conditions
+    else:
+        cond_list = []
+        for fname, op_dict in conditions.items():
+            for op, threshold in op_dict.items():
+                cond_list.append({"factor": fname, "operator": op, "threshold": threshold})
+
     for code in factor_matrix.index:
         match = True
-        for fname, op_dict in conditions.items():
+        for item in cond_list:
+            fname = item.get("factor") or item.get("fname")
+            op = item.get("operator") or item.get("op")
+            threshold = item.get("threshold") or item.get("thresh")
+            if fname is None or op is None or threshold is None:
+                match = False
+                break
             if fname not in factor_matrix.columns:
                 match = False
                 break
@@ -103,13 +118,10 @@ def _generate_signals_for_rule(
             if pd.isna(val):
                 match = False
                 break
-            for op, threshold in op_dict.items():
-                if op == ">" and not (val > threshold):
-                    match = False
-                if op == "<" and not (val < threshold):
-                    match = False
-                if not match:
-                    break
+            if op == ">" and not (val > threshold):
+                match = False
+            if op == "<" and not (val < threshold):
+                match = False
             if not match:
                 break
 
@@ -234,17 +246,17 @@ def _load_stock_data_for_mining(trade_date: str, sample_size: int) -> Dict[str, 
             LIMIT ?
         """, (trade_date, sample_size)).fetchall()
 
-    data = {}
-    for (code,) in codes:
-        rows = conn.execute("""
-            SELECT trade_date, open, high, low, close, volume, amount, turnover
-            FROM daily_price WHERE code = ? AND trade_date <= ?
-            ORDER BY trade_date
-        """, (code, trade_date)).fetchall()
-        if len(rows) < 60:
-            continue
-        df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
-        data[code] = df
+        data = {}
+        for (code,) in codes:
+            rows = conn.execute("""
+                SELECT trade_date, open, high, low, close, volume, amount, turnover
+                FROM daily_price WHERE code = ? AND trade_date <= ?
+                ORDER BY trade_date
+            """, (code, trade_date)).fetchall()
+            if len(rows) < 60:
+                continue
+            df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+            data[code] = df
     return data
 
 

@@ -80,9 +80,17 @@ def get_trades(result_id: int) -> List[dict]:
     """获取回测的逐笔交易明细"""
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT * FROM backtest_trades WHERE result_id = ? ORDER BY entry_date
+            SELECT * FROM backtest_trades WHERE result_id = ? ORDER BY entry_date DESC
         """, (result_id,)).fetchall()
         return [dict(r) for r in rows]
+
+
+def delete_result(result_id: int) -> bool:
+    """删除回测结果及其逐笔交易"""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM backtest_trades WHERE result_id = ?", (result_id,))
+        conn.execute("DELETE FROM backtest_results WHERE id = ?", (result_id,))
+        return True
 
 
 def get_rule_trades(rule_id: str) -> List[dict]:
@@ -92,6 +100,6 @@ def get_rule_trades(rule_id: str) -> List[dict]:
             SELECT bt.* FROM backtest_trades bt
             INNER JOIN backtest_results br ON bt.result_id = br.id
             WHERE br.rule_id = ?
-            ORDER BY bt.entry_date
+            ORDER BY bt.entry_date DESC
         """, (rule_id,)).fetchall()
         return [dict(r) for r in rows]
