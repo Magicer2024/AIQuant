@@ -59,7 +59,17 @@ def server_error(e):
 
 if __name__ == "__main__":
     from core.db import init_db
+    from scheduler.runner import start_scheduler
+    from scheduler.state import SCHEDULER_RUNNING
+
     init_db()
+
+    # Auto-start daily sync scheduler (runs at 07:00 every trading day)
+    if not SCHEDULER_RUNNING["enabled"]:
+        SCHEDULER_RUNNING["enabled"] = True
+        start_scheduler()
+        print("[Scheduler] 每日 07:00 自动数据同步已启动")
+
     print("AIQuant 个人股票评分系统启动...")
     print("访问 http://localhost:5000/ 打开仪表盘")
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
