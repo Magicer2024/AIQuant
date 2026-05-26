@@ -3,77 +3,468 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AIQuant · 个人股票评分系统</title>
+    <title>AIQuant · 量化终端</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg-root: #070b14;
+            --bg-panel: #0c1124;
+            --bg-panel-hover: #111832;
+            --bg-input: #0a0f1e;
+            --border: #182240;
+            --border-glow: #1a3050;
+            --text-primary: #f0f4ff;
+            --text-secondary: #8b9cc0;
+            --text-muted: #4d5e82;
+            --accent: #00d4f0;
+            --accent-dim: #0098b0;
+            --positive: #ff5252;
+            --positive-dim: #cc2020;
+            --negative: #00e676;
+            --warning: #ffab40;
+            --danger: #ff1744;
+            --radius: 2px;
+            --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+            --font-sans: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #0f1117; color: #e1e1e1; }
-        .header { background: #1a1d2e; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2a2d3e; }
-        .header h1 { font-size: 18px; font-weight: 600; color: #4fc3f7; }
-        .tabs { display: flex; gap: 4px; padding: 8px 24px; background: #1a1d2e; border-bottom: 1px solid #2a2d3e; }
-        .tab { padding: 8px 20px; border: none; background: transparent; color: #888; cursor: pointer; border-radius: 6px; font-size: 14px; transition: all .2s; }
-        .tab:hover { color: #e1e1e1; background: #2a2d3e; }
-        .tab.active { color: #4fc3f7; background: #1e2940; }
-        .content { padding: 16px 24px; max-width: 1400px; margin: 0 auto; }
-        .panel { background: #1a1d2e; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg-root);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ── Background layers ── */
+        body::before {
+            content: '';
+            position: fixed; inset: 0;
+            background:
+                radial-gradient(ellipse 1200px 800px at 50% -20%, rgba(0,212,240,0.04) 0%, transparent 70%),
+                radial-gradient(ellipse 800px 600px at 80% 80%, rgba(0,212,240,0.03) 0%, transparent 70%);
+            pointer-events: none; z-index: 0;
+        }
+        body::after {
+            content: '';
+            position: fixed; inset: 0;
+            background-image:
+                radial-gradient(circle, rgba(0,212,240,0.06) 1px, transparent 1px);
+            background-size: 32px 32px;
+            pointer-events: none; z-index: 0;
+            mask-image: linear-gradient(to bottom, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.6) 50%, rgba(0,0,0,0.3) 100%);
+        }
+
+        /* ── Scanline overlay ── */
+        .scanline {
+            position: fixed; inset: 0;
+            background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+            pointer-events: none; z-index: 9999; opacity: 0.5;
+        }
+
+        /* ── Header ── */
+        .header {
+            position: relative; z-index: 1;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 16px 32px;
+            background: rgba(12,17,36,0.85);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border);
+        }
+        .header-brand {
+            display: flex; align-items: center; gap: 14px;
+        }
+        .header-logo {
+            width: 10px; height: 10px;
+            background: var(--accent);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent), 0 0 20px rgba(0,212,240,0.4);
+            animation: logo-pulse 3s ease-in-out infinite;
+        }
+        @keyframes logo-pulse {
+            0%, 100% { box-shadow: 0 0 8px var(--accent), 0 0 20px rgba(0,212,240,0.4); }
+            50% { box-shadow: 0 0 12px var(--accent), 0 0 30px rgba(0,212,240,0.7); }
+        }
+        .header h1 {
+            font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+            letter-spacing: 0.1em; color: var(--text-primary);
+            text-transform: uppercase;
+        }
+        .header h1 span { color: var(--accent); }
+        .header-status {
+            display: flex; align-items: center; gap: 10px;
+            font-family: var(--font-mono); font-size: 12px; font-weight: 500; color: var(--text-secondary);
+        }
+        .status-dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #00e676;
+            box-shadow: 0 0 6px #00e676;
+        }
+
+        /* ── Navigation ── */
+        .nav-bar {
+            position: relative; z-index: 1;
+            display: flex; gap: 0;
+            padding: 0 32px;
+            background: rgba(12,17,36,0.7);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-item {
+            position: relative;
+            padding: 14px 24px;
+            font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+            letter-spacing: 0.06em; text-transform: uppercase;
+            color: var(--text-secondary);
+            cursor: pointer; transition: color 0.25s;
+            background: none; border: none;
+        }
+        .nav-item:hover { color: var(--text-primary); }
+        .nav-item.active { color: var(--accent); }
+        .nav-item.active::after {
+            content: '';
+            position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+            width: 24px; height: 2px;
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent), 0 0 16px rgba(0,212,240,0.5);
+        }
+        .nav-item .nav-badge {
+            display: inline-block; margin-left: 6px; padding: 0 6px;
+            font-size: 10px; line-height: 18px;
+            background: rgba(0,212,240,0.12); border-radius: 9px;
+            color: var(--accent); vertical-align: middle;
+        }
+
+        /* ── Main content ── */
+        .content {
+            position: relative; z-index: 1;
+            padding: 24px 32px; max-width: 1500px; margin: 0 auto;
+        }
+
+        /* ── Panel ── */
+        .panel {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 20px 24px;
+            margin-bottom: 20px;
+            position: relative;
+            transition: border-color 0.3s;
+        }
+        .panel::before {
+            content: '';
+            position: absolute; top: -1px; left: 20px; right: 20px;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(0,212,240,0.25), transparent);
+            opacity: 0; transition: opacity 0.4s;
+        }
+        .panel:hover::before { opacity: 1; }
+        .panel-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 16px; padding-bottom: 12px;
+            border-bottom: 1px solid rgba(24,34,64,0.6);
+        }
+        .panel-header h3 {
+            font-family: var(--font-sans); font-size: 14px; font-weight: 700;
+            letter-spacing: 0.05em; color: var(--text-primary);
+            text-transform: uppercase;
+        }
+
+        /* ── Metrics row ── */
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px; margin-bottom: 16px;
+        }
+        .metric-card {
+            background: rgba(0,212,240,0.03);
+            border: 1px solid rgba(0,212,240,0.08);
+            border-radius: 4px; padding: 14px 16px;
+            text-align: center;
+            transition: background 0.25s, border-color 0.25s;
+        }
+        .metric-card:hover {
+            background: rgba(0,212,240,0.08);
+            border-color: rgba(0,212,240,0.35);
+            box-shadow: 0 0 20px rgba(0,212,240,0.08);
+        }
+        .metric-card .val {
+            font-family: var(--font-mono); font-size: 32px; font-weight: 800;
+            color: #00e0ff; letter-spacing: -0.02em;
+            text-shadow: 0 0 20px rgba(0,224,255,0.3);
+        }
+        .metric-card .val.positive { color: var(--positive); }
+        .metric-card .val.negative { color: var(--negative); }
+        .metric-card .lbl {
+            font-size: 12px; color: var(--text-secondary);
+            margin-top: 4px; letter-spacing: 0.04em; font-weight: 500;
+        }
+
+        /* ── Input row ── */
+        .input-row {
+            display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap;
+        }
+        .input-row span {
+            font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono);
+            letter-spacing: 0.04em;
+        }
+        input, select {
+            padding: 7px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-family: var(--font-mono); font-size: 12px;
+            outline: none;
+            transition: border-color 0.25s, box-shadow 0.25s;
+        }
+        input:focus, select:focus {
+            border-color: var(--accent-dim);
+            box-shadow: 0 0 0 3px rgba(0,212,240,0.08);
+        }
+
+        /* ── Buttons ── */
+        .btn {
+            padding: 7px 18px; border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer; font-family: var(--font-mono); font-size: 11px;
+            font-weight: 500; letter-spacing: 0.04em;
+            transition: all 0.2s;
+            background: transparent; color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+        .btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
+        .btn-primary {
+            background: rgba(0,212,240,0.08);
+            border-color: rgba(0,212,240,0.3);
+            color: var(--accent);
+        }
+        .btn-primary:hover {
+            background: rgba(0,212,240,0.16);
+            border-color: var(--accent);
+            box-shadow: 0 0 16px rgba(0,212,240,0.15);
+        }
+        .btn-danger {
+            background: transparent; border-color: rgba(255,23,68,0.25);
+            color: var(--danger);
+        }
+        .btn-danger:hover {
+            background: rgba(255,23,68,0.1);
+            border-color: var(--danger);
+            box-shadow: 0 0 12px rgba(255,23,68,0.15);
+        }
+        .btn-sm { padding: 4px 12px; font-size: 10px; }
+
+        /* ── Table ── */
+        .table-wrapper {
+            max-height: 62vh; overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+        .table-wrapper::-webkit-scrollbar { width: 4px; }
+        .table-wrapper::-webkit-scrollbar-track { background: transparent; }
+        .table-wrapper::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
         table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #2a2d3e; font-size: 13px; }
-        th { color: #888; font-weight: 500; background: #141720; position: sticky; top: 0; }
-        tr:hover { background: #1e2940; }
-        .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all .2s; }
-        .btn-primary { background: #4fc3f7; color: #0f1117; }
-        .btn-primary:hover { background: #3ab0e0; }
-        .btn-danger { background: #f44336; color: #fff; }
-        .toggle { width: 40px; height: 22px; background: #555; border-radius: 11px; cursor: pointer; position: relative; display: inline-block; }
-        .toggle.on { background: #4caf50; }
-        .toggle::after { content: ''; width: 18px; height: 18px; background: #fff; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: .2s; }
-        .toggle.on::after { left: 20px; }
-        .score-high { color: #ff5252; font-weight: 600; }
-        .score-mid { color: #ffab40; }
-        .score-low { color: #69f0ae; }
-        .positive { color: #ff5252; }
-        .negative { color: #69f0ae; }
-        .metrics { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 12px; }
-        .metric { text-align: center; }
-        .metric .val { font-size: 24px; font-weight: 700; color: #4fc3f7; }
-        .metric .lbl { font-size: 11px; color: #888; margin-top: 2px; }
-        .input-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-        input, select { padding: 6px 10px; border: 1px solid #2a2d3e; border-radius: 4px; background: #0f1117; color: #e1e1e1; font-size: 13px; }
-        .kline-overlay { position: fixed; top: 0; right: 0; width: 620px; height: 100vh; background: #1a1d2e; border-left: 1px solid #2a2d3e; z-index: 1000; transform: translateX(100%); transition: transform .3s; overflow-y: auto; }
-        .kline-overlay.open { transform: translateX(0); }
-        .kline-overlay .close-btn { position: absolute; top: 12px; right: 12px; background: none; border: none; color: #888; font-size: 20px; cursor: pointer; z-index: 10; }
-        .kline-overlay .chart { width: 100%; height: 420px; }
-        .kline-overlay .trade-info { padding: 16px; }
-        .hidden { display: none; }
-        .code-link { color: #4fc3f7; cursor: pointer; text-decoration: underline; }
-        .status-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
-        .status-running { background: #ff9800; color: #000; }
-        .status-done { background: #4caf50; color: #000; }
-        .status-error { background: #f44336; color: #fff; }
-        .table-wrapper { max-height: 65vh; overflow-y: auto; }
+        th {
+            padding: 11px 14px; text-align: left;
+            font-family: var(--font-sans); font-size: 12px; font-weight: 600;
+            letter-spacing: 0.04em; color: #c0cde0;
+            text-transform: uppercase;
+            background: rgba(7,11,20,0.8);
+            border-bottom: 2px solid var(--border);
+            position: sticky; top: 0; z-index: 2;
+        }
+        td {
+            padding: 10px 14px;
+            font-family: var(--font-mono); font-size: 13px;
+            border-bottom: 1px solid rgba(24,34,64,0.4);
+            color: var(--text-primary);
+        }
+        tr { transition: background 0.15s; }
+        tr:hover td {
+            background: rgba(0,212,240,0.05);
+            color: #fff;
+        }
+
+        /* ── Score colors ── */
+        .score-high { color: #00e0ff !important; font-weight: 800; font-size: 14px; text-shadow: 0 0 12px rgba(0,224,255,0.2); }
+        .score-mid { color: var(--warning) !important; font-weight: 600; }
+        .score-low { color: #00ff80 !important; font-weight: 600; }
+        .positive { color: #ff5c5c !important; font-weight: 600; }
+        .negative { color: #00ff80 !important; font-weight: 600; }
+
+        /* ── Toggle ── */
+        .toggle {
+            width: 38px; height: 20px; border-radius: 10px;
+            cursor: pointer; position: relative; display: inline-block;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid var(--border);
+            transition: all 0.25s;
+        }
+        .toggle.on {
+            background: rgba(0,212,240,0.2);
+            border-color: var(--accent);
+            box-shadow: 0 0 8px rgba(0,212,240,0.2);
+        }
+        .toggle::after {
+            content: '';
+            width: 14px; height: 14px; border-radius: 50%;
+            background: var(--text-muted);
+            position: absolute; top: 2px; left: 2px;
+            transition: all 0.25s;
+        }
+        .toggle.on::after {
+            left: 20px;
+            background: var(--accent);
+            box-shadow: 0 0 6px var(--accent);
+        }
+
+        /* ── Status badges ── */
+        .badge {
+            display: inline-flex; align-items: center; gap: 5px;
+            font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em;
+            padding: 3px 10px; border-radius: 10px;
+        }
+        .badge-running {
+            color: var(--warning); background: rgba(255,171,64,0.1);
+            border: 1px solid rgba(255,171,64,0.2);
+        }
+        .badge-running::before {
+            content: '';
+            width: 6px; height: 6px; border-radius: 50%;
+            background: var(--warning);
+            animation: blink 1s ease-in-out infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.2; }
+        }
+        .badge-done {
+            color: #00e676; background: rgba(0,230,118,0.1);
+            border: 1px solid rgba(0,230,118,0.2);
+        }
+        .badge-error {
+            color: var(--danger); background: rgba(255,23,68,0.1);
+            border: 1px solid rgba(255,23,68,0.2);
+        }
+        .badge-info {
+            color: var(--accent); background: rgba(0,212,240,0.08);
+            border: 1px solid rgba(0,212,240,0.15);
+        }
+
+        /* ── Code link ── */
+        .code-link {
+            color: var(--accent); cursor: pointer;
+            text-decoration: none;
+            transition: color 0.2s, text-shadow 0.2s;
+        }
+        .code-link:hover {
+            color: #fff;
+            text-shadow: 0 0 8px rgba(0,212,240,0.5);
+        }
+
+        /* ── K-line overlay ── */
+        .kline-overlay {
+            position: fixed; inset: 0;
+            background: rgba(4,6,14,0.88);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            display: flex; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.3s;
+        }
+        .kline-overlay.open { opacity: 1; pointer-events: auto; }
+        .kline-popup {
+            width: 960px; max-width: 95vw; max-height: 92vh;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 6px; overflow-y: auto;
+            position: relative;
+            box-shadow: 0 0 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,212,240,0.1) inset;
+        }
+        .kline-overlay .close-btn {
+            position: absolute; top: 14px; right: 18px;
+            background: none; border: none;
+            color: var(--text-secondary); font-size: 20px; cursor: pointer;
+            z-index: 10; transition: color 0.2s;
+        }
+        .kline-overlay .close-btn:hover { color: #fff; }
+        .kline-overlay .chart { width: 100%; height: 560px; }
+        .kline-overlay .trade-info { padding: 16px 20px; }
+
+        /* ── Utility ── */
+        .hidden { display: none !important; }
+        .text-muted { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+        .text-right { text-align: right; }
+        .gap-s { gap: 8px; }
+        .mt-s { margin-top: 12px; }
+        .mb-s { margin-bottom: 12px; }
+
+        /* ── Rule trades sub-panel ── */
+        .sub-panel {
+            background: rgba(7,11,20,0.6);
+            border: 1px solid rgba(0,212,240,0.1);
+            border-radius: 4px; padding: 16px;
+            margin-top: 12px;
+        }
+
+        /* ── Empty state ── */
+        .empty-state {
+            text-align: center; padding: 40px 20px;
+            color: var(--text-muted);
+            font-family: var(--font-mono); font-size: 12px;
+            letter-spacing: 0.04em;
+        }
+
+        /* ── Tab content animation ── */
+        @keyframes fade-up {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .tab-content { animation: fade-up 0.3s ease-out; }
     </style>
 </head>
 <body>
-<div class="header">
-    <h1>AIQuant · 个人股票评分系统</h1>
-    <span style="color:#888;font-size:12px" id="last-update"></span>
-</div>
-<div class="tabs">
-    <button class="tab active" onclick="switchTab('scores')">每日打分</button>
-    <button class="tab" onclick="switchTab('strategy')">策略管理</button>
-    <button class="tab" onclick="switchTab('backtest')">回测中心</button>
-</div>
-<div class="content" id="content"></div>
-<div class="kline-overlay" id="klinePanel">
-    <button class="close-btn" onclick="closeKline()">✕</button>
-    <div class="chart" id="klineChart"></div>
-    <div class="trade-info" id="klineTradeInfo"></div>
+<div class="scanline"></div>
+
+<header class="header">
+    <div class="header-brand">
+        <div class="header-logo"></div>
+        <h1>AI<span>Quant</span> · 量化终端</h1>
+    </div>
+    <div class="header-status">
+        <div class="status-dot" id="sysStatus"></div>
+        <span id="last-update">就绪</span>
+    </div>
+</header>
+
+<nav class="nav-bar">
+    <button class="nav-item active" onclick="switchTab('scores')">每日打分</button>
+    <button class="nav-item" onclick="switchTab('strategy')">策略管理</button>
+    <button class="nav-item" onclick="switchTab('backtest')">回测中心</button>
+</nav>
+
+<main class="content" id="content"></main>
+
+<div class="kline-overlay" id="klinePanel" onclick="if(event.target===this)closeKline()">
+    <div class="kline-popup">
+        <button class="close-btn" onclick="closeKline()">&#x2715;</button>
+        <div class="chart" id="klineChart"></div>
+        <div class="trade-info" id="klineTradeInfo"></div>
+    </div>
 </div>
 
 <script>
 const API = '/api';
 let currentTab = 'scores';
 let klineChart = null;
+let pendingBacktestRuleId = null;
 
 async function fetchJSON(url, opts) {
     const resp = await fetch(url, opts);
@@ -83,92 +474,293 @@ async function fetchJSON(url, opts) {
 
 function switchTab(tab) {
     currentTab = tab;
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    event.target.classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'));
+    const btn = document.querySelector(`.nav-item[onclick*="${tab}"]`);
+    if (btn) btn.classList.add('active');
     loadTab(tab);
 }
 
 async function loadTab(tab) {
     const c = document.getElementById('content');
-    c.innerHTML = '<div style="text-align:center;padding:40px;color:#888">加载中...</div>';
+    c.innerHTML = '<div class="empty-state">加载中...</div>';
     try {
         if (tab === 'scores') await loadScoresTab(c);
         else if (tab === 'strategy') await loadStrategyTab(c);
         else if (tab === 'backtest') await loadBacktestTab(c);
+        c.firstElementChild?.classList.add('tab-content');
     } catch(e) {
-        c.innerHTML = '<div style="text-align:center;padding:40px;color:#f44336">加载失败: ' + e.message + '</div>';
+        c.innerHTML = '<div class="empty-state" style="color:var(--danger)">加载失败: ' + e.message + '</div>';
     }
 }
 
-// ─── Tab 1: 每日打分 ───
+// ─── Tab 1: Scoring ───
 async function loadScoresTab(container) {
     const resp = await fetchJSON(API + '/scoring/daily');
     const data = resp.data || [];
-    const latestDate = data.length > 0 ? data[0].trade_date : '';
+    const latestDate = data.length > 0 ? data[0].trade_date : (resp.date || '');
+    const hint = data.length === 0
+        ? '<div class="empty-state">暂无打分数据<br><span style="color:var(--text-muted)">点击「同步并刷新」获取最新数据</span></div>'
+        : '';
 
     let html = `<div class="panel">
         <div class="input-row">
-            <span>日期:</span>
+            <span>日期</span>
             <input type="date" id="scoreDate" value="${latestDate}" onchange="refreshScores()">
-            <button class="btn btn-primary" onclick="runScoring()">刷新打分</button>
-            <span style="color:#888;font-size:12px" id="scoreCount">${data.length} 只股票</span>
-        </div>
-        <div class="table-wrapper"><table>
-            <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th></tr></thead>
+            <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
+            <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
+            <span id="syncStatus"></span>
+            <span class="text-muted" style="margin-left:auto" id="scoreCount">${data.length} 只股票</span>
+        </div>`;
+
+    if (data.length > 0) {
+        // Top stats
+        const top3 = data.slice(0, 3), bottom3 = data.slice(-3).reverse();
+        const avgScore = (data.reduce((s, r) => s + r.score, 0) / data.length).toFixed(1);
+        html += `<div class="metrics-row">
+            <div class="metric-card">
+                <div class="val">${data[0].score}</div>
+                <div class="lbl">最高分 · ${data[0].code}</div>
+            </div>
+            <div class="metric-card">
+                <div class="val">${avgScore}</div>
+                <div class="lbl">平均分 · ${data.length} 只</div>
+            </div>
+            <div class="metric-card">
+                <div class="val">${data.filter(r=>r.score>=80).length}</div>
+                <div class="lbl">≥80 分 · 强势</div>
+            </div>
+            <div class="metric-card">
+                <div class="val" style="color:var(--text-muted)">${data[data.length-1].score}</div>
+                <div class="lbl">最低分 · ${data[data.length-1].code}</div>
+            </div>
+        </div>`;
+
+        html += `<div class="table-wrapper"><table>
+            <thead><tr><th>#</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th></tr></thead>
             <tbody>`;
-    data.forEach((r, i) => {
-        const cls = r.score >= 80 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
-        html += `<tr>
-            <td>${i + 1}</td>
-            <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
-            <td>${r.name || ''}</td>
-            <td class="${cls}">${r.score}</td>
-            <td>${r.rule_name || ''}</td></tr>`;
-    });
-    html += `</tbody></table></div></div>`;
+        data.forEach((r, i) => {
+            const cls = r.score >= 80 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
+            html += `<tr>
+                <td style="color:var(--text-muted);width:40px">${i + 1}</td>
+                <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
+                <td>${r.name || '-'}</td>
+                <td class="${cls}">${r.score}</td>
+                <td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.rule_name||'').replace(/"/g,'&quot;')}">${r.rule_name || '-'}</td></tr>`;
+        });
+        html += `</tbody></table></div>`;
+    } else {
+        html += hint;
+    }
+    html += `</div>`;
     container.innerHTML = html;
-    document.getElementById('last-update').textContent = latestDate ? '最新打分: ' + latestDate : '';
+    document.getElementById('last-update').textContent = latestDate ? '最新打分 · ' + latestDate : '暂无数据';
+    checkSyncStatus();
 }
 
 function refreshScores() { loadTab('scores'); }
 
-async function runScoring() {
+async function checkSyncStatus() {
+    try {
+        const resp = await fetchJSON(API + '/system/status');
+        const el = document.getElementById('syncStatus');
+        if (!el) return;
+        if (resp.sync && resp.sync.running) {
+            el.innerHTML = '<span class="badge badge-running">同步中</span>';
+            setTimeout(checkSyncStatus, 2000);
+        } else if (resp.sync && resp.sync.last_result) {
+            el.textContent = resp.sync.last_result;
+            document.getElementById('last-update').textContent = resp.sync.last_time
+                ? '最新同步 · ' + resp.sync.last_time
+                : (document.getElementById('last-update').textContent || '');
+        }
+    } catch(e) {}
+}
+
+async function runSyncOnly() {
+    const btn = document.getElementById('btnSyncOnly');
+    const statusEl = document.getElementById('syncStatus');
+    btn.disabled = true; btn.textContent = '启动中...';
+    try {
+        const resp = await fetchJSON(API + '/system/sync', { method: 'POST' });
+        statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
+        btn.textContent = '同步中...';
+        pollSyncThenRefresh();
+    } catch(e) {
+        statusEl.textContent = '启动失败: ' + e.message;
+        btn.disabled = false; btn.textContent = '仅同步数据';
+    }
+}
+
+async function pollSyncThenRefresh() {
+    try {
+        const resp = await fetchJSON(API + '/system/status');
+        if (resp.sync && resp.sync.running) {
+            setTimeout(pollSyncThenRefresh, 2000);
+        } else {
+            const btn = document.getElementById('btnSyncOnly');
+            const statusEl = document.getElementById('syncStatus');
+            if (btn) { btn.disabled = false; btn.textContent = '仅同步数据'; }
+            if (statusEl && resp.sync) statusEl.textContent = resp.sync.last_result || '同步完成';
+            if (resp.sync && resp.sync.last_time)
+                document.getElementById('last-update').textContent = '最新同步 · ' + resp.sync.last_time;
+            loadTab('scores');
+        }
+    } catch(e) { setTimeout(pollSyncThenRefresh, 2000); }
+}
+
+async function syncAndScore() {
     const btn = event.target;
-    btn.disabled = true; btn.textContent = '计算中...';
+    const statusEl = document.getElementById('syncStatus');
+    btn.disabled = true; btn.textContent = '同步中...';
+    try {
+        const syncResp = await fetchJSON(API + '/system/sync', { method: 'POST' });
+        if (syncResp.status === 'started') {
+            statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
+            await waitForSync();
+        }
+    } catch(e) { statusEl.textContent = '同步启动失败，直接打分...'; }
+    btn.textContent = '计算中...';
     try {
         await fetchJSON(API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
     } catch(e) {}
-    btn.disabled = false; btn.textContent = '刷新打分';
+    btn.disabled = false; btn.textContent = '同步并刷新';
     loadTab('scores');
 }
 
-// ─── Tab 2: 策略管理 ───
+async function waitForSync() {
+    for (let i = 0; i < 120; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+            const resp = await fetchJSON(API + '/system/status');
+            if (!resp.sync || !resp.sync.running) return;
+        } catch(e) { return; }
+    }
+}
+
+// ─── Tab 2: Strategy ───
+let strategySort = { key: 'fitness', dir: -1 };
+
+const STRATEGY_COLS = [
+    { key: 'id', label: '编号', sortable: true },
+    { key: 'is_active', label: '状态', sortable: true },
+    { key: 'rule_name', label: '策略名称', sortable: true },
+    { key: 'rule_type', label: '类型', sortable: true },
+    { key: 'fitness', label: '评分', sortable: true },
+    { key: 'annual_return', label: '年化收益', sortable: true },
+    { key: 'win_rate', label: '胜率', sortable: true },
+    { key: 'sharpe_ratio', label: '夏普', sortable: true },
+    { key: 'max_drawdown', label: '最大回撤', sortable: true },
+    { key: 'total_trades', label: '交易数', sortable: true },
+    { key: null, label: '操作', sortable: false }
+];
+
+function sortRules(rules) {
+    const { key, dir } = strategySort;
+    return [...rules].sort((a, b) => {
+        let va = a[key] ?? 0, vb = b[key] ?? 0;
+        if (typeof va === 'string') va = va.toLowerCase();
+        if (typeof vb === 'string') vb = vb.toLowerCase();
+        if (va < vb) return -dir;
+        if (va > vb) return dir;
+        return 0;
+    });
+}
+
+function renderStrategyTable(rules) {
+    let html = '';
+    if (rules.length > 0) {
+        const activeCount = rules.filter(r => r.is_active).length;
+        const topFitness = rules.reduce((best, r) => (r.fitness||0) > (best.fitness||0) ? r : best, rules[0]);
+        const avgReturn = (rules.reduce((s,r) => s + (r.annual_return||0), 0) / rules.length).toFixed(1);
+
+        html += `<div class="metrics-row">
+            <div class="metric-card">
+                <div class="val">${(topFitness.fitness||0).toFixed(4)}</div>
+                <div class="lbl">最高评分 · #${topFitness.id}</div>
+            </div>
+            <div class="metric-card">
+                <div class="val ${parseFloat(avgReturn) >= 0 ? 'positive' : 'negative'}">${avgReturn}%</div>
+                <div class="lbl">平均年化收益</div>
+            </div>
+            <div class="metric-card">
+                <div class="val">${activeCount}</div>
+                <div class="lbl">已启用策略</div>
+            </div>
+            <div class="metric-card">
+                <div class="val" style="color:var(--text-muted)">${rules.length}</div>
+                <div class="lbl">策略总数</div>
+            </div>
+        </div>`;
+
+        html += `<div class="table-wrapper"><table><thead><tr>`;
+        STRATEGY_COLS.forEach(col => {
+            if (col.sortable) {
+                const active = strategySort.key === col.key;
+                const arrow = active ? (strategySort.dir === 1 ? ' &#9650;' : ' &#9660;') : '';
+                html += `<th style="cursor:pointer;user-select:none" onclick="strategySortBy('${col.key}')">${col.label}${arrow}</th>`;
+            } else {
+                html += `<th>${col.label}</th>`;
+            }
+        });
+        html += `</tr></thead><tbody>`;
+
+        const sorted = sortRules(rules);
+        sorted.forEach(r => {
+            const retCls = (r.annual_return||0) >= 0 ? 'positive' : 'negative';
+            html += `<tr>
+                <td style="color:var(--accent);font-weight:600">#${r.id}</td>
+                <td><span class="toggle ${r.is_active?'on':''}" onclick="toggleRule(${r.id},this)"></span></td>
+                <td><span class="code-link" onclick="viewRuleTrades(${r.id},'${(r.rule_name||'').replace(/'/g,"\'")}')">${r.rule_name}</span></td>
+                <td><span class="badge badge-info">${r.rule_type}</span></td>
+                <td style="font-weight:600">${(r.fitness||0).toFixed(4)}</td>
+                <td class="${retCls}">${(r.annual_return||0).toFixed(1)}%</td>
+                <td>${(r.win_rate||0).toFixed(1)}%</td>
+                <td>${(r.sharpe_ratio||0).toFixed(2)}</td>
+                <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td>
+                <td>${r.total_trades||0}</td>
+                <td><button class="btn btn-danger btn-sm" onclick="deleteRule(${r.id})">删除</button></td></tr>`;
+        });
+        html += `</tbody></table></div>`;
+    }
+    return html;
+}
+
+function strategySortBy(key) {
+    if (strategySort.key === key) {
+        strategySort.dir *= -1;
+    } else {
+        strategySort.key = key;
+        strategySort.dir = -1;
+    }
+    const rulesEl = document.getElementById('strategyRules');
+    if (rulesEl && window._strategyRules) {
+        rulesEl.outerHTML = renderStrategyTable(window._strategyRules);
+    }
+}
+
+window._strategyRules = [];
+
 async function loadStrategyTab(container) {
     const resp = await fetchJSON(API + '/strategy/rules');
     const rules = resp.data || [];
+    window._strategyRules = rules;
+    const activeCount = rules.filter(r => r.is_active).length;
+
     let html = `<div class="panel">
         <div class="input-row">
             <button class="btn btn-primary" onclick="startMining()">挖掘新策略</button>
-            <span style="color:#888;font-size:12px" id="miningStatus"></span>
-            <span style="color:#888;font-size:12px;margin-left:auto">共 ${rules.length} 条策略</span>
+            <span id="miningStatus"></span>
+            <span class="text-muted" style="margin-left:auto">
+                共 <span style="color:var(--accent)">${rules.length}</span> 条 ·
+                启用 <span style="color:var(--accent)">${activeCount}</span> 条
+            </span>
         </div>
-        <div class="table-wrapper"><table>
-            <thead><tr><th>启用</th><th>策略名称</th><th>类型</th><th>年化收益</th><th>胜率</th><th>夏普</th><th>最大回撤</th><th>交易数</th><th>操作</th></tr></thead>
-            <tbody>`;
-    rules.forEach(r => {
-        const retCls = (r.annual_return||0) >= 0 ? 'positive' : 'negative';
-        html += `<tr>
-            <td><span class="toggle ${r.is_active?'on':''}" onclick="toggleRule(${r.id},this)"></span></td>
-            <td><span class="code-link" onclick="viewRuleTrades(${r.id},'${(r.rule_name||'').replace(/'/g,"\\'")}')">${r.rule_name}</span></td>
-            <td>${r.rule_type}</td>
-            <td class="${retCls}">${(r.annual_return||0).toFixed(1)}%</td>
-            <td>${(r.win_rate||0).toFixed(1)}%</td>
-            <td>${(r.sharpe_ratio||0).toFixed(2)}</td>
-            <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td>
-            <td>${r.total_trades||0}</td>
-            <td><button class="btn btn-danger btn-sm" onclick="deleteRule(${r.id})">删除</button></td></tr>`;
-    });
-    html += `</tbody></table></div><div id="ruleTradesPanel" class="hidden panel" style="margin-top:12px"></div></div>`;
+        <div id="strategyRules">${renderStrategyTable(rules)}</div>`;
+
+    if (rules.length === 0) {
+        html += '<div class="empty-state">暂无策略<br><span style="color:var(--text-muted)">点击「挖掘新策略」生成量化规则</span></div>';
+    }
+    html += `<div id="ruleTradesPanel" class="hidden sub-panel"></div></div>`;
     container.innerHTML = html;
 }
 
@@ -185,89 +777,125 @@ async function deleteRule(id) {
 
 async function startMining() {
     const st = document.getElementById('miningStatus');
-    st.innerHTML = '<span class="status-badge status-running">挖掘中...</span>';
+    st.innerHTML = '<span class="badge badge-running">挖掘中</span>';
     const resp = await fetchJSON(API + '/strategy/mine', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     if (resp.success) { pollMining(); }
-    else { st.innerHTML = '<span class="status-badge status-error">启动失败</span>'; }
+    else { st.innerHTML = '<span class="badge badge-error">启动失败</span>'; }
 }
 
 async function pollMining() {
     const st = document.getElementById('miningStatus');
     const resp = await fetchJSON(API + '/strategy/mine/status');
-    if (resp.data.running) { st.innerHTML = '<span class="status-badge status-running">挖掘中...</span>'; setTimeout(pollMining, 3000); }
-    else if (resp.data.progress === 'error') { st.innerHTML = '<span class="status-badge status-error">错误: '+(resp.data.result||'')+'</span>'; }
-    else { st.innerHTML = '<span class="status-badge status-done">完成! '+(resp.data.result?resp.data.result.length:0)+' 条策略</span>'; loadTab('strategy'); }
+    if (resp.data.running) { st.innerHTML = '<span class="badge badge-running">挖掘中</span>'; setTimeout(pollMining, 3000); }
+    else if (resp.data.progress === 'error') { st.innerHTML = '<span class="badge badge-error">错误: '+(resp.data.result||'')+'</span>'; }
+    else { st.innerHTML = '<span class="badge badge-done">完成 '+(resp.data.result?resp.data.result.length:0)+' 条</span>'; loadTab('strategy'); }
 }
 
 async function viewRuleTrades(ruleId, ruleName) {
     const panel = document.getElementById('ruleTradesPanel');
     const resp = await fetchJSON(API + '/strategy/rules/' + ruleId + '/trades');
     const trades = resp.data || [];
-    let html = '<h3 style="margin-bottom:8px">' + ruleName + ' · 交易明细 (' + trades.length + '笔)</h3>';
-    if (trades.length === 0) { html += '<p style="color:#888">暂无交易记录</p>'; }
-    else {
-        html += '<div class="table-wrapper"><table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>持仓天</th><th>收益率</th></tr></thead><tbody>';
+    let html = '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">';
+    html += '<h3 style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text-secondary);margin:0">' + ruleName + ' · 交易明细 (' + trades.length + '笔)</h3>';
+    html += `<button class="btn btn-primary btn-sm" onclick="pendingBacktestRuleId=${ruleId};switchTab('backtest')">回测中心查看</button></div>`;
+    if (trades.length === 0) {
+        html += '<div class="empty-state">暂无交易记录</div>';
+    } else {
+        html += '<div class="table-wrapper"><table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>持仓天</th><th>收益率</th><th>卖出原因</th></tr></thead><tbody>';
         trades.forEach(t => {
             const pnlCls = (t.pnl_pct||0) >= 0 ? 'positive' : 'negative';
+            const reasonMap = {expire:'到期', stop_loss:'止损', take_profit:'止盈', period_end:'周期结束'};
+            const reason = reasonMap[t.exit_reason] || t.exit_reason || '-';
             html += `<tr><td><span class="code-link" onclick="openKline('${t.code}','${t.entry_date||''}',${t.entry_price||0},'${t.exit_date||''}',${t.exit_price||0})">${t.code}</span></td>
                 <td>${t.name||''}</td><td>${t.entry_date||''}</td><td>${t.entry_price||''}</td>
                 <td>${t.exit_date||''}</td><td>${t.exit_price||''}</td>
-                <td>${t.holding_days||''}</td><td class="${pnlCls}">${(t.pnl_pct||0).toFixed(2)}%</td></tr>`;
+                <td>${t.holding_days||''}</td><td class="${pnlCls}">${(t.pnl_pct||0).toFixed(2)}%</td><td>${reason}</td></tr>`;
         });
         html += '</tbody></table></div>';
     }
     panel.innerHTML = html; panel.classList.remove('hidden');
 }
 
-// ─── Tab 3: 回测中心 ───
+// ─── Tab 3: Backtest ───
 async function loadBacktestTab(container) {
     const [rulesResp, resultsResp] = await Promise.all([
         fetchJSON(API + '/strategy/rules?active_only=0'),
         fetchJSON(API + '/backtest/results')
     ]);
     const rules = rulesResp.data || [], results = resultsResp.data || [];
-    const opts = rules.map(r => `<option value="${r.id}">${r.rule_name}</option>`).join('');
+    const opts = rules.map(r => `<option value="${r.id}">#${r.id} ${r.rule_name}</option>`).join('');
 
     let html = `<div class="panel">
         <div class="input-row">
-            <span>策略:</span><select id="btRule">${opts}</select>
-            <span>起始:</span><input type="date" id="btStart" value="2024-01-01">
-            <span>结束:</span><input type="date" id="btEnd" value="2025-12-31">
+            <span>策略</span><select id="btRule">${opts}</select>
+            <span>起始</span><input type="date" id="btStart" value="2024-01-01">
+            <span>结束</span><input type="date" id="btEnd" value="${new Date().toISOString().split('T')[0]}">
             <button class="btn btn-primary" onclick="startBacktest()">开始回测</button>
-            <span id="btStatus" style="font-size:12px;color:#888"></span>
+            <span id="btStatus"></span>
         </div>
         <div id="btResult" class="hidden"></div>
-        <h3 style="margin:16px 0 8px">历史回测记录 (${results.length})</h3>
-        <div class="table-wrapper"><table><thead><tr><th>ID</th><th>策略</th><th>区间</th><th>年化收益</th><th>胜率</th><th>夏普</th><th>回撤</th><th>交易数</th></tr></thead><tbody>`;
-    results.forEach(r => {
-        const retCls = (r.annual_return||0) >= 0 ? 'positive' : 'negative';
-        html += `<tr><td><span class="code-link" onclick="viewResult(${r.id})">#${r.id}</span></td>
-            <td>${r.rule_name||''}</td><td>${r.start_date||''}~${r.end_date||''}</td>
-            <td class="${retCls}">${(r.annual_return||0).toFixed(1)}%</td>
-            <td>${(r.win_rate||0).toFixed(1)}%</td><td>${(r.sharpe_ratio||0).toFixed(2)}</td>
-            <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td><td>${r.total_trades||0}</td></tr>`;
-    });
-    html += `</tbody></table></div><div id="btTradesPanel" class="hidden panel" style="margin-top:12px"></div></div>`;
+        <div class="panel-header" style="margin-top:8px">
+            <h3>历史回测记录 (${results.length})</h3>
+        </div>`;
+
+    if (results.length > 0) {
+        html += `<div class="table-wrapper"><table><thead><tr>
+            <th>ID</th><th>策略</th><th>区间</th><th>年化收益</th><th>胜率</th>
+            <th>夏普</th><th>回撤</th><th>交易数</th><th>操作</th>
+        </tr></thead><tbody>`;
+        results.forEach(r => {
+            const retCls = (r.annual_return||0) >= 0 ? 'positive' : 'negative';
+            html += `<tr>
+                <td><span class="code-link" onclick="viewResult(${r.id})">#${r.id}</span></td>
+                <td>${r.rule_name||''}</td><td>${r.start_date||''} ~ ${r.end_date||''}</td>
+                <td class="${retCls}">${(r.annual_return||0).toFixed(1)}%</td>
+                <td>${(r.win_rate||0).toFixed(1)}%</td>
+                <td>${(r.sharpe_ratio||0).toFixed(2)}</td>
+                <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td>
+                <td>${r.total_trades||0}</td>
+                <td><button class="btn btn-danger btn-sm" onclick="deleteBacktest(${r.id})">删除</button></td></tr>`;
+        });
+        html += `</tbody></table></div>`;
+    } else {
+        html += '<div class="empty-state">暂无回测记录</div>';
+    }
+    html += `<div id="btTradesPanel" class="hidden sub-panel"></div></div>`;
     container.innerHTML = html;
+
+    if (pendingBacktestRuleId) {
+        const sel = document.getElementById('btRule');
+        if (sel) sel.value = String(pendingBacktestRuleId);
+        pendingBacktestRuleId = null;
+    }
 }
 
 async function startBacktest() {
     const ruleId = document.getElementById('btRule').value;
     const start = document.getElementById('btStart').value, end = document.getElementById('btEnd').value;
     const st = document.getElementById('btStatus');
-    st.innerHTML = '<span class="status-badge status-running">回测中...</span>';
+    st.innerHTML = '<span class="badge badge-running">回测中</span>';
     const resp = await fetchJSON(API + '/backtest/run', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule_id:parseInt(ruleId),start_date:start,end_date:end})});
-    if (resp.success) { pollBt(); }
-    else { st.innerHTML = '<span class="status-badge status-error">'+(resp.error||'')+'</span>'; }
+    if (resp.success) { pollBt(0); }
+    else { st.innerHTML = '<span class="badge badge-error">'+(resp.error||'')+'</span>'; }
 }
 
-async function pollBt() {
+const BT_MAX_POLLS = 400;
+
+async function pollBt(n) {
     const st = document.getElementById('btStatus');
+    if (n >= BT_MAX_POLLS) {
+        st.innerHTML = '<span class="badge badge-error">超时</span>';
+        return;
+    }
     const resp = await fetchJSON(API + '/backtest/status');
-    if (resp.data.running) { st.innerHTML = '<span class="status-badge status-running">回测中...</span>'; setTimeout(pollBt, 3000); }
-    else if (resp.data.error) { st.innerHTML = '<span class="status-badge status-error">'+resp.data.error+'</span>'; }
-    else if (resp.data.result_id) { st.innerHTML = '<span class="status-badge status-done">完成!</span>'; viewResult(resp.data.result_id); }
-    else { st.innerHTML = '<span class="status-badge status-done">完成</span>'; loadTab('backtest'); }
+    if (resp.data.running) {
+        const p = resp.data.progress || 0, t = resp.data.total || 0;
+        st.innerHTML = '<span class="badge badge-running">回测中 ' + (t > 0 ? `(${p}/${t})` : '') + '</span>';
+        setTimeout(() => pollBt(n + 1), 3000);
+    }
+    else if (resp.data.error) { st.innerHTML = '<span class="badge badge-error">'+resp.data.error+'</span>'; }
+    else if (resp.data.result_id) { st.innerHTML = '<span class="badge badge-done">完成</span>'; viewResult(resp.data.result_id); }
+    else { st.innerHTML = '<span class="badge badge-done">完成</span>'; loadTab('backtest'); }
 }
 
 async function viewResult(resultId) {
@@ -278,32 +906,62 @@ async function viewResult(resultId) {
     const s = detailResp.data || {}, trades = tradesResp.data || [];
     const panel = document.getElementById('btTradesPanel');
     const retCls = (s.annual_return||0) >= 0 ? '' : ' negative';
-    let html = `<h3>回测结果 #${resultId}</h3>
-        <div class="metrics">
-            <div class="metric"><div class="val${retCls}">${(s.annual_return||0).toFixed(1)}%</div><div class="lbl">年化收益</div></div>
-            <div class="metric"><div class="val">${(s.win_rate||0).toFixed(1)}%</div><div class="lbl">胜率</div></div>
-            <div class="metric"><div class="val">${(s.sharpe_ratio||0).toFixed(2)}</div><div class="lbl">夏普</div></div>
-            <div class="metric"><div class="val negative">${(s.max_drawdown||0).toFixed(1)}%</div><div class="lbl">最大回撤</div></div>
-            <div class="metric"><div class="val">${s.total_trades||0}</div><div class="lbl">交易次数</div></div>
+    let html = `<div class="panel-header"><h3>回测结果 #${resultId}</h3></div>
+        <div class="metrics-row">
+            <div class="metric-card">
+                <div class="val${retCls}">${(s.annual_return||0).toFixed(1)}%</div>
+                <div class="lbl">年化收益</div>
+            </div>
+            <div class="metric-card">
+                <div class="val">${(s.win_rate||0).toFixed(1)}%</div>
+                <div class="lbl">胜率</div>
+            </div>
+            <div class="metric-card">
+                <div class="val">${(s.sharpe_ratio||0).toFixed(2)}</div>
+                <div class="lbl">夏普比率</div>
+            </div>
+            <div class="metric-card">
+                <div class="val negative">${(s.max_drawdown||0).toFixed(1)}%</div>
+                <div class="lbl">最大回撤</div>
+            </div>
+            <div class="metric-card">
+                <div class="val">${s.total_trades||0}</div>
+                <div class="lbl">交易次数</div>
+            </div>
         </div>`;
     if (trades.length > 0) {
-        html += '<div class="table-wrapper"><table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>持仓天</th><th>收益率</th></tr></thead><tbody>';
+        html += '<div class="table-wrapper"><table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>持仓天</th><th>收益率</th><th>卖出原因</th></tr></thead><tbody>';
         trades.forEach(t => {
             const pnlCls = (t.pnl_pct||0) >= 0 ? 'positive' : 'negative';
+            const reasonMap = {expire:'到期', stop_loss:'止损', take_profit:'止盈', period_end:'周期结束'};
+            const reason = reasonMap[t.exit_reason] || t.exit_reason || '-';
             html += `<tr><td><span class="code-link" onclick="openKline('${t.code}','${t.entry_date||''}',${t.entry_price||0},'${t.exit_date||''}',${t.exit_price||0},${resultId})">${t.code}</span></td>
                 <td>${t.name||''}</td><td>${t.entry_date||''}</td><td>${t.entry_price||''}</td>
                 <td>${t.exit_date||''}</td><td>${t.exit_price||''}</td>
-                <td>${t.holding_days||''}</td><td class="${pnlCls}">${(t.pnl_pct||0).toFixed(2)}%</td></tr>`;
+                <td>${t.holding_days||''}</td><td class="${pnlCls}">${(t.pnl_pct||0).toFixed(2)}%</td><td>${reason}</td></tr>`;
         });
         html += '</tbody></table></div>';
     }
     panel.innerHTML = html; panel.classList.remove('hidden');
 }
 
-// ─── K线图侧面板 ───
+async function deleteBacktest(id) {
+    if (!confirm('确定删除此回测记录?')) return;
+    await fetchJSON(API + '/backtest/results/' + id, {method:'DELETE'});
+    loadTab('backtest');
+}
+
+// ─── K-line overlay ───
+function klineColor(d) {
+    if (!d) return '#ef5350';
+    if (d.limitType === 'limit_up') return '#ab47bc';
+    if (d.limitType === 'limit_down') return '#42a5f5';
+    return d.close >= d.open ? '#ef5350' : '#26a69a';
+}
+
 async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resultId) {
     const panel = document.getElementById('klinePanel'); panel.classList.add('open');
-    let start = '2024-01-01', end = '2025-12-31';
+    let start = '2024-01-01', end = new Date().toISOString().split('T')[0];
     if (entryDate) { const d = new Date(entryDate); d.setMonth(d.getMonth()-2); start = d.toISOString().split('T')[0]; }
     if (exitDate) { const d = new Date(exitDate); d.setMonth(d.getMonth()+2); end = d.toISOString().split('T')[0]; }
 
@@ -313,42 +971,103 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
     let kdata = [], marks = [];
     try {
         const resp = await fetchJSON(url);
-        kdata = (resp.data?.kline || []).map(d => [d[0], d[1], d[2], d[3], d[4]]);
+        kdata = (resp.data?.kline || []).map(d => ({ date: d[0], open: d[1], close: d[2], low: d[3], high: d[4], vol: d[5] || 0 }));
         marks = resp.data?.marks || [];
-    } catch(e) { console.error(e); }
+    } catch(e) { console.error('kline fetch error:', e); }
+
+    if (kdata.length === 0) {
+        document.getElementById('klineTradeInfo').innerHTML = '<p class="text-muted">无K线数据</p>';
+        return;
+    }
+
+    for (let i = 0; i < kdata.length; i++) {
+        kdata[i].prevClose = i > 0 ? kdata[i-1].close : kdata[i].open;
+        kdata[i].chgPct = kdata[i].prevClose > 0 ? ((kdata[i].close / kdata[i].prevClose - 1) * 100) : 0;
+        kdata[i].limitType = (function() {
+            if (!kdata[i].prevClose || kdata[i].prevClose <= 0) return 'normal';
+            const chgPct = (kdata[i].close / kdata[i].prevClose - 1) * 100;
+            const n = /^30/.test(code) || /^688/.test(code) ? 19.5 : /^[84]/.test(code) ? 29.5 : 9.5;
+            if (chgPct >= n) return 'limit_up';
+            if (chgPct <= -n) return 'limit_down';
+            return 'normal';
+        })();
+    }
+
+    const dates = kdata.map(d => d.date);
+    const ohlc = kdata.map(d => {
+        const color = klineColor(d);
+        return { value: [d.open, d.close, d.low, d.high], itemStyle: { color: color, color0: color, borderColor: color, borderColor0: color } };
+    });
+    const volData = kdata.map(d => ({
+        value: d.vol,
+        itemStyle: { color: d.chgPct >= 0 ? '#ef5350' : '#26a69a' }
+    }));
 
     if (!klineChart) klineChart = echarts.init(document.getElementById('klineChart'));
-    const dates = kdata.map(d => d[0]);
-    const ohlc = kdata.map(d => [d[1], d[2], d[3], d[4]]);
+    klineChart.clear();
 
-    klineChart.setOption({
-        title: { text: code + ' K线图', left: 'center', textStyle: { color: '#e1e1e1', fontSize: 14 } },
-        tooltip: { trigger: 'axis' },
-        grid: { left: '10%', right: '10%', top: 50, bottom: 30 },
-        xAxis: { type: 'category', data: dates, axisLabel: { color: '#888', rotate: 30 } },
-        yAxis: { scale: true, axisLabel: { color: '#888' } },
-        series: [{
-            type: 'candlestick', data: ohlc,
-            itemStyle: { color: '#ff5252', color0: '#69f0ae', borderColor: '#ff5252', borderColor0: '#69f0ae' },
-            markPoint: marks.length > 0 ? {
-                data: marks.map(m => ({
-                    name: m.type === 'buy' ? '买入' : '卖出',
-                    coord: [m.date, m.price],
-                    value: m.type === 'buy' ? 'B' : 'S',
-                    symbol: 'pin', symbolSize: 45,
-                    itemStyle: { color: m.type === 'buy' ? '#ff5252' : '#69f0ae' }
-                }))
-            } : undefined
-        }]
-    });
+    var opt = {
+        title: { text: code + ' K线图', left: 'center', textStyle: { color: '#dde4f0', fontSize: 14, fontFamily: "'JetBrains Mono', monospace" } },
+        tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'cross' },
+            formatter: function(params) {
+                var idx = params[0]?.dataIndex;
+                if (idx == null) return '';
+                var d = kdata[idx];
+                var chgColor = d.chgPct >= 0 ? '#ef5350' : '#26a69a';
+                var limitLabel = d.limitType === 'limit_up' ? ' [涨停]' : d.limitType === 'limit_down' ? ' [跌停]' : '';
+                return '<b>' + d.date + '</b>' + limitLabel + '<br/>' +
+                    '开: ' + d.open.toFixed(2) + ' &nbsp; 高: ' + d.high.toFixed(2) + '<br/>' +
+                    '收: ' + d.close.toFixed(2) + ' &nbsp; 低: ' + d.low.toFixed(2) + '<br/>' +
+                    '涨跌幅: <span style="color:' + chgColor + ';font-weight:bold">' + (d.chgPct >= 0 ? '+' : '') + d.chgPct.toFixed(2) + '%</span><br/>' +
+                    '成交量: ' + (d.vol/10000).toFixed(0) + '万';
+            }
+        },
+        grid: [
+            { left: '10%', right: '10%', top: 50, height: '60%' },
+            { left: '10%', right: '10%', top: '78%', height: '12%' }
+        ],
+        xAxis: [
+            { type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#6b7a9a', rotate: 30 }, axisLine: { lineStyle: { color: '#182240' } } },
+            { type: 'category', data: dates, gridIndex: 1, axisLabel: { show: false }, axisLine: { lineStyle: { color: '#182240' } } }
+        ],
+        yAxis: [
+            { scale: true, gridIndex: 0, axisLabel: { color: '#6b7a9a' }, splitLine: { lineStyle: { color: '#111832' } } },
+            { scale: true, gridIndex: 1, axisLabel: { color: '#6b7a9a', fontSize: 10 }, splitLine: { show: false }, splitNumber: 2 }
+        ],
+        dataZoom: [
+            { type: 'slider', xAxisIndex: [0, 1], start: 50, end: 100, height: 25, bottom: 0,
+              borderColor: '#182240', backgroundColor: '#0c1124',
+              dataBackground: { lineStyle: { color: '#00d4f0' }, areaStyle: { color: 'rgba(0,212,240,0.08)' } },
+              textStyle: { color: '#6b7a9a' }, handleStyle: { color: '#00d4f0' } },
+            { type: 'inside', xAxisIndex: [0, 1], zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false }
+        ],
+        series: [
+            { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 20 },
+            { type: 'bar', name: '成交量', data: volData, xAxisIndex: 1, yAxisIndex: 1, barWidth: '60%' }
+        ]
+    };
 
-    let infoHtml = `<h4 style="margin-bottom:8px">${code}</h4>`;
+    if (marks.length > 0) {
+        opt.series.push({
+            type: 'scatter', name: '买卖点', data: marks.map(function(m) { return [m.date, m.price]; }), xAxisIndex: 0, yAxisIndex: 0,
+            symbolSize: 14, symbol: 'pin',
+            itemStyle: { color: function(p) { return marks[p.dataIndex]?.type === 'buy' ? '#ef5350' : '#26a69a'; } },
+            label: { show: true, formatter: function(p) { return marks[p.dataIndex]?.type === 'buy' ? 'B' : 'S'; }, color: '#fff', fontSize: 10, fontWeight: 'bold', position: 'top' }
+        });
+    }
+
+    klineChart.setOption(opt);
+    klineChart.resize();
+
+    let infoHtml = `<h4 style="font-family:var(--font-mono);margin-bottom:8px;color:var(--text-primary)">${code}</h4>`;
     if (entryDate && entryPrice) {
-        infoHtml += `<p>买入: ${entryDate} 价格: ${entryPrice}</p>`;
+        infoHtml += `<p style="font-size:12px;color:var(--text-secondary)">买入: ${entryDate} 价格: ${entryPrice}</p>`;
         if (exitDate && exitPrice && entryPrice > 0) {
             const pnl = ((exitPrice/entryPrice - 1)*100).toFixed(2);
             const cls = parseFloat(pnl) >= 0 ? 'positive' : 'negative';
-            infoHtml += `<p>卖出: ${exitDate} 价格: ${exitPrice} 收益: <span class="${cls}">${pnl}%</span></p>`;
+            infoHtml += `<p style="font-size:12px;color:var(--text-secondary)">卖出: ${exitDate} 价格: ${exitPrice} 收益: <span class="${cls}">${pnl}%</span></p>`;
         }
     }
     document.getElementById('klineTradeInfo').innerHTML = infoHtml;
