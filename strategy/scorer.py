@@ -41,8 +41,28 @@ def _load_stock_data(trade_date: str) -> Dict[str, pd.DataFrame]:
     return result
 
 
-def _evaluate_condition(factor_values: Dict[str, float], condition: dict) -> bool:
-    """评估单条规则条件是否满足"""
+def _evaluate_condition(factor_values: Dict[str, float], condition) -> bool:
+    """评估单条规则条件是否满足。condition 为 list 格式：[{factor, operator, threshold}, ...]"""
+    if isinstance(condition, list):
+        for item in condition:
+            factor_name = item.get("factor")
+            op = item.get("operator")
+            threshold = item.get("threshold")
+            if factor_name is None or op is None or threshold is None:
+                return False
+            value = factor_values.get(factor_name)
+            if value is None:
+                return False
+            if op == ">" and not (value > threshold):
+                return False
+            if op == "<" and not (value < threshold):
+                return False
+            if op == ">=" and not (value >= threshold):
+                return False
+            if op == "<=" and not (value <= threshold):
+                return False
+        return True
+    # legacy dict format: {factor_name: {operator: threshold}}
     for factor_name, op_dict in condition.items():
         value = factor_values.get(factor_name)
         if value is None:
@@ -109,7 +129,7 @@ def score_stocks(trade_date: str, save: bool = True) -> List[dict]:
                 continue
 
             if _evaluate_condition(factor_row, conditions):
-                score = rule.get("fitness", 0) or 0
+                score = rule.get("win_rate", 0) or 0
                 if score > best_score:
                     best_score = score
                     best_rule = rule
@@ -124,7 +144,7 @@ def score_stocks(trade_date: str, save: bool = True) -> List[dict]:
             results.append({
                 "code": code,
                 "name": stock_name,
-                "score": round(best_score * 100, 1),
+                "score": round(best_score, 1),
                 "rule_id": str(best_rule["id"]),
                 "rule_name": best_rule["rule_name"],
                 "factors_json": json.dumps(factor_row, ensure_ascii=False),
