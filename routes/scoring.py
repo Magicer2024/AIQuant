@@ -3,6 +3,7 @@ routes/scoring.py —— 打分排名 API
 """
 import json
 import math
+from datetime import date
 from flask import Blueprint, request, jsonify
 from strategy.scorer import score_stocks, get_daily_scores, get_latest_score_date
 from core.db import get_conn
@@ -11,11 +12,13 @@ scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
 
 
 def _sanitize(obj):
-    """递归替换 NaN/Inf 为 None"""
+    """递归替换 NaN/Inf 为 None，numpy 类型转 Python 原生"""
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return None
         return obj
+    if hasattr(obj, "item"):  # numpy scalar → Python native
+        return _sanitize(obj.item())
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     if isinstance(obj, dict):
@@ -30,21 +33,41 @@ def daily_scores():
     """获取某日打分排名 GET /api/scoring/daily?date=2025-01-15"""
     trade_date = request.args.get("date") or get_latest_score_date()
     if not trade_date:
-        return jsonify({"success": True, "data": [], "error": None})
+        trade_date = _get_latest_trade_date()
+    if not trade_date:
+        return jsonify({"success": True, "data": [], "date": None, "error": "No trade date available"})
     results = get_daily_scores(trade_date)
-    return jsonify({"success": True, "data": _sanitize(results), "error": None})
+    return jsonify({"success": True, "data": _sanitize(results), "date": trade_date, "error": None})
 
 
 @scoring_bp.route("/run", methods=["POST"])
 def run_scoring():
-    """触发打分 POST /api/scoring/run"""
+    """触发打分 POST /api/scoring/run
+    支持 sync_first=true 参数，先同步行情再打分
+    """
     body = request.get_json(silent=True) or {}
     trade_date = body.get("date") or _get_latest_trade_date()
     if not trade_date:
         return jsonify({"success": False, "data": None, "error": "No trade_date provided"}), 400
+
+    sync_first = body.get("sync_first", False)
+    sync_msg = None
+    if sync_first:
+        try:
+            from core.sync import daily_sync, is_trading_day
+            from datetime import date
+            today_str = date.today().strftime("%Y-%m-%d")
+            if is_trading_day(today_str):
+                daily_sync(verbose=False)
+                sync_msg = "已同步最新行情"
+            else:
+                sync_msg = "非交易日，跳过同步"
+        except Exception as e:
+            sync_msg = f"同步失败: {e}"
+
     try:
         results = score_stocks(trade_date, save=True)
-        return jsonify({"success": True, "data": {"count": len(results), "date": trade_date}, "error": None})
+        return jsonify({"success": True, "data": {"count": len(results), "date": trade_date, "sync": sync_msg}, "error": None})
     except Exception as e:
         return jsonify({"success": False, "data": None, "error": str(e)}), 500
 
@@ -72,7 +95,7 @@ def stock_factors(code: str):
 def kline_data(code: str):
     """获取 K 线数据（含回测买卖点标注）GET /api/scoring/kline/000001?start=2024-01-01&end=2024-12-31&result_id=1"""
     start = request.args.get("start", "2024-01-01")
-    end = request.args.get("end", "2025-12-31")
+    end = request.args.get("end", date.today().strftime("%Y-%m-%d"))
     result_id = request.args.get("result_id")
 
     with get_conn() as conn:

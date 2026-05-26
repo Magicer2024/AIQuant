@@ -15,6 +15,9 @@ def _sanitize(obj):
         if math.isnan(obj) or math.isinf(obj):
             return None
         return obj
+    # numpy int/float → Python native (prevents BLOB storage in SQLite)
+    if hasattr(obj, "item"):  # numpy scalar
+        return _sanitize(obj.item())
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     if isinstance(obj, dict):

@@ -1287,6 +1287,9 @@ from core.repository.mgmt_repo import (
 
 def upsert_strategy_rule(rule: dict) -> int:
     """插入或更新策略规则，返回 rule_id"""
+    def _py(val):
+        return val.item() if hasattr(val, "item") else val
+
     with get_conn() as conn:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         cur = conn.execute("""
@@ -1306,12 +1309,12 @@ def upsert_strategy_rule(rule: dict) -> int:
         """, (
             rule["rule_name"], rule["rule_type"], rule.get("encoding", "[]"),
             rule.get("conditions", "[]"), rule.get("sell_conditions", "[]"),
-            rule.get("holding_min", 3), rule.get("holding_max", 20),
-            rule.get("source", "template"), rule.get("generation", 0),
-            rule.get("fitness", 0), rule.get("annual_return", 0),
-            rule.get("win_rate", 0), rule.get("sharpe_ratio", 0),
-            rule.get("max_drawdown", 0), rule.get("total_trades", 0),
-            rule.get("signal_overlap", 0), now,
+            _py(rule.get("holding_min", 3)), _py(rule.get("holding_max", 20)),
+            rule.get("source", "template"), _py(rule.get("generation", 0)),
+            _py(rule.get("fitness", 0)), _py(rule.get("annual_return", 0)),
+            _py(rule.get("win_rate", 0)), _py(rule.get("sharpe_ratio", 0)),
+            _py(rule.get("max_drawdown", 0)), _py(rule.get("total_trades", 0)),
+            _py(rule.get("signal_overlap", 0)), now,
         ))
         return cur.lastrowid
 

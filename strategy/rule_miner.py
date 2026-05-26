@@ -265,12 +265,12 @@ class RuleMiner:
             return None
         n = len(results)
         return {
-            "total_return": np.mean([r.get("total_return", 0) for r in results]),
-            "annual_return": np.mean([r.get("annual_return", 0) for r in results]),
-            "win_rate": np.mean([r.get("win_rate", 0) for r in results]),
-            "sharpe_ratio": np.mean([r.get("sharpe_ratio", 0) for r in results]),
-            "max_drawdown": np.max([r.get("max_drawdown", 0) for r in results]),
-            "total_trades": np.sum([r.get("total_trades", 0) for r in results]),
+            "total_return": float(np.mean([r.get("total_return", 0) for r in results])),
+            "annual_return": float(np.mean([r.get("annual_return", 0) for r in results])),
+            "win_rate": float(np.mean([r.get("win_rate", 0) for r in results])),
+            "sharpe_ratio": float(np.mean([r.get("sharpe_ratio", 0) for r in results])),
+            "max_drawdown": float(np.max([r.get("max_drawdown", 0) for r in results])),
+            "total_trades": int(np.sum([r.get("total_trades", 0) for r in results])),
             "sample_count": n,
         }
 
