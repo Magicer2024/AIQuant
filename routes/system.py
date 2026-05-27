@@ -6,27 +6,16 @@ from flask import jsonify, request
 
 from routes import system_bp
 from scheduler.state import SYNC_STATUS, SCHEDULER_RUNNING
-from scheduler.runner import run_sync_blocking, start_scheduler
-
-
-@system_bp.route("/sync", methods=["POST"])
-def system_sync():
-    """Trigger data sync (async background)"""
-    if SYNC_STATUS["running"]:
-        return jsonify({"error": "同步正在进行中，请稍候"}), 409
-    SYNC_STATUS["running"] = True
-    SYNC_STATUS["last_result"] = "同步中..."
-    t = threading.Thread(target=run_sync_blocking, daemon=True)
-    t.start()
-    return jsonify({"status": "started", "message": "数据同步已启动"})
+from scheduler.runner import start_scheduler
 
 
 @system_bp.route("/status", methods=["GET"])
 def system_status():
     """Get system status"""
+    from routes.sync import _sync_progress
     return jsonify({
         "sync": {
-            "running": SYNC_STATUS["running"],
+            "running": SYNC_STATUS["running"] or _sync_progress["running"],
             "last_time": SYNC_STATUS.get("last_time"),
             "last_result": SYNC_STATUS.get("last_result", ""),
         },

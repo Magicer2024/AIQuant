@@ -634,7 +634,7 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
 
     Args:
         verbose: 是否打印详细日志
-        progress_callback: 进度回调函数，接收(current, total, symbol)参数
+        progress_callback: 进度回调函数，接收(current, total, success, failed)参数
         max_workers: 已废弃，保持单线程
         min_coverage: 覆盖率阈值，默认0.9（90%），数据源不完整时可降低
     """
@@ -759,7 +759,7 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
 
             # 调用进度回调
             if progress_callback:
-                progress_callback(processed_n, total_n, f"{code} {name[:8]}")
+                progress_callback(processed_n, total_n, success_n, failed_n)
 
             # 北交所跳过
             bs_code = _format_code_for_baostock(code)

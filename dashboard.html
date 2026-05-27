@@ -510,6 +510,15 @@ async function loadScoresTab(container) {
             <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
             <span id="syncStatus"></span>
             <span class="text-muted" style="margin-left:auto" id="scoreCount">${data.length} 只股票</span>
+        </div>
+        <div id="syncProgress" style="display:none; margin-top: 12px;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                <div id="syncProgressBar" style="flex:1; height:8px; background:var(--border); border-radius:4px; overflow:hidden;">
+                    <div id="syncProgressFill" style="height:100%; width:0%; background:var(--accent); border-radius:4px; transition:width 0.3s;"></div>
+                </div>
+                <span id="syncProgressPct" style="font-size:12px; color:var(--text-secondary); white-space:nowrap;">0%</span>
+            </div>
+            <div id="syncProgressText" style="font-size:12px; color:var(--text-secondary);"></div>
         </div>`;
 
     if (data.length > 0) {
@@ -576,36 +585,55 @@ async function checkSyncStatus() {
     } catch(e) {}
 }
 
+let syncPollTimer = null;
+
+function showSyncProgress() {
+    document.getElementById('syncProgress').style.display = 'block';
+}
+
+function hideSyncProgress() {
+    clearInterval(syncPollTimer);
+    syncPollTimer = null;
+    setTimeout(() => { document.getElementById('syncProgress').style.display = 'none'; }, 5000);
+}
+
+async function pollSyncProgress(onDone) {
+    syncPollTimer = setInterval(async () => {
+        try {
+            const resp = await fetchJSON(API + '/sync/progress');
+            const p = resp.data;
+            const pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+            document.getElementById('syncProgressFill').style.width = pct + '%';
+            document.getElementById('syncProgressPct').textContent = pct + '%';
+            document.getElementById('syncProgressText').textContent =
+                `同步中: ${p.current}/${p.total}  成功:${p.success}  失败:${p.failed}`;
+            if (!p.running) {
+                hideSyncProgress();
+                if (onDone) onDone(p.message || '同步完成');
+            }
+        } catch(e) { hideSyncProgress(); if (onDone) onDone(''); }
+    }, 1000);
+}
+
 async function runSyncOnly() {
     const btn = document.getElementById('btnSyncOnly');
     const statusEl = document.getElementById('syncStatus');
     btn.disabled = true; btn.textContent = '启动中...';
     try {
-        const resp = await fetchJSON(API + '/system/sync', { method: 'POST' });
+        const resp = await fetchJSON(API + '/sync', { method: 'POST' });
+        if (resp.error) { statusEl.textContent = resp.error; btn.disabled = false; btn.textContent = '仅同步数据'; return; }
         statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
         btn.textContent = '同步中...';
-        pollSyncThenRefresh();
+        showSyncProgress();
+        pollSyncProgress((msg) => {
+            btn.disabled = false; btn.textContent = '仅同步数据';
+            if (msg) statusEl.textContent = msg;
+            loadTab('scores');
+        });
     } catch(e) {
         statusEl.textContent = '启动失败: ' + e.message;
         btn.disabled = false; btn.textContent = '仅同步数据';
     }
-}
-
-async function pollSyncThenRefresh() {
-    try {
-        const resp = await fetchJSON(API + '/system/status');
-        if (resp.sync && resp.sync.running) {
-            setTimeout(pollSyncThenRefresh, 2000);
-        } else {
-            const btn = document.getElementById('btnSyncOnly');
-            const statusEl = document.getElementById('syncStatus');
-            if (btn) { btn.disabled = false; btn.textContent = '仅同步数据'; }
-            if (statusEl && resp.sync) statusEl.textContent = resp.sync.last_result || '同步完成';
-            if (resp.sync && resp.sync.last_time)
-                document.getElementById('last-update').textContent = '最新同步 · ' + resp.sync.last_time;
-            loadTab('scores');
-        }
-    } catch(e) { setTimeout(pollSyncThenRefresh, 2000); }
 }
 
 async function syncAndScore() {
@@ -613,27 +641,29 @@ async function syncAndScore() {
     const statusEl = document.getElementById('syncStatus');
     btn.disabled = true; btn.textContent = '同步中...';
     try {
-        const syncResp = await fetchJSON(API + '/system/sync', { method: 'POST' });
-        if (syncResp.status === 'started') {
-            statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
-            await waitForSync();
-        }
-    } catch(e) { statusEl.textContent = '同步启动失败，直接打分...'; }
-    btn.textContent = '计算中...';
-    try {
-        await fetchJSON(API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-    } catch(e) {}
-    btn.disabled = false; btn.textContent = '同步并刷新';
-    loadTab('scores');
-}
-
-async function waitForSync() {
-    for (let i = 0; i < 120; i++) {
-        await new Promise(r => setTimeout(r, 1500));
+        const syncResp = await fetchJSON(API + '/sync', { method: 'POST' });
+        if (syncResp.error) { statusEl.textContent = syncResp.error; btn.disabled = false; btn.textContent = '同步并刷新'; return; }
+        statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
+        showSyncProgress();
+        pollSyncProgress(async (msg) => {
+            if (msg) statusEl.textContent = msg;
+            btn.textContent = '计算中...';
+            try {
+                await fetchJSON(API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+            } catch(e) {}
+            btn.disabled = false; btn.textContent = '同步并刷新';
+            loadTab('scores');
+        });
+    } catch(e) {
+        statusEl.textContent = '同步启动失败，直接打分...';
+        btn.textContent = '计算中...';
         try {
-            const resp = await fetchJSON(API + '/system/status');
-            if (!resp.sync || !resp.sync.running) return;
-        } catch(e) { return; }
+            await fetchJSON(API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        } catch(e2) {}
+        btn.disabled = false; btn.textContent = '同步并刷新';
+        loadTab('scores');
+    }
+}
     }
 }
 

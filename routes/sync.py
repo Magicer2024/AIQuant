@@ -3,6 +3,7 @@ routes/sync.py —— 数据同步相关接口
 """
 import time
 import json as _json
+import threading
 import traceback
 from flask import jsonify
 
@@ -18,6 +19,59 @@ from strategy.strategies import (
     fuse_signals,
     DEFAULT_WEIGHTS,
 )
+
+# ─────────────────────────────────────────────
+# 同步进度状态（模块级全局变量）
+# ─────────────────────────────────────────────
+_sync_progress = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "success": 0,
+    "failed": 0,
+    "message": "",
+    "last_error": None,
+}
+
+
+def _progress_callback(current, total, success, failed):
+    """Update sync progress state from within daily_sync()"""
+    _sync_progress.update({
+        "current": current,
+        "total": total,
+        "success": success,
+        "failed": failed,
+    })
+
+
+@sync_bp.route("/progress", methods=["GET"])
+def sync_progress():
+    """Get sync progress"""
+    return jsonify({"success": True, "data": dict(_sync_progress)})
+
+
+@sync_bp.route("", methods=["POST"])
+def start_sync():
+    """Trigger data sync (async background) with progress tracking"""
+    if _sync_progress["running"]:
+        return jsonify({"error": "同步正在进行中，请稍候"}), 409
+    _sync_progress.update({"running": True, "current": 0, "total": 0,
+                            "success": 0, "failed": 0, "message": "", "last_error": None})
+
+    def _run():
+        try:
+            from core.sync import daily_sync
+            daily_sync(verbose=False, progress_callback=_progress_callback)
+            _sync_progress["message"] = "同步完成"
+        except Exception as e:
+            _sync_progress["last_error"] = str(e)
+            _sync_progress["message"] = f"同步失败: {e}"
+        finally:
+            _sync_progress["running"] = False
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return jsonify({"status": "started", "message": "数据同步已启动"})
 
 
 @sync_bp.route("/recalc_all_scores", methods=["GET"])
