@@ -778,7 +778,8 @@ async function loadStrategyTab(container) {
 
     let html = `<div class="panel">
         <div class="input-row">
-            <button class="btn btn-primary" onclick="startMining()">挖掘新策略</button>
+            <button id="mineBtn" class="btn btn-primary" onclick="toggleMining()">挖掘新策略</button>
+            <button id="resetMineBtn" class="btn" onclick="resetMining()" style="display:none">重置</button>
             <span id="miningStatus"></span>
             <span class="text-muted" style="margin-left:auto">
                 共 <span style="color:var(--accent)">${rules.length}</span> 条 ·
@@ -805,20 +806,55 @@ async function deleteRule(id) {
     loadTab('strategy');
 }
 
-async function startMining() {
+let miningActive = false;
+
+async function toggleMining() {
+    if (miningActive) {
+        await fetchJSON(API + '/strategy/mine/stop', { method: 'POST' });
+        document.getElementById('miningStatus').innerHTML = '<span class="badge badge-warning">已请求停止</span>';
+        return;
+    }
     const st = document.getElementById('miningStatus');
     st.innerHTML = '<span class="badge badge-running">挖掘中</span>';
     const resp = await fetchJSON(API + '/strategy/mine', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-    if (resp.success) { pollMining(); }
-    else { st.innerHTML = '<span class="badge badge-error">启动失败</span>'; }
+    if (resp.success) {
+        miningActive = true;
+        updateMiningButton();
+        pollMining();
+    } else {
+        st.innerHTML = '<span class="badge badge-error">启动失败: '+(resp.error||'')+'</span>';
+    }
 }
 
 async function pollMining() {
     const st = document.getElementById('miningStatus');
     const resp = await fetchJSON(API + '/strategy/mine/status');
-    if (resp.data.running) { st.innerHTML = '<span class="badge badge-running">挖掘中</span>'; setTimeout(pollMining, 3000); }
-    else if (resp.data.progress === 'error') { st.innerHTML = '<span class="badge badge-error">错误: '+(resp.data.result||'')+'</span>'; }
-    else { st.innerHTML = '<span class="badge badge-done">完成 '+(resp.data.result?resp.data.result.length:0)+' 条</span>'; loadTab('strategy'); }
+    if (resp.data.running) {
+        st.innerHTML = '<span class="badge badge-running">挖掘中</span>';
+        setTimeout(pollMining, 3000);
+    } else if (resp.data.progress === 'error') {
+        st.innerHTML = '<span class="badge badge-error">错误: '+(resp.data.result||'')+'</span>';
+        miningActive = false; updateMiningButton();
+    } else {
+        const count = resp.data.result ? resp.data.result.length : 0;
+        st.innerHTML = '<span class="badge badge-done">完成 '+count+' 条</span>';
+        miningActive = false; updateMiningButton();
+        loadTab('strategy');
+    }
+}
+
+async function resetMining() {
+    await fetchJSON(API + '/strategy/mine/reset', { method: 'POST' });
+    miningActive = false;
+    updateMiningButton();
+    document.getElementById('miningStatus').textContent = '';
+}
+
+function updateMiningButton() {
+    const btn = document.getElementById('mineBtn');
+    btn.textContent = miningActive ? '停止挖掘' : '挖掘新策略';
+    btn.className = miningActive ? 'btn btn-danger' : 'btn btn-primary';
+    document.getElementById('resetMineBtn').style.display = miningActive ? 'none' : '';
 }
 
 async function viewRuleTrades(ruleId, ruleName) {

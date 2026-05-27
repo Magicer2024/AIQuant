@@ -15,6 +15,7 @@ from core.db import get_conn
 from config.settings import MINING, BACKTEST
 from strategy.factor_lib import FACTOR_REGISTRY, compute_all_factors
 from strategy.rules_store import save_rule
+from strategy.mining_state import get_mining_status
 from qlib_engine.strategy_adapter import BacktestConfig, backtest_single_rule
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,17 @@ def mine_strategies(
     results = []
     total = len(candidates)
     for i, rule in enumerate(candidates):
+        if get_mining_status().get("stop_requested"):
+            logger.info("Stop requested, saving partial results...")
+            if results:
+                results.sort(key=lambda r: r["fitness"], reverse=True)
+                for r in results[:MINING["top_n_rules"]]:
+                    try:
+                        save_rule(r)
+                    except Exception:
+                        pass
+            break
+
         signals = _generate_signals_for_rule(rule, factor_matrix, trade_date)
         if len(signals) < MINING["min_trades"]:
             continue

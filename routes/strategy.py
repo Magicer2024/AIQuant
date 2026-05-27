@@ -6,6 +6,7 @@ import threading
 from flask import Blueprint, request, jsonify
 from strategy.rules_store import list_rules, get_rule, toggle_active, delete_rule
 from backtest.trade_store import get_rule_trades
+from strategy.mining_state import get_mining_status, request_stop
 
 strategy_bp = Blueprint("strategy", __name__, url_prefix="/api/strategy")
 
@@ -25,9 +26,6 @@ def _sanitize(obj):
     if isinstance(obj, list):
         return [_sanitize(v) for v in obj]
     return obj
-
-
-_mining_status = {"running": False, "progress": None, "result": None}
 
 
 @strategy_bp.route("/rules", methods=["GET"])
@@ -76,8 +74,8 @@ def rule_trades(rule_id: int):
 @strategy_bp.route("/mine", methods=["POST"])
 def start_mining():
     """触发策略挖掘 POST /api/strategy/mine"""
-    global _mining_status
-    if _mining_status["running"]:
+    status = get_mining_status()
+    if status["running"]:
         return jsonify({"success": False, "data": None, "error": "Mining already in progress"}), 409
 
     body = request.get_json(silent=True) or {}
@@ -85,16 +83,15 @@ def start_mining():
     if not trade_date:
         return jsonify({"success": False, "data": None, "error": "No trade_date available"}), 400
 
-    _mining_status = {"running": True, "progress": None, "result": None}
+    status.update({"running": True, "progress": None, "result": None, "stop_requested": False})
 
     def _run():
-        global _mining_status
         try:
             from strategy.miner import mine_strategies
             saved = mine_strategies(trade_date)
-            _mining_status = {"running": False, "progress": "done", "result": saved}
+            status.update({"running": False, "progress": "done", "result": saved, "stop_requested": False})
         except Exception as e:
-            _mining_status = {"running": False, "progress": "error", "result": str(e)}
+            status.update({"running": False, "progress": "error", "result": str(e), "stop_requested": False})
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"success": True, "data": {"status": "started", "trade_date": trade_date}, "error": None}), 202
@@ -103,7 +100,25 @@ def start_mining():
 @strategy_bp.route("/mine/status", methods=["GET"])
 def mining_status():
     """查询挖掘进度 GET /api/strategy/mine/status"""
-    return jsonify({"success": True, "data": _mining_status, "error": None})
+    return jsonify({"success": True, "data": dict(get_mining_status()), "error": None})
+
+
+@strategy_bp.route("/mine/stop", methods=["POST"])
+def stop_mining():
+    """请求停止策略挖掘（幂等） POST /api/strategy/mine/stop"""
+    status = get_mining_status()
+    if not status["running"]:
+        return jsonify({"success": True, "message": "No mining in progress"})
+    request_stop()
+    return jsonify({"success": True, "message": "Stop requested"})
+
+
+@strategy_bp.route("/mine/reset", methods=["POST"])
+def reset_mining():
+    """重置挖掘状态 POST /api/strategy/mine/reset"""
+    status = get_mining_status()
+    status.update({"running": False, "progress": None, "result": None, "stop_requested": False})
+    return jsonify({"success": True, "message": "Mining status reset"})
 
 
 def _get_latest_trade_date() -> str:
