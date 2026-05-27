@@ -60,9 +60,12 @@ def start_sync():
 
     def _run():
         try:
-            from core.sync import daily_sync
+            from core.sync import daily_sync, _sync_stats
             daily_sync(verbose=False, progress_callback=_progress_callback)
-            _sync_progress["message"] = "同步完成"
+            _sync_progress["message"] = (
+                f"同步完成: 成功{_sync_stats['success']} 失败{_sync_stats['failed']} "
+                f"跳过(ST:{_sync_stats['skipped_st']} 北交所:{_sync_stats['skipped_bse']})"
+            )
         except Exception as e:
             _sync_progress["last_error"] = str(e)
             _sync_progress["message"] = f"同步失败: {e}"

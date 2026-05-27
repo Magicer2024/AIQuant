@@ -114,14 +114,24 @@ def is_after_market_close() -> bool:
 
 
 # 过滤规则
+_sync_stats = {
+    "total": 0,
+    "success": 0,
+    "failed": 0,
+    "skipped_bse": 0,
+    "skipped_st": 0,
+}
+
+
 def _should_skip(code: str, name: str) -> bool:
-    """跳过 ST、退市、北交所（baostock 不支持）"""
+    """跳过 ST、退市、北交所（baostock 不支持）。同时递增 _sync_stats。"""
     if not code or not name:
         return True
     if "ST" in name.upper() or "退" in name or "*" in name:
+        _sync_stats["skipped_st"] += 1
         return True
-    # 跳过北交所股票（baostock 不支持）
     if code.startswith(("430", "830", "870", "920")):
+        _sync_stats["skipped_bse"] += 1
         return True
     return False
 
@@ -651,6 +661,10 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
 
     stocks = list(zip(stocks_df["code"], stocks_df["name"]))
 
+    # 重置跳过统计
+    _sync_stats.update({"total": len(stocks), "success": 0, "failed": 0,
+                        "skipped_bse": 0, "skipped_st": 0})
+
     # 确定增量日期范围
     today = date.today()
     latest = get_latest_date_all()
@@ -816,11 +830,13 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
 
             if synced_ok:
                 success_n += 1
+                _sync_stats["success"] = success_n
                 synced_codes.add(code)
                 if len(synced_codes) % 10 == 0:
                     _save_sync_cache(start_date, end_date, synced_codes)
             else:
                 failed_n += 1
+                _sync_stats["failed"] = failed_n
                 if verbose and failed_n % 100 == 0:
                     print(f"\n  [{code}] 所有数据源均失败")
     finally:
