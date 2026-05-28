@@ -91,6 +91,23 @@ def stock_factors(code: str):
         return jsonify({"success": True, "data": _sanitize(data), "error": None})
 
 
+@scoring_bp.route("/stock/<code>/history", methods=["GET"])
+def stock_score_history(code: str):
+    """获取单股打分历史 GET /api/scoring/stock/000001/history?days=30"""
+    days = request.args.get("days", "30")
+    if days not in ("7", "30", "60", "90"):
+        days = "30"
+
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT trade_date, score, rule_name
+            FROM stock_score
+            WHERE code = ? AND trade_date >= date('now', ?)
+            ORDER BY trade_date ASC
+        """, (code, f"-{days} days")).fetchall()
+        return jsonify({"success": True, "data": [dict(r) for r in rows], "error": None})
+
+
 @scoring_bp.route("/kline/<code>", methods=["GET"])
 def kline_data(code: str):
     """获取 K 线数据（含回测买卖点标注）GET /api/scoring/kline/000001?start=2024-01-01&end=2024-12-31&result_id=1"""

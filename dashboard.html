@@ -569,7 +569,8 @@ function renderScoreTable(data) {
         const cls = r.score >= 80 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
         html += `<tr>
             <td style="color:var(--text-muted);width:40px">${i + 1}</td>
-            <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
+            <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span>
+                <span style="cursor:pointer;margin-left:4px;font-size:12px" onclick="showScoreHistory('${r.code}')" title="查看趋势">📈</span></td>
             <td>${r.name || '-'}</td>
             <td class="${cls}">${r.score}</td>
             <td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.rule_name||'').replace(/"/g,'&quot;')}">${r.rule_name || '-'}</td></tr>`;
@@ -1119,6 +1120,64 @@ function showCompareModal(results) {
 document.addEventListener('change', e => {
     if (e.target.classList.contains('compare-check')) updateCompareButton();
 });
+
+let scoreChart = null;
+
+async function showScoreHistory(code) {
+    const days = document.getElementById('historyDays')?.value || '30';
+    const resp = await fetchJSON(API + `/scoring/stock/${code}/history?days=${days}`);
+
+    const modalHtml = `
+        <div>
+            <select id="historyDays" onchange="showScoreHistory('${code}')" style="margin-bottom:12px;">
+                <option value="7" ${days==='7'?'selected':''}>近7天</option>
+                <option value="30" ${days==='30'?'selected':''}>近30天</option>
+                <option value="60" ${days==='60'?'selected':''}>近60天</option>
+                <option value="90" ${days==='90'?'selected':''}>近90天</option>
+            </select>
+            <div id="historyChart" style="width:100%;height:350px;"></div>
+        </div>`;
+
+    showModal(code + ' 打分趋势', modalHtml);
+
+    if (!resp.data || resp.data.length < 2) {
+        document.getElementById('historyChart').innerHTML =
+            '<div style="text-align:center;padding:60px;color:var(--text-secondary);">数据不足</div>';
+        return;
+    }
+
+    const byRule = {};
+    const allDates = new Set();
+    resp.data.forEach(d => {
+        if (!byRule[d.rule_name]) byRule[d.rule_name] = {};
+        byRule[d.rule_name][d.trade_date] = d.score;
+        allDates.add(d.trade_date);
+    });
+
+    const dates = Array.from(allDates).sort();
+    const colors = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4'];
+
+    const series = Object.entries(byRule).map(([rule, dateMap], idx) => ({
+        name: rule,
+        type: 'line',
+        smooth: true,
+        data: dates.map(d => dateMap[d] ?? null),
+        lineStyle: { color: colors[idx % colors.length] },
+    }));
+
+    const xLabels = dates.map(d => parseInt(days) <= 7 ? d.slice(5) : d);
+
+    scoreChart = echarts.init(document.getElementById('historyChart'));
+    scoreChart.setOption({
+        tooltip: { trigger: 'axis' },
+        toolbox: { feature: { saveAsImage: { title: '下载' } } },
+        xAxis: { type: 'category', data: xLabels, axisLabel: { rotate: 45, fontSize: 10 } },
+        yAxis: { type: 'value', name: '分' },
+        series: series,
+        grid: { left: 50, right: 20, top: 30, bottom: 60 },
+    });
+    window.addEventListener('resize', () => scoreChart?.resize());
+}
 
 function showModal(title, bodyHtml) {
     let modal = document.getElementById('compareModal');
