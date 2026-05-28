@@ -100,6 +100,28 @@ def backtest_status():
     return jsonify({"success": True, "data": _backtest_status, "error": None})
 
 
+@backtest_bp.route("/compare", methods=["GET"])
+def compare_results():
+    """对比多个回测结果 GET /api/backtest/compare?ids=1,2,3"""
+    ids_str = request.args.get("ids", "")
+    results = []
+    for rid_str in ids_str.split(","):
+        rid_str = rid_str.strip()
+        if not rid_str:
+            continue
+        try:
+            rid = int(rid_str)
+        except ValueError:
+            continue
+        detail = build_result_detail(rid)
+        if detail:
+            summary = dict(detail["summary"])
+            summary["result_id"] = rid
+            summary["rule_name"] = detail.get("rule_name", "")
+            results.append(summary)
+    return jsonify({"success": True, "data": _sanitize(results), "error": None})
+
+
 @backtest_bp.route("/results", methods=["GET"])
 def results_list():
     """回测结果列表 GET /api/backtest/results"""
