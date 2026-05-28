@@ -497,6 +497,7 @@ async function loadTab(tab) {
 async function loadScoresTab(container) {
     const resp = await fetchJSON(API + '/scoring/daily');
     const data = resp.data || [];
+    _scoreData = data;
     const latestDate = data.length > 0 ? data[0].trade_date : (resp.date || '');
     const hint = data.length === 0
         ? '<div class="empty-state">暂无打分数据<br><span style="color:var(--text-muted)">点击「同步并刷新」获取最新数据</span></div>'
@@ -506,6 +507,10 @@ async function loadScoresTab(container) {
         <div class="input-row">
             <span>日期</span>
             <input type="date" id="scoreDate" value="${latestDate}" onchange="refreshScores()">
+            <span>搜索</span>
+            <input type="text" id="stockSearch" placeholder="代码或名称" oninput="debounceFilter()" style="width:120px">
+            <span>最低分</span>
+            <input type="number" id="minScore" value="0" step="1" min="0" onchange="filterScores()" style="width:70px">
             <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
             <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
             <span id="syncStatus"></span>
@@ -522,8 +527,6 @@ async function loadScoresTab(container) {
         </div>`;
 
     if (data.length > 0) {
-        // Top stats
-        const top3 = data.slice(0, 3), bottom3 = data.slice(-3).reverse();
         const avgScore = (data.reduce((s, r) => s + r.score, 0) / data.length).toFixed(1);
         html += `<div class="metrics-row">
             <div class="metric-card">
@@ -543,20 +546,7 @@ async function loadScoresTab(container) {
                 <div class="lbl">最低分 · ${data[data.length-1].code}</div>
             </div>
         </div>`;
-
-        html += `<div class="table-wrapper"><table>
-            <thead><tr><th>#</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th></tr></thead>
-            <tbody>`;
-        data.forEach((r, i) => {
-            const cls = r.score >= 80 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
-            html += `<tr>
-                <td style="color:var(--text-muted);width:40px">${i + 1}</td>
-                <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
-                <td>${r.name || '-'}</td>
-                <td class="${cls}">${r.score}</td>
-                <td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.rule_name||'').replace(/"/g,'&quot;')}">${r.rule_name || '-'}</td></tr>`;
-        });
-        html += `</tbody></table></div>`;
+        html += `<div id="scoreTableContainer"></div>`;
     } else {
         html += hint;
     }
@@ -564,9 +554,53 @@ async function loadScoresTab(container) {
     container.innerHTML = html;
     document.getElementById('last-update').textContent = latestDate ? '最新打分 · ' + latestDate : '暂无数据';
     checkSyncStatus();
+    if (data.length > 0) renderScoreTable(data);
 }
 
 function refreshScores() { loadTab('scores'); }
+
+function renderScoreTable(data) {
+    const container = document.getElementById('scoreTableContainer');
+    if (!container) return;
+    let html = `<div class="table-wrapper"><table>
+        <thead><tr><th>#</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th></tr></thead>
+        <tbody>`;
+    data.forEach((r, i) => {
+        const cls = r.score >= 80 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
+        html += `<tr>
+            <td style="color:var(--text-muted);width:40px">${i + 1}</td>
+            <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
+            <td>${r.name || '-'}</td>
+            <td class="${cls}">${r.score}</td>
+            <td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.rule_name||'').replace(/"/g,'&quot;')}">${r.rule_name || '-'}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+    container.innerHTML = html;
+}
+
+let _scoreData = [];
+let _filterTimer = null;
+
+function debounceFilter() {
+    clearTimeout(_filterTimer);
+    _filterTimer = setTimeout(filterScores, 300);
+}
+
+function filterScores() {
+    const query = (document.getElementById('stockSearch')?.value || '').toLowerCase();
+    const minScore = parseInt(document.getElementById('minScore')?.value || '0');
+    let filtered = _scoreData;
+    if (query) {
+        filtered = filtered.filter(r =>
+            (r.code || '').toLowerCase().includes(query) ||
+            (r.name || '').toLowerCase().includes(query));
+    }
+    if (minScore > 0) {
+        filtered = filtered.filter(r => (r.score || 0) >= minScore);
+    }
+    document.getElementById('scoreCount').textContent = filtered.length + ' / ' + _scoreData.length + ' 只股票';
+    renderScoreTable(filtered);
+}
 
 async function checkSyncStatus() {
     try {
