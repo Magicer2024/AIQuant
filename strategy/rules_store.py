@@ -194,4 +194,6 @@ def rollback_rule(rule_id: int, version: int) -> bool:
              ver.get("win_rate", 0), ver.get("sharpe_ratio", 0),
              ver.get("max_drawdown", 0),
              rule_id))
-        return True
+    # Save version for the rolled-back state
+    _save_rule_version_internal(rule_id)
+    return True
