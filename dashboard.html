@@ -775,6 +775,7 @@ function renderStrategyTable(rules) {
             html += `<tr>
                 <td style="color:var(--accent);font-weight:600">#${r.id}</td>
                 <td><span class="toggle ${r.is_active?'on':''}" onclick="toggleRule(${r.id},this)"></span></td>
+                <td><button class="btn btn-sm" onclick="showVersions(${r.id})">版本</button></td>
                 <td><span class="code-link" onclick="viewRuleTrades(${r.id},'${(r.rule_name||'').replace(/'/g,"\'")}')">${r.rule_name}</span></td>
                 <td><span class="badge badge-info">${r.rule_type}</span></td>
                 <td style="font-weight:600">${(r.fitness||0).toFixed(4)}</td>
@@ -839,6 +840,34 @@ async function deleteRule(id) {
     if (!confirm('确定删除此策略?')) return;
     await fetchJSON(API + '/strategy/rules/' + id, {method:'DELETE'});
     loadTab('strategy');
+}
+
+async function showVersions(ruleId) {
+    const resp = await fetchJSON(API + '/strategy/rules/' + ruleId + '/versions');
+    const versions = resp.data || [];
+    let html = '<table><thead><tr><th>版本</th><th>Fitness</th><th>年化收益</th><th>胜率</th><th>时间</th><th>操作</th></tr></thead><tbody>';
+    versions.forEach(v => {
+        html += `<tr>
+            <td>v${v.version}</td>
+            <td>${v.fitness != null ? v.fitness.toFixed(4) : '--'}</td>
+            <td>${v.annual_return != null ? v.annual_return.toFixed(1)+'%' : '--'}</td>
+            <td>${v.win_rate != null ? v.win_rate.toFixed(1)+'%' : '--'}</td>
+            <td>${v.created_at || ''}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="rollbackRule(${ruleId}, ${v.version})">回滚</button></td>
+        </tr>`;
+    });
+    html += '</tbody></table>';
+    if (versions.length === 0) html = '<div style="text-align:center;padding:40px;color:var(--text-secondary)">暂无历史版本</div>';
+    showModal('策略版本历史', html);
+}
+
+async function rollbackRule(ruleId, version) {
+    if (!confirm('确认回滚到 v' + version + '？当前版本会被保存为历史。')) return;
+    const resp = await fetchJSON(API + '/strategy/rules/' + ruleId + '/rollback/' + version, { method: 'POST' });
+    if (resp.success) {
+        document.getElementById('compareModal').style.display = 'none';
+        loadTab('strategy');
+    }
 }
 
 let miningActive = false;

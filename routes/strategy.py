@@ -4,7 +4,10 @@ routes/strategy.py —— 策略管理 API
 import math
 import threading
 from flask import Blueprint, request, jsonify
-from strategy.rules_store import list_rules, get_rule, toggle_active, delete_rule
+from strategy.rules_store import (
+    list_rules, get_rule, toggle_active, delete_rule,
+    get_rule_versions, rollback_rule as do_rollback,
+)
 from backtest.trade_store import get_rule_trades
 from strategy.mining_state import get_mining_status, request_stop
 
@@ -119,6 +122,23 @@ def reset_mining():
     status = get_mining_status()
     status.update({"running": False, "progress": None, "result": None, "stop_requested": False})
     return jsonify({"success": True, "message": "Mining status reset"})
+
+
+@strategy_bp.route("/rules/<int:rule_id>/versions", methods=["GET"])
+def rule_versions(rule_id):
+    """获取规则历史版本 GET /api/strategy/rules/1/versions"""
+    versions = get_rule_versions(rule_id)
+    return jsonify({"success": True, "data": _sanitize(versions), "error": None})
+
+
+@strategy_bp.route("/rules/<int:rule_id>/rollback/<int:version>", methods=["POST"])
+def rollback_rule_endpoint(rule_id, version):
+    """回滚规则到指定版本 POST /api/strategy/rules/1/rollback/2"""
+    ok = do_rollback(rule_id, version)
+    if not ok:
+        return jsonify({"success": False, "data": None, "error": "Version not found"}), 404
+    return jsonify({"success": True, "data": None, "error": None,
+                    "message": f"Rolled back to v{version}"})
 
 
 def _get_latest_trade_date() -> str:

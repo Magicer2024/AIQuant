@@ -395,6 +395,24 @@ CREATE INDEX IF NOT EXISTS idx_rules_type ON strategy_rules(rule_type);
 CREATE INDEX IF NOT EXISTS idx_rules_active ON strategy_rules(is_active);
 CREATE INDEX IF NOT EXISTS idx_rules_fitness ON strategy_rules(fitness DESC);
 
+CREATE TABLE IF NOT EXISTS strategy_rule_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    conditions TEXT,
+    sell_conditions TEXT,
+    holding_min INTEGER,
+    holding_max INTEGER,
+    fitness REAL,
+    annual_return REAL,
+    win_rate REAL,
+    sharpe_ratio REAL,
+    max_drawdown REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (rule_id) REFERENCES strategy_rules(id)
+);
+CREATE INDEX IF NOT EXISTS idx_versions_rule ON strategy_rule_versions(rule_id);
+
 -- 每日信号触发日志
 CREATE TABLE IF NOT EXISTS strategy_signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
