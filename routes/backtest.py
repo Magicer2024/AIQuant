@@ -46,6 +46,9 @@ def start_backtest():
     rule_id = body.get("rule_id")
     start_date = body.get("start_date", "2024-01-01")
     end_date = body.get("end_date", date.today().strftime("%Y-%m-%d"))
+    stop_loss = max(min(body.get("stop_loss", -0.08), 0), -0.50)
+    take_profit = max(min(body.get("take_profit", 0.20), 1.00), 0)
+    holding_max = max(min(body.get("holding_max", 20), 100), 1)
 
     rule = get_rule(int(rule_id)) if rule_id else None
     if not rule:
@@ -75,7 +78,9 @@ def start_backtest():
                 start_date=start_date,
                 end_date=end_date,
                 sell_conditions_json=sell_conds,
-                holding_max=rule.get("holding_max", 20),
+                holding_max=holding_max,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
                 save=True,
                 progress_callback=_progress,
             )

@@ -15,8 +15,11 @@ from core.db import get_conn
 from strategy.factor_lib import compute_all_factors
 from backtest.engine import (
     _evaluate_conditions, _evaluate_cross_conditions,
-    DEFAULT_STOP_LOSS, DEFAULT_TAKE_PROFIT,
 )
+
+# 默认退出阈值
+_BSL = -0.08
+_BTP = 0.20
 
 # 回测参数
 START_DATE = "2024-01-01"
@@ -157,10 +160,10 @@ def generate_signals_for_rule(
 
                 pnl_pct = (close_px / entry_price) - 1
 
-                if pnl_pct <= DEFAULT_STOP_LOSS:
+                if pnl_pct <= _BSL:
                     exit_date, exit_price, exit_reason = d, close_px, "stop_loss"
                     break
-                if pnl_pct >= DEFAULT_TAKE_PROFIT:
+                if pnl_pct >= _BTP:
                     exit_date, exit_price, exit_reason = d, close_px, "take_profit"
                     break
                 if holding_days >= holding_max:

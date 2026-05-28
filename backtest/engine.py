@@ -17,11 +17,6 @@ from config.settings import BACKTEST
 
 logger = logging.getLogger(__name__)
 
-# 默认退出阈值
-DEFAULT_STOP_LOSS = -0.08
-DEFAULT_TAKE_PROFIT = 0.20
-
-
 def run_backtest(
     rule_name: str,
     rule_id: str,
@@ -30,6 +25,8 @@ def run_backtest(
     end_date: str,
     sell_conditions_json: str = None,
     holding_max: int = 20,
+    stop_loss: float = -0.08,
+    take_profit: float = 0.20,
     save: bool = True,
     progress_callback=None,
 ) -> dict:
@@ -41,6 +38,8 @@ def run_backtest(
         conditions_json, start_date, end_date,
         sell_conditions_json=sell_conditions_json,
         holding_max=holding_max,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
         progress_callback=progress_callback,
     )
     if not signals:
@@ -190,6 +189,8 @@ def _generate_backtest_signals(
     end_date: str,
     sell_conditions_json: str = None,
     holding_max: int = 20,
+    stop_loss: float = -0.08,
+    take_profit: float = 0.20,
     progress_callback=None,
 ) -> List[dict]:
     """生成买卖信号配对。
@@ -310,14 +311,14 @@ def _generate_backtest_signals(
                 pnl_pct = (close_px / entry_price) - 1
 
                 # 1. 检查固定止损
-                if pnl_pct <= DEFAULT_STOP_LOSS:
+                if pnl_pct <= stop_loss:
                     exit_date = d
                     exit_price = close_px
                     exit_reason = "stop_loss"
                     break
 
                 # 2. 检查固定止盈
-                if pnl_pct >= DEFAULT_TAKE_PROFIT:
+                if pnl_pct >= take_profit:
                     exit_date = d
                     exit_price = close_px
                     exit_reason = "take_profit"

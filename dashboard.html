@@ -896,6 +896,9 @@ async function loadBacktestTab(container) {
             <span>策略</span><select id="btRule">${opts}</select>
             <span>起始</span><input type="date" id="btStart" value="2024-01-01">
             <span>结束</span><input type="date" id="btEnd" value="${new Date().toISOString().split('T')[0]}">
+            <span>止损(%)</span><input type="number" id="btStopLoss" value="${loadBTSetting('btStopLoss', -8)}" step="0.1" min="-50" max="0" style="width:70px">
+            <span>止盈(%)</span><input type="number" id="btTakeProfit" value="${loadBTSetting('btTakeProfit', 20)}" step="0.1" min="0" max="100" style="width:70px">
+            <span>持仓(天)</span><input type="number" id="btHolding" value="${loadBTSetting('btHolding', 20)}" step="1" min="1" max="100" style="width:60px">
             <button class="btn btn-primary" onclick="startBacktest()">开始回测</button>
             <span id="btStatus"></span>
         </div>
@@ -935,12 +938,25 @@ async function loadBacktestTab(container) {
     }
 }
 
+function loadBTSetting(key, defaultVal) {
+    try { const v = localStorage.getItem(key); return v !== null ? v : defaultVal; }
+    catch(e) { return defaultVal; }
+}
+function saveBTSetting(key, val) { try { localStorage.setItem(key, val); } catch(e) {} }
+
 async function startBacktest() {
     const ruleId = document.getElementById('btRule').value;
     const start = document.getElementById('btStart').value, end = document.getElementById('btEnd').value;
+    const stopLoss = parseFloat(document.getElementById('btStopLoss').value) || -8;
+    const takeProfit = parseFloat(document.getElementById('btTakeProfit').value) || 20;
+    const holdingMax = parseInt(document.getElementById('btHolding').value) || 20;
+    saveBTSetting('btStopLoss', stopLoss); saveBTSetting('btTakeProfit', takeProfit); saveBTSetting('btHolding', holdingMax);
     const st = document.getElementById('btStatus');
     st.innerHTML = '<span class="badge badge-running">回测中</span>';
-    const resp = await fetchJSON(API + '/backtest/run', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule_id:parseInt(ruleId),start_date:start,end_date:end})});
+    const resp = await fetchJSON(API + '/backtest/run', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        rule_id:parseInt(ruleId),start_date:start,end_date:end,
+        stop_loss:stopLoss/100, take_profit:takeProfit/100, holding_max:holdingMax
+    })});
     if (resp.success) { pollBt(0); }
     else { st.innerHTML = '<span class="badge badge-error">'+(resp.error||'')+'</span>'; }
 }
