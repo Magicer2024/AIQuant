@@ -8,9 +8,13 @@ from datetime import datetime, date
 
 from scheduler.state import SYNC_STATUS, SCHEDULER_RUNNING, SCHEDULER_THREAD
 
+_retry_queued = False
+RETRY_DELAY_SECONDS = 30 * 60
+
 
 def run_sync_blocking():
     """Background thread: run incremental data sync via daily_sync"""
+    global _retry_queued
     try:
         from core.sync import daily_sync, is_trading_day
         from core.db import init_db
@@ -30,12 +34,28 @@ def run_sync_blocking():
             f"成功 {result['success']}，失败 {result['failed']}"
         )
         SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _retry_queued = False
     except Exception as e:
         SYNC_STATUS["last_result"] = f"错误: {e}"
+        if not _retry_queued:
+            _retry_queued = True
+            threading.Thread(target=_schedule_retry, daemon=True).start()
         import traceback
         traceback.print_exc()
     finally:
         SYNC_STATUS["running"] = False
+
+
+def _schedule_retry():
+    """30分钟后重试一次"""
+    import time as _time
+    global _retry_queued
+    _time.sleep(RETRY_DELAY_SECONDS)
+    if SYNC_STATUS["running"]:
+        return
+    SYNC_STATUS["running"] = True
+    run_sync_blocking()
+    _retry_queued = False
 
 
 def start_scheduler():

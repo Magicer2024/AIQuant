@@ -280,18 +280,27 @@ def _format_code_for_baostock(code: str) -> str:
 
 def sync_one_stock_with_timeout(code: str, start_date: str = HISTORY_START,
                                 end_date: str = None, verbose: bool = False,
-                                auto_login: bool = True, timeout: float = 30.0) -> bool:
-    """带超时的单股票同步，防止网络请求永久阻塞"""
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(sync_one_stock, code, start_date, end_date, verbose, auto_login)
-        try:
-            return fut.result(timeout=timeout)
-        except FutureTimeoutError:
-            if verbose:
-                print(f"  [{code}] 超时 ({timeout}s)，跳过")
-            return False
-        except Exception:
-            return False
+                                auto_login: bool = True, timeout: float = 30.0,
+                                max_retries: int = 2) -> bool:
+    """带超时和重试的单股票同步（指数退避 1s, 2s）"""
+    for attempt in range(max_retries + 1):
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(sync_one_stock, code, start_date, end_date, verbose, auto_login)
+            try:
+                ok = fut.result(timeout=timeout)
+                if ok:
+                    return True
+                if attempt < max_retries and verbose:
+                    print(f"  [{code}] 第{attempt+1}次失败，{2**attempt}秒后重试...")
+            except FutureTimeoutError:
+                if attempt < max_retries and verbose:
+                    print(f"  [{code}] 超时({timeout}s)，{2**attempt}秒后重试...")
+            except Exception:
+                if attempt < max_retries and verbose:
+                    print(f"  [{code}] 异常，{2**attempt}秒后重试...")
+        if attempt < max_retries:
+            time.sleep(2 ** attempt)
+    return False
 
 
 def sync_one_stock(code: str, start_date: str = HISTORY_START,
