@@ -428,6 +428,42 @@
             to { opacity: 1; transform: translateY(0); }
         }
         .tab-content { animation: fade-up 0.3s ease-out; }
+
+        /* ── Toast notifications ── */
+        .toast-container {
+            position: fixed; top: 16px; right: 16px; z-index: 9999;
+            display: flex; flex-direction: column; gap: 8px;
+            pointer-events: none;
+        }
+        .toast {
+            padding: 12px 20px; border-radius: 6px; color: #fff; font-size: 14px;
+            opacity: 0; transform: translateX(20px);
+            transition: opacity 0.3s, transform 0.3s;
+            pointer-events: auto; max-width: 360px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        }
+        .toast.show { opacity: 1; transform: translateX(0); }
+        .toast-success { background: #10b981; }
+        .toast-error   { background: #ef4444; }
+        .toast-warning { background: #f59e0b; color: #1a1a1a; }
+        .toast-info    { background: #3b82f6; }
+
+        /* ── Skeleton loading ── */
+        .skeleton {
+            background: linear-gradient(90deg, var(--bg-panel) 25%, var(--bg-panel-hover) 50%, var(--bg-panel) 75%);
+            background-size: 200% 100%;
+            animation: skeleton-loading 1.5s infinite;
+            border-radius: 4px;
+        }
+        @keyframes skeleton-loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        .skeleton-row { display: flex; gap: 16px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+        .skeleton-cell { height: 20px; border-radius: 4px; background: var(--bg-panel-hover); }
+        .skeleton-cell.w80  { width: 80px; }
+        .skeleton-cell.w120 { width: 120px; }
+        .skeleton-cell.w200 { width: 200px; }
     </style>
 </head>
 <body>
@@ -466,6 +502,53 @@ let currentTab = 'scores';
 let klineChart = null;
 let pendingBacktestRuleId = null;
 
+// ─── Toast notification system ───
+var Toast = {
+    container: null,
+
+    init: function() {
+        if (!this.container) {
+            this.container = document.createElement('div');
+            this.container.className = 'toast-container';
+            document.body.appendChild(this.container);
+        }
+    },
+
+    show: function(message, type, duration) {
+        type = type || 'info';
+        duration = duration || 3000;
+        this.init();
+        var icons = { success: '&#x2713;', error: '&#x2717;', warning: '&#x26A0;', info: '&#x2139;' };
+        var toast = document.createElement('div');
+        toast.className = 'toast toast-' + type;
+        toast.innerHTML = '<span class="toast-icon">' + (icons[type] || icons.info) + '</span> <span>' + message + '</span>';
+        this.container.appendChild(toast);
+        var self = this;
+        requestAnimationFrame(function() { toast.classList.add('show'); });
+        setTimeout(function() {
+            toast.classList.remove('show');
+            setTimeout(function() { toast.remove(); }, 300);
+        }, duration);
+    }
+};
+
+function showToast(message, type) { Toast.show(message, type); }
+
+// ─── Skeleton loading ───
+function showSkeleton(container, rowCount) {
+    rowCount = rowCount || 10;
+    var cols = ['w80', 'w120', 'w200', 'w80', 'w120'];
+    var html = '';
+    for (var i = 0; i < rowCount; i++) {
+        html += '<div class="skeleton-row">';
+        for (var j = 0; j < cols.length; j++) {
+            html += '<div class="skeleton-cell ' + cols[j] + ' skeleton"></div>';
+        }
+        html += '</div>';
+    }
+    container.innerHTML = html;
+}
+
 async function fetchJSON(url, opts) {
     const resp = await fetch(url, opts);
     if (!resp.ok) throw new Error(resp.statusText);
@@ -482,13 +565,14 @@ function switchTab(tab) {
 
 async function loadTab(tab) {
     const c = document.getElementById('content');
-    c.innerHTML = '<div class="empty-state">加载中...</div>';
+    showSkeleton(c, 10);
     try {
         if (tab === 'scores') await loadScoresTab(c);
         else if (tab === 'strategy') await loadStrategyTab(c);
         else if (tab === 'backtest') await loadBacktestTab(c);
         c.firstElementChild?.classList.add('tab-content');
     } catch(e) {
+        showToast('加载失败，请重试', 'error');
         c.innerHTML = '<div class="empty-state" style="color:var(--danger)">加载失败: ' + e.message + '</div>';
     }
 }
@@ -644,6 +728,7 @@ async function pollSyncProgress(onDone) {
                 `同步中: ${p.current}/${p.total}  成功:${p.success}  失败:${p.failed}`;
             if (!p.running) {
                 hideSyncProgress();
+                showToast(p.message || '同步完成', p.last_error ? 'warning' : 'success');
                 if (onDone) onDone(p.message || '同步完成');
             }
         } catch(e) { hideSyncProgress(); if (onDone) onDone(''); }
@@ -667,6 +752,7 @@ async function runSyncOnly() {
         });
     } catch(e) {
         statusEl.textContent = '启动失败: ' + e.message;
+        showToast('同步启动失败: ' + e.message, 'error');
         btn.disabled = false; btn.textContent = '仅同步数据';
     }
 }
@@ -697,8 +783,6 @@ async function syncAndScore() {
         } catch(e2) {}
         btn.disabled = false; btn.textContent = '同步并刷新';
         loadTab('scores');
-    }
-}
     }
 }
 
@@ -839,6 +923,7 @@ async function toggleRule(id, el) {
 async function deleteRule(id) {
     if (!confirm('确定删除此策略?')) return;
     await fetchJSON(API + '/strategy/rules/' + id, {method:'DELETE'});
+    showToast('删除成功', 'success');
     loadTab('strategy');
 }
 
@@ -1097,6 +1182,7 @@ async function viewResult(resultId) {
 async function deleteBacktest(id) {
     if (!confirm('确定删除此回测记录?')) return;
     await fetchJSON(API + '/backtest/results/' + id, {method:'DELETE'});
+    showToast('删除成功', 'success');
     loadTab('backtest');
 }
 
@@ -1247,7 +1333,10 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
         const resp = await fetchJSON(url);
         kdata = (resp.data?.kline || []).map(d => ({ date: d[0], open: d[1], close: d[2], low: d[3], high: d[4], vol: d[5] || 0 }));
         marks = resp.data?.marks || [];
-    } catch(e) { console.error('kline fetch error:', e); }
+    } catch(e) {
+        console.error('kline fetch error:', e);
+        showToast('K线数据获取失败', 'error');
+    }
 
     if (kdata.length === 0) {
         document.getElementById('klineTradeInfo').innerHTML = '<p class="text-muted">无K线数据</p>';
