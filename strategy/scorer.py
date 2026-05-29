@@ -4,6 +4,7 @@ scorer.py —— 每日打分引擎
 加载活跃策略规则 → 计算因子 → 评估条件 → 逐股打分 → 写入 stock_score 表
 """
 import json
+import math
 import pandas as pd
 from datetime import date
 from typing import Dict, List, Optional
@@ -41,42 +42,75 @@ def _load_stock_data(trade_date: str) -> Dict[str, pd.DataFrame]:
     return result
 
 
-def _evaluate_condition(factor_values: Dict[str, float], condition) -> bool:
-    """评估单条规则条件是否满足。condition 为 list 格式：[{factor, operator, threshold}, ...]"""
+def _evaluate_condition(factor_values: Dict[str, float], condition):
+    """评估单条规则条件是否满足，同时计算信号强度。
+
+    condition 为 list 格式：[{factor, operator, threshold}, ...]
+
+    Returns:
+        (passed: bool, strength: float) — passed 表示是否满足所有条件，
+        strength 为 0~1 的连续值，表示因子值超出阈值的程度。
+    """
     if isinstance(condition, list):
+        strengths = []
         for item in condition:
             factor_name = item.get("factor")
             op = item.get("operator")
             threshold = item.get("threshold")
             if factor_name is None or op is None or threshold is None:
-                return False
+                return False, 0.0
             value = factor_values.get(factor_name)
             if value is None:
-                return False
-            if op == ">" and not (value > threshold):
-                return False
-            if op == "<" and not (value < threshold):
-                return False
-            if op == ">=" and not (value >= threshold):
-                return False
-            if op == "<=" and not (value <= threshold):
-                return False
-        return True
+                return False, 0.0
+
+            if op in (">", ">="):
+                if not (value > threshold if op == ">" else value >= threshold):
+                    return False, 0.0
+                denom = max(1.0 - threshold, 0.05)
+                strengths.append((value - threshold) / denom)
+            elif op in ("<", "<="):
+                if not (value < threshold if op == "<" else value <= threshold):
+                    return False, 0.0
+                denom = max(threshold, 0.05)
+                strengths.append((threshold - value) / denom)
+            else:
+                return False, 0.0
+        avg_strength = sum(strengths) / len(strengths) if strengths else 0.0
+        return True, avg_strength
+
     # legacy dict format: {factor_name: {operator: threshold}}
+    strengths = []
     for factor_name, op_dict in condition.items():
         value = factor_values.get(factor_name)
         if value is None:
-            return False
+            return False, 0.0
         for op, threshold in op_dict.items():
-            if op == ">" and not (value > threshold):
-                return False
-            if op == "<" and not (value < threshold):
-                return False
-            if op == ">=" and not (value >= threshold):
-                return False
-            if op == "<=" and not (value <= threshold):
-                return False
-    return True
+            if op in (">", ">="):
+                if not (value > threshold if op == ">" else value >= threshold):
+                    return False, 0.0
+                denom = max(1.0 - threshold, 0.05)
+                strengths.append((value - threshold) / denom)
+            elif op in ("<", "<="):
+                if not (value < threshold if op == "<" else value <= threshold):
+                    return False, 0.0
+                denom = max(threshold, 0.05)
+                strengths.append((threshold - value) / denom)
+            else:
+                return False, 0.0
+    avg_strength = sum(strengths) / len(strengths) if strengths else 0.0
+    return True, avg_strength
+
+
+def _rule_quality(rule: dict) -> float:
+    """计算规则质量分（0~1），综合胜率、夏普比率、适应度。"""
+    win_rate = rule.get("win_rate", 0) or 0
+    sharpe = rule.get("sharpe_ratio", 0) or 0
+    fitness = rule.get("fitness", 0) or 0
+    return (
+        0.5 * (win_rate / 100.0)
+        + 0.3 * min(sharpe / 5.0, 1.0)
+        + 0.2 * min(fitness / 200.0, 1.0)
+    )
 
 
 def score_stocks(trade_date: str, save: bool = True) -> List[dict]:
@@ -118,6 +152,7 @@ def score_stocks(trade_date: str, save: bool = True) -> List[dict]:
         # 逐条规则评估
         best_score = 0.0
         best_rule = None
+        best_strength = 0.0
 
         for rule in rules:
             try:
@@ -128,11 +163,14 @@ def score_stocks(trade_date: str, save: bool = True) -> List[dict]:
             if not conditions:
                 continue
 
-            if _evaluate_condition(factor_row, conditions):
-                score = rule.get("win_rate", 0) or 0
+            passed, strength = _evaluate_condition(factor_row, conditions)
+            if passed:
+                quality = _rule_quality(rule)
+                score = quality * 100.0 / (1.0 + math.exp(-3.0 * (strength - 0.5)))
                 if score > best_score:
                     best_score = score
                     best_rule = rule
+                    best_strength = strength
 
         if best_rule and best_score > 0:
             with get_conn() as conn:
@@ -172,15 +210,28 @@ def _save_scores(trade_date: str, results: List[dict]):
         ])
 
 
-def get_daily_scores(trade_date: str) -> List[dict]:
-    """获取某日打分排名（从 stock_score 表读取）"""
+def get_daily_scores(trade_date: str, page: int = 1, per_page: int = 50) -> List[dict]:
+    """获取某日打分排名（分页）"""
+    per_page = min(per_page, 200)
+    offset = (page - 1) * per_page
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT * FROM stock_score
             WHERE trade_date = ?
             ORDER BY score DESC
-        """, (trade_date,)).fetchall()
+            LIMIT ? OFFSET ?
+        """, (trade_date, per_page, offset)).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_daily_scores_count(trade_date: str) -> int:
+    """获取某日打分总数"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM stock_score WHERE trade_date = ?",
+            (trade_date,)
+        ).fetchone()
+        return row["cnt"]
 
 
 def get_latest_score_date() -> Optional[str]:

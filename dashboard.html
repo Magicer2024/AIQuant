@@ -161,18 +161,10 @@ async function loadTab(tab) {
 
 // ─── Tab 1: Scoring ───
 async function loadScoresTab(container) {
-    const resp = await RequestManager.fetch('scores', API + '/scoring/daily');
-    const data = resp.data || [];
-    _scoreData = data;
-    const latestDate = data.length > 0 ? data[0].trade_date : (resp.date || '');
-    const hint = data.length === 0
-        ? '<div class="empty-state">暂无打分数据<br><span style="color:var(--text-muted)">点击「同步并刷新」获取最新数据</span></div>'
-        : '';
-
-    let html = `<div class="panel">
+    var html = `<div class="panel">
         <div class="input-row">
             <span>日期</span>
-            <input type="date" id="scoreDate" value="${latestDate}" onchange="refreshScores()">
+            <input type="date" id="scoreDate" value="" onchange="refreshScores()">
             <span>搜索</span>
             <input type="text" id="stockSearch" placeholder="代码或名称" oninput="debounceFilter()" style="width:120px">
             <span>最低分</span>
@@ -180,7 +172,7 @@ async function loadScoresTab(container) {
             <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
             <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
             <span id="syncStatus"></span>
-            <span class="text-muted" style="margin-left:auto" id="scoreCount">${data.length} 只股票</span>
+            <span class="text-muted" style="margin-left:auto" id="scoreCount">-- 只股票</span>
         </div>
         <div id="syncProgress" style="display:none; margin-top: 12px;">
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
@@ -190,40 +182,78 @@ async function loadScoresTab(container) {
                 <span id="syncProgressPct" style="font-size:12px; color:var(--text-secondary); white-space:nowrap;">0%</span>
             </div>
             <div id="syncProgressText" style="font-size:12px; color:var(--text-secondary);"></div>
-        </div>`;
-
-    if (data.length > 0) {
-        const avgScore = (data.reduce((s, r) => s + r.score, 0) / data.length).toFixed(1);
-        html += `<div class="metrics-row">
-            <div class="metric-card">
-                <div class="val">${data[0].score}</div>
-                <div class="lbl">最高分 · ${data[0].code}</div>
-            </div>
-            <div class="metric-card">
-                <div class="val">${avgScore}</div>
-                <div class="lbl">平均分 · ${data.length} 只</div>
-            </div>
-            <div class="metric-card">
-                <div class="val">${data.filter(r=>r.score>=80).length}</div>
-                <div class="lbl">≥80 分 · 强势</div>
-            </div>
-            <div class="metric-card">
-                <div class="val" style="color:var(--text-muted)">${data[data.length-1].score}</div>
-                <div class="lbl">最低分 · ${data[data.length-1].code}</div>
-            </div>
-        </div>`;
-        html += `<div id="scoreTableContainer"></div>`;
-    } else {
-        html += hint;
-    }
-    html += `</div>`;
+        </div>
+        <div id="scoresMetrics"></div>
+        <div id="scoreTableContainer"><div class="empty-state">加载中...</div></div>
+        <div id="scorePagination" style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;">
+            <button class="btn btn-sm" id="scorePrevPage" onclick="goScorePage(currentScorePage-1)" disabled>上一页</button>
+            <span id="scorePageInfo" style="font-size:13px;color:var(--text-secondary);">第 1 / 1 页</span>
+            <button class="btn btn-sm" id="scoreNextPage" onclick="goScorePage(currentScorePage+1)" disabled>下一页</button>
+        </div>
+    </div>`;
     container.innerHTML = html;
-    document.getElementById('last-update').textContent = latestDate ? '最新打分 · ' + latestDate : '暂无数据';
     checkSyncStatus();
-    if (data.length > 0) renderScoreTable(data);
+    loadScoresPage(1);
 }
 
-function refreshScores() { loadTab('scores'); }
+function refreshScores() {
+    currentScorePage = 1;
+    loadScoresPage(1);
+}
+
+async function loadScoresPage(page) {
+    page = page || 1;
+    var container = document.getElementById('scoreTableContainer');
+    if (container) showSkeleton(container, 10);
+
+    try {
+        var resp = await RequestManager.fetch('scores',
+            API + '/scoring/daily?page=' + page + '&per_page=' + scorePerPage);
+        _scoreData = resp.data || [];
+        currentScorePage = resp.pagination.page;
+        scoreTotalPages = resp.pagination.pages;
+
+        var latestDate = _scoreData.length > 0 ? _scoreData[0].trade_date : (resp.date || '');
+        var scoreDateEl = document.getElementById('scoreDate');
+        if (scoreDateEl && latestDate) scoreDateEl.value = latestDate;
+        document.getElementById('last-update').textContent = latestDate ? '最新打分 · ' + latestDate : '暂无数据';
+        document.getElementById('scoreCount').textContent = resp.pagination.total + ' 只股票';
+
+        // Update metrics
+        var metricsEl = document.getElementById('scoresMetrics');
+        if (metricsEl && resp.pagination.total > 0) {
+            metricsEl.innerHTML = '<div class="metrics-row">' +
+                '<div class="metric-card"><div class="val">' + _scoreData[0].score + '</div><div class="lbl">本页最高 · ' + _scoreData[0].code + '</div></div>' +
+                '<div class="metric-card"><div class="val">' + resp.pagination.total + '</div><div class="lbl">总计股票数</div></div>' +
+                '<div class="metric-card"><div class="val">' + resp.pagination.pages + '</div><div class="lbl">总页数</div></div>' +
+                '<div class="metric-card"><div class="val" style="color:var(--text-muted)">' + resp.pagination.page + '</div><div class="lbl">当前页</div></div>' +
+                '</div>';
+        } else if (metricsEl) {
+            metricsEl.innerHTML = '<div class="empty-state">暂无打分数据<br><span style="color:var(--text-muted)">点击「同步并刷新」获取最新数据</span></div>';
+        }
+
+        renderScoreTable(_scoreData);
+        updatePaginationUI();
+    } catch(e) {
+        if (e.name !== 'AbortError') {
+            showToast('加载失败: ' + (e.message || '未知错误'), 'error');
+        }
+    }
+}
+
+function goScorePage(page) {
+    if (page < 1 || page > scoreTotalPages) return;
+    loadScoresPage(page);
+}
+
+function updatePaginationUI() {
+    var prevBtn = document.getElementById('scorePrevPage');
+    var nextBtn = document.getElementById('scoreNextPage');
+    var infoEl = document.getElementById('scorePageInfo');
+    if (prevBtn) prevBtn.disabled = currentScorePage <= 1;
+    if (nextBtn) nextBtn.disabled = currentScorePage >= scoreTotalPages;
+    if (infoEl) infoEl.textContent = '第 ' + currentScorePage + ' / ' + scoreTotalPages + ' 页';
+}
 
 function renderScoreTable(data) {
     const container = document.getElementById('scoreTableContainer');
@@ -248,6 +278,10 @@ function renderScoreTable(data) {
 let _scoreData = [];
 let _filterTimer = null;
 
+var currentScorePage = 1;
+var scorePerPage = 50;
+var scoreTotalPages = 1;
+
 function debounceFilter() {
     clearTimeout(_filterTimer);
     _filterTimer = setTimeout(filterScores, 300);
@@ -265,7 +299,7 @@ function filterScores() {
     if (minScore > 0) {
         filtered = filtered.filter(r => (r.score || 0) >= minScore);
     }
-    document.getElementById('scoreCount').textContent = filtered.length + ' / ' + _scoreData.length + ' 只股票';
+    document.getElementById('scoreCount').textContent = '筛选: ' + filtered.length + ' / ' + _scoreData.length + ' (当前页)';
     renderScoreTable(filtered);
 }
 

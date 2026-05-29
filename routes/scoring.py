@@ -5,7 +5,7 @@ import json
 from datetime import date
 from utils.serialization import sanitize_numeric as _sanitize
 from flask import Blueprint, request, jsonify
-from strategy.scorer import score_stocks, get_daily_scores, get_latest_score_date
+from strategy.scorer import score_stocks, get_daily_scores, get_daily_scores_count, get_latest_score_date
 from core.db import get_conn
 
 scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
@@ -13,14 +13,31 @@ scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
 
 @scoring_bp.route("/daily", methods=["GET"])
 def daily_scores():
-    """获取某日打分排名 GET /api/scoring/daily?date=2025-01-15"""
+    """获取某日打分排名（支持分页）GET /api/scoring/daily?date=2025-01-15&page=1&per_page=50"""
     trade_date = request.args.get("date") or get_latest_score_date()
     if not trade_date:
         trade_date = _get_latest_trade_date()
     if not trade_date:
         return jsonify({"success": True, "data": [], "date": None, "error": "No trade date available"})
-    results = get_daily_scores(trade_date)
-    return jsonify({"success": True, "data": _sanitize(results), "date": trade_date, "error": None})
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    per_page = min(per_page, 200)
+
+    results = get_daily_scores(trade_date, page=page, per_page=per_page)
+    total = get_daily_scores_count(trade_date)
+
+    return jsonify({
+        "success": True,
+        "data": _sanitize(results),
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": max(1, (total + per_page - 1) // per_page)
+        },
+        "date": trade_date,
+        "error": None
+    })
 
 
 @scoring_bp.route("/run", methods=["POST"])
