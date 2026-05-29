@@ -2,30 +2,13 @@
 routes/scoring.py —— 打分排名 API
 """
 import json
-import math
 from datetime import date
+from utils.serialization import sanitize_numeric as _sanitize
 from flask import Blueprint, request, jsonify
 from strategy.scorer import score_stocks, get_daily_scores, get_latest_score_date
 from core.db import get_conn
 
 scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
-
-
-def _sanitize(obj):
-    """递归替换 NaN/Inf 为 None，numpy 类型转 Python 原生"""
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if hasattr(obj, "item"):  # numpy scalar → Python native
-        return _sanitize(obj.item())
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
-    if isinstance(obj, dict):
-        return {k: _sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize(v) for v in obj]
-    return obj
 
 
 @scoring_bp.route("/daily", methods=["GET"])

@@ -1,8 +1,8 @@
 """
 routes/strategy.py —— 策略管理 API
 """
-import math
 import threading
+from utils.serialization import sanitize_numeric as _sanitize
 from flask import Blueprint, request, jsonify
 from strategy.rules_store import (
     list_rules, get_rule, toggle_active, delete_rule,
@@ -12,24 +12,6 @@ from backtest.trade_store import get_rule_trades
 from strategy.mining_state import get_mining_status, request_stop
 
 strategy_bp = Blueprint("strategy", __name__, url_prefix="/api/strategy")
-
-
-def _sanitize(obj):
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    # numpy int/float → Python native (prevents BLOB storage in SQLite)
-    if hasattr(obj, "item"):  # numpy scalar
-        return _sanitize(obj.item())
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
-    if isinstance(obj, dict):
-        return {k: _sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize(v) for v in obj]
-    return obj
-
 
 @strategy_bp.route("/rules", methods=["GET"])
 def get_rules():

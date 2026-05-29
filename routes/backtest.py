@@ -2,8 +2,8 @@
 routes/backtest.py —— 回测 API
 """
 import json
-import math
 import threading
+from utils.serialization import sanitize_numeric as _sanitize
 from datetime import date
 from flask import Blueprint, request, jsonify
 from backtest.reporter import build_result_list, build_result_detail
@@ -11,23 +11,6 @@ from backtest.trade_store import get_result, get_trades, delete_result
 from strategy.rules_store import get_rule
 
 backtest_bp = Blueprint("backtest", __name__, url_prefix="/api/backtest")
-
-
-def _sanitize(obj):
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if hasattr(obj, "item"):  # numpy scalar → Python native
-        return _sanitize(obj.item())
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
-    if isinstance(obj, dict):
-        return {k: _sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize(v) for v in obj]
-    return obj
-
 
 _backtest_status = {"running": False, "result_id": None}
 _backtest_lock = threading.Lock()
