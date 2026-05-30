@@ -1053,7 +1053,10 @@ async function showScoreHistory(code) {
 function closeModal() {
     var modal = document.getElementById('compareModal');
     if (modal) {
-        ChartManager.dispose('scoreHistory');
+        var chartDoms = modal.querySelectorAll('[id$="Chart"]');
+        for (var i = 0; i < chartDoms.length; i++) {
+            ChartManager.dispose(chartDoms[i].id);
+        }
         modal.style.display = 'none';
     }
 }
