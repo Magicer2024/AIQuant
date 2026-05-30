@@ -44,8 +44,7 @@
 <script>
 const API = '/api';
 let currentTab = 'scores';
-let klineChart = null;
-let pendingBacktestRuleId = null;
+var pendingBacktestRuleId = null;
 
 // ─── Toast notification system ───
 var Toast = {
@@ -137,12 +136,116 @@ var RequestManager = {
     }
 };
 
+// ─── Tab state cache (5-min validity) ───
+var TabState = {
+    states: {},
+    MAX_AGE: 5 * 60 * 1000,
+
+    save: function(tab) {
+        var content = document.getElementById('content');
+        var scrollEl = document.querySelector('.content');
+        this.states[tab] = {
+            html: content ? content.innerHTML : '',
+            scrollTop: scrollEl ? scrollEl.scrollTop : 0,
+            ts: Date.now()
+        };
+    },
+
+    load: function(tab) {
+        var s = this.states[tab];
+        if (s && Date.now() - s.ts < this.MAX_AGE) return s;
+        delete this.states[tab];
+        return null;
+    }
+};
+
+// ─── ECharts instance manager ───
+var ChartManager = {
+    instances: {},
+
+    get: function(key, dom) {
+        if (this.instances[key]) {
+            var inst = this.instances[key];
+            if (inst.getDom && inst.getDom() === dom) return inst;
+            this.dispose(key);
+        }
+        var inst = echarts.init(dom);
+        this.instances[key] = inst;
+        return inst;
+    },
+
+    dispose: function(key) {
+        if (this.instances[key]) {
+            this.instances[key].dispose();
+            delete this.instances[key];
+        }
+    },
+
+    disposeAll: function() {
+        var self = this;
+        Object.keys(this.instances).forEach(function(k) { self.dispose(k); });
+    }
+};
+
+window.addEventListener('beforeunload', function() { ChartManager.disposeAll(); });
+
+// ─── Timer manager for centralized cleanup ───
+var timerManager = {
+    timers: {},
+
+    setInterval: function(key, fn, delay) {
+        this.clear(key);
+        this.timers[key] = setInterval(fn, delay);
+    },
+
+    setTimeout: function(key, fn, delay) {
+        this.clear(key);
+        var self = this;
+        this.timers[key] = setTimeout(function() { fn(); delete self.timers[key]; }, delay);
+    },
+
+    clear: function(key) {
+        if (this.timers[key] != null) {
+            clearInterval(this.timers[key]);
+            clearTimeout(this.timers[key]);
+            delete this.timers[key];
+        }
+    },
+
+    clearAll: function() {
+        var self = this;
+        Object.keys(this.timers).forEach(function(k) {
+            clearInterval(self.timers[k]);
+            clearTimeout(self.timers[k]);
+        });
+        this.timers = {};
+    }
+};
+
 function switchTab(tab) {
     RequestManager.cancelAll();
+    timerManager.clearAll();
+
+    // Save current tab state
+    if (currentTab) TabState.save(currentTab);
+
     currentTab = tab;
-    document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'));
-    const btn = document.querySelector(`.nav-item[onclick*="${tab}"]`);
+
+    // Update nav active
+    var navItems = document.querySelectorAll('.nav-item');
+    for (var i = 0; i < navItems.length; i++) { navItems[i].classList.remove('active'); }
+    var btn = document.querySelector('.nav-item[onclick*="' + tab + '"]');
     if (btn) btn.classList.add('active');
+
+    // Try cached state
+    var cached = TabState.load(tab);
+    if (cached) {
+        document.getElementById('content').innerHTML = cached.html;
+        var scrollEl = document.querySelector('.content');
+        if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
+        return;
+    }
+
     loadTab(tab);
 }
 
@@ -300,15 +403,13 @@ function rowToScoreHTML(row, idx) {
 }
 
 let _scoreData = [];
-let _filterTimer = null;
-
 var currentScorePage = 1;
 var scorePerPage = 50;
 var scoreTotalPages = 1;
 
 function debounceFilter() {
-    clearTimeout(_filterTimer);
-    _filterTimer = setTimeout(filterScores, 300);
+    timerManager.clear('filter');
+    timerManager.setTimeout('filter', filterScores, 300);
 }
 
 function filterScores() {
@@ -345,7 +446,7 @@ async function checkSyncStatus() {
         if (!el) return;
         if (resp.sync && resp.sync.running) {
             el.innerHTML = '<span class="badge badge-running">同步中</span>';
-            setTimeout(checkSyncStatus, 2000);
+            timerManager.setTimeout('syncStatus', checkSyncStatus, 2000);
         } else if (resp.sync && resp.sync.last_result) {
             el.textContent = resp.sync.last_result;
             document.getElementById('last-update').textContent = resp.sync.last_time
@@ -355,34 +456,32 @@ async function checkSyncStatus() {
     } catch(e) {}
 }
 
-let syncPollTimer = null;
-
 function showSyncProgress() {
     document.getElementById('syncProgress').style.display = 'block';
 }
 
 function hideSyncProgress() {
-    clearInterval(syncPollTimer);
-    syncPollTimer = null;
-    setTimeout(() => { document.getElementById('syncProgress').style.display = 'none'; }, 5000);
+    timerManager.clear('syncPoll');
+    timerManager.setTimeout('syncHide', function() {
+        document.getElementById('syncProgress').style.display = 'none';
+    }, 5000);
 }
 
-async function pollSyncProgress(onDone) {
-    syncPollTimer = setInterval(async () => {
-        try {
-            const resp = await RequestManager.fetch('sync-progress', API + '/sync/progress');
-            const p = resp.data;
-            const pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+function pollSyncProgress(onDone) {
+    timerManager.setInterval('syncPoll', function() {
+        RequestManager.fetch('sync-progress', API + '/sync/progress').then(function(resp) {
+            var p = resp.data;
+            var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
             document.getElementById('syncProgressFill').style.width = pct + '%';
             document.getElementById('syncProgressPct').textContent = pct + '%';
             document.getElementById('syncProgressText').textContent =
-                `同步中: ${p.current}/${p.total}  成功:${p.success}  失败:${p.failed}`;
+                '同步中: ' + p.current + '/' + p.total + '  成功:' + p.success + '  失败:' + p.failed;
             if (!p.running) {
                 hideSyncProgress();
                 showToast(p.message || '同步完成', p.last_error ? 'warning' : 'success');
                 if (onDone) onDone(p.message || '同步完成');
             }
-        } catch(e) { hideSyncProgress(); if (onDone) onDone(''); }
+        }).catch(function(e) { hideSyncProgress(); if (onDone) onDone(''); });
     }, 1000);
 }
 
@@ -396,7 +495,7 @@ async function runSyncOnly() {
         statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
         btn.textContent = '同步中...';
         showSyncProgress();
-        pollSyncProgress((msg) => {
+        pollSyncProgress(function(msg) {
             btn.disabled = false; btn.textContent = '仅同步数据';
             if (msg) statusEl.textContent = msg;
             loadTab('scores');
@@ -417,14 +516,16 @@ async function syncAndScore() {
         if (syncResp.error) { statusEl.textContent = syncResp.error; btn.disabled = false; btn.textContent = '同步并刷新'; return; }
         statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
         showSyncProgress();
-        pollSyncProgress(async (msg) => {
+        pollSyncProgress(function(msg) {
             if (msg) statusEl.textContent = msg;
             btn.textContent = '计算中...';
-            try {
-                await RequestManager.fetch('scoring-run', API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-            } catch(e) {}
-            btn.disabled = false; btn.textContent = '同步并刷新';
-            loadTab('scores');
+            RequestManager.fetch('scoring-run', API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' }).then(function() {
+                btn.disabled = false; btn.textContent = '同步并刷新';
+                loadTab('scores');
+            }).catch(function() {
+                btn.disabled = false; btn.textContent = '同步并刷新';
+                loadTab('scores');
+            });
         });
     } catch(e) {
         statusEl.textContent = '同步启动失败，直接打分...';
@@ -601,7 +702,7 @@ async function rollbackRule(ruleId, version) {
     if (!confirm('确认回滚到 v' + version + '？当前版本会被保存为历史。')) return;
     const resp = await RequestManager.fetch('rule-rollback-' + ruleId, API + '/strategy/rules/' + ruleId + '/rollback/' + version, { method: 'POST' });
     if (resp.success) {
-        document.getElementById('compareModal').style.display = 'none';
+        closeModal();
         loadTab('strategy');
     }
 }
@@ -631,7 +732,7 @@ async function pollMining() {
     const resp = await RequestManager.fetch('mine-status', API + '/strategy/mine/status');
     if (resp.data.running) {
         st.innerHTML = '<span class="badge badge-running">挖掘中</span>';
-        setTimeout(pollMining, 3000);
+        timerManager.setTimeout('minePoll', pollMining, 3000);
     } else if (resp.data.progress === 'error') {
         st.innerHTML = '<span class="badge badge-error">错误: '+(resp.data.result||'')+'</span>';
         miningActive = false; updateMiningButton();
@@ -776,7 +877,7 @@ async function pollBt(n) {
     if (resp.data.running) {
         const p = resp.data.progress || 0, t = resp.data.total || 0;
         st.innerHTML = '<span class="badge badge-running">回测中 ' + (t > 0 ? `(${p}/${t})` : '') + '</span>';
-        setTimeout(() => pollBt(n + 1), 3000);
+        timerManager.setTimeout('btPoll', function() { pollBt(n + 1); }, 3000);
     }
     else if (resp.data.error) { st.innerHTML = '<span class="badge badge-error">'+resp.data.error+'</span>'; }
     else if (resp.data.result_id) { st.innerHTML = '<span class="badge badge-done">完成</span>'; viewResult(resp.data.result_id); }
@@ -887,8 +988,6 @@ document.addEventListener('change', e => {
     if (e.target.classList.contains('compare-check')) updateCompareButton();
 });
 
-let scoreChart = null;
-
 async function showScoreHistory(code) {
     const days = document.getElementById('historyDays')?.value || '30';
     const resp = await RequestManager.fetch('score-history-' + code, API + `/scoring/stock/${code}/history?days=${days}`);
@@ -933,8 +1032,8 @@ async function showScoreHistory(code) {
 
     const xLabels = dates.map(d => parseInt(days) <= 7 ? d.slice(5) : d);
 
-    scoreChart = echarts.init(document.getElementById('historyChart'));
-    scoreChart.setOption({
+    var scoreChartInst = ChartManager.get('scoreHistory', document.getElementById('historyChart'));
+    scoreChartInst.setOption({
         tooltip: { trigger: 'axis' },
         toolbox: { feature: { saveAsImage: { title: '下载' } } },
         xAxis: { type: 'category', data: xLabels, axisLabel: { rotate: 45, fontSize: 10 } },
@@ -942,7 +1041,21 @@ async function showScoreHistory(code) {
         series: series,
         grid: { left: 50, right: 20, top: 30, bottom: 60 },
     });
-    window.addEventListener('resize', () => scoreChart?.resize());
+    if (!window._scoreHistoryResizeBound) {
+        window._scoreHistoryResizeBound = true;
+        window.addEventListener('resize', function() {
+            var inst = ChartManager.instances['scoreHistory'];
+            if (inst) inst.resize();
+        });
+    }
+}
+
+function closeModal() {
+    var modal = document.getElementById('compareModal');
+    if (modal) {
+        ChartManager.dispose('scoreHistory');
+        modal.style.display = 'none';
+    }
 }
 
 function showModal(title, bodyHtml) {
@@ -951,13 +1064,13 @@ function showModal(title, bodyHtml) {
         modal = document.createElement('div');
         modal.id = 'compareModal';
         modal.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center;';
-        modal.onclick = e => { if (e.target === modal) modal.style.display = 'none'; };
+        modal.onclick = function(e) { if (e.target === modal) closeModal(); };
         document.body.appendChild(modal);
     }
     modal.innerHTML = `<div style="background:var(--surface);border-radius:8px;padding:24px;max-width:90vw;max-height:80vh;overflow:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
             <h3 style="margin:0;color:var(--text);">${title}</h3>
-            <button class="btn btn-danger btn-sm" onclick="document.getElementById('compareModal').style.display='none'">关闭</button>
+            <button class="btn btn-danger btn-sm" onclick="closeModal()">关闭</button>
         </div>${bodyHtml}</div>`;
     modal.style.display = 'flex';
 }
@@ -1017,8 +1130,8 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
         itemStyle: { color: d.chgPct >= 0 ? '#ef5350' : '#26a69a' }
     }));
 
-    if (!klineChart) klineChart = echarts.init(document.getElementById('klineChart'));
-    klineChart.clear();
+    var klineChartInst = ChartManager.get('kline', document.getElementById('klineChart'));
+    klineChartInst.clear();
 
     var opt = {
         title: { text: code + ' K线图', left: 'center', textStyle: { color: '#dde4f0', fontSize: 14, fontFamily: "'JetBrains Mono', monospace" } },
@@ -1072,8 +1185,8 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
         });
     }
 
-    klineChart.setOption(opt);
-    klineChart.resize();
+    klineChartInst.setOption(opt);
+    klineChartInst.resize();
 
     let infoHtml = `<h4 style="font-family:var(--font-mono);margin-bottom:8px;color:var(--text-primary)">${code}</h4>`;
     if (entryDate && entryPrice) {
