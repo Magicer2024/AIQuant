@@ -28,10 +28,10 @@ def _norm_price_factor(values: pd.Series, factor_name: str) -> pd.Series:
     if "CCI" in factor_name:
         return ((values + 200) / 400).clip(0, 1)
     lo, hi = values.quantile(0.01), values.quantile(0.99)
-    clipped = values.clip(lower=lo, upper=hi)
     if hi - lo < 1e-9:
         return pd.Series(0.5, index=values.index)
-    return ((clipped - lo) / (hi - lo)).clip(0, 1)
+    result = (values - lo) / (hi - lo)
+    return result.clip(lower=-0.5, upper=1.5)
 
 
 def _norm_fundamental_factor(values: pd.Series) -> pd.Series:
@@ -44,11 +44,12 @@ def _norm_fundamental_factor(values: pd.Series) -> pd.Series:
 
 
 def _norm_sentiment_factor(values: pd.Series) -> pd.Series:
-    """情绪/流动性因子归一化：截断到[0,1]"""
+    """情绪/流动性因子归一化：保留极端值区分度"""
     lower, upper = values.quantile(0.01), values.quantile(0.99)
     if upper - lower < 1e-9:
         return pd.Series(0.5, index=values.index)
-    return ((values - lower) / (upper - lower)).clip(0, 1)
+    result = (values - lower) / (upper - lower)
+    return result.clip(lower=-0.5, upper=1.5)
 
 
 # ── 因子注册表 ─────────────────────────────────
