@@ -8,9 +8,11 @@ import math
 import pandas as pd
 from datetime import date
 from typing import Dict, List, Optional
+from functools import lru_cache
 from core.db import get_conn
 from strategy.rules_store import get_active_rules
 from strategy.factor_lib import compute_all_factors
+from utils.cache import ttl_cache
 
 
 def _load_stock_data(trade_date: str) -> Dict[str, pd.DataFrame]:
@@ -269,3 +271,21 @@ def get_latest_score_date() -> Optional[str]:
             "SELECT MAX(trade_date) as d FROM stock_score"
         ).fetchone()
         return row["d"] if row else None
+
+
+@lru_cache(maxsize=1)
+def get_latest_score_date_cached():
+    """缓存最新打分日期（下次调用需手动 cache_clear）"""
+    with get_conn() as conn:
+        row = conn.execute("SELECT MAX(trade_date) FROM stock_score").fetchone()
+        return row[0]
+
+
+@ttl_cache(ttl_seconds=300)
+def get_active_stocks_cached():
+    """缓存活跃股票列表 5 分钟"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT code, name FROM stock_info WHERE is_active = 1"
+        ).fetchall()
+        return [dict(r) for r in rows]
