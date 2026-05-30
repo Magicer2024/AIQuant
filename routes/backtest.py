@@ -47,14 +47,14 @@ def start_backtest():
     def _run():
         global _backtest_status
         try:
-            from backtest.engine import run_backtest
+            from backtest.engine import run_backtest, BacktestParams
             sell_conds = rule.get("sell_conditions")
             if isinstance(sell_conds, str):
                 sell_conds = sell_conds if sell_conds.strip() and sell_conds.strip() != "[]" else None
             elif isinstance(sell_conds, list):
                 sell_conds = json.dumps(sell_conds) if sell_conds else None
 
-            result = run_backtest(
+            params = BacktestParams(
                 rule_name=rule["rule_name"],
                 rule_id=str(rule["id"]),
                 conditions_json=rule["conditions"] or "{}",
@@ -65,8 +65,8 @@ def start_backtest():
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 save=True,
-                progress_callback=_progress,
             )
+            result = run_backtest(params=params, progress_callback=_progress)
             with _backtest_lock:
                 _backtest_status = {"running": False, "result_id": result.get("result_id")}
         except Exception as e:

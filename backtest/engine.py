@@ -7,6 +7,7 @@ import json
 import logging
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
@@ -17,20 +18,49 @@ from config.settings import BACKTEST
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class BacktestParams:
+    """回测参数封装"""
+    rule_name: str
+    rule_id: str
+    conditions_json: str
+    start_date: str
+    end_date: str
+    sell_conditions_json: Optional[str] = None
+    holding_max: int = 20
+    stop_loss: float = -0.08
+    take_profit: float = 0.20
+    save: bool = True
+
+
 def run_backtest(
-    rule_name: str,
-    rule_id: str,
-    conditions_json: str,
-    start_date: str,
-    end_date: str,
-    sell_conditions_json: str = None,
-    holding_max: int = 20,
-    stop_loss: float = -0.08,
-    take_profit: float = 0.20,
-    save: bool = True,
+    rule_name=None,
+    rule_id=None,
+    conditions_json=None,
+    start_date=None,
+    end_date=None,
+    sell_conditions_json=None,
+    holding_max=20,
+    stop_loss=-0.08,
+    take_profit=0.20,
+    save=True,
     progress_callback=None,
+    params=None,
 ) -> dict:
     """执行回测并提取汇总指标和逐笔交易"""
+    if params is not None:
+        rule_name = params.rule_name
+        rule_id = params.rule_id
+        conditions_json = params.conditions_json
+        start_date = params.start_date
+        end_date = params.end_date
+        sell_conditions_json = params.sell_conditions_json
+        holding_max = params.holding_max
+        stop_loss = params.stop_loss
+        take_profit = params.take_profit
+        save = params.save
+
     init_qlib()
     set_global_logger_level(logging.ERROR)
 
