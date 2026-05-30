@@ -94,9 +94,9 @@ _mining_status = {
 def get_mining_status() -> dict:
     return _mining_status
 
-def set_mining_status(status: dict):
-    global _mining_status
-    _mining_status = status
+def update_mining_status(updates: dict):
+    """部分更新状态，避免替换整个字典对象"""
+    _mining_status.update(updates)
 
 def request_stop():
     _mining_status["stop_requested"] = True
@@ -427,6 +427,8 @@ def rollback_rule(rule_id: int, version: int) -> bool:
         return True
 ```
 
+**避免重复版本**：`save_rule_version()` 中可添加检查，若当前规则内容与最新版本相同则跳过创建（通过比较 conditions 和 sell_conditions 的 hash 或直接字符串比较）。
+
 触发时机：在 `save_rule()` 中，当规则已存在（UPDATE）时自动先调 `save_rule_version()`。新建（INSERT）时不调。
 
 **API** (`routes/strategy.py`):
@@ -525,6 +527,8 @@ def run_sync_blocking():
             threading.Thread(target=retry, daemon=True).start()
 ```
 
+**注意**：`_retry_queued` 为模块级全局变量，服务重启后会重置。对于当前单进程架构已足够，若未来引入多进程需考虑持久化到文件或数据库。
+
 **验收标准:**
 - [ ] 单只股票超时/失败后自动重试2次（指数退避 1s/2s）
 - [ ] 调度器失败后30分钟重试1次，不无限循环
@@ -604,3 +608,46 @@ return jsonify({
 
 - `strategy/mining_state.py` 为新建文件
 - 其余均为现有文件修改
+
+---
+
+## 附录：测试策略
+
+### 关键测试用例
+
+| PR | 测试类型 | 测试场景 |
+|----|---------|---------|
+| PR1 | 单元测试 | 并发同步返回 409 |
+| PR1 | 单元测试 | progress_callback 正确更新状态 |
+| PR2 | 单元测试 | request_stop 后状态正确更新 |
+| PR2 | 集成测试 | 挖掘中调用 stop 后 10 秒内退出 |
+| PR3 | 单元测试 | 参数钳制逻辑（-0.5 ~ 0, 0 ~ 1.0） |
+| PR3 | 集成测试 | 默认参数行为与改造前一致 |
+| PR4 | 单元测试 | 对比 API 正确返回多个结果 |
+| PR4 | 前端测试 | 高亮逻辑正确（年化最高/回撤最小） |
+| PR5 | 前端测试 | 防抖 300ms 生效 |
+| PR5 | 前端测试 | Enter 键触发搜索 |
+| PR6 | 单元测试 | days 白名单校验 |
+| PR6 | 前端测试 | 数据 < 2 天显示"数据不足" |
+| PR7 | 单元测试 | 新建规则不创建版本 |
+| PR7 | 单元测试 | 回滚后版本号正确递增 |
+| PR8 | 单元测试 | 指数退避间隔正确（1s, 2s） |
+| PR8 | 单元测试 | _retry_queued 防重复 |
+| PR9 | 单元测试 | _should_skip 统计递增 |
+| PR9 | 单元测试 | daily_sync 启动时重置统计 |
+
+---
+
+## 附录：实施顺序与依赖
+
+```
+PR1 ──────────────→ PR9 (PR9 依赖 PR1 的进度显示)
+PR2 ──────────────→ (独立)
+PR3 ──────────────→ PR4 (PR4 依赖 PR3 的回测参数)
+PR5 ──────────────→ (独立)
+PR6 ──────────────→ (独立)
+PR7 ──────────────→ (独立)
+PR8 ──────────────→ (独立)
+```
+
+**推荐实施顺序**：PR1 → PR9 → PR2 → PR3 → PR4 → PR5 → PR6 → PR7 → PR8
