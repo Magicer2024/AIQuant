@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIQuant · 量化终端</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/clusterize.js@0.18.1/clusterize.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -255,24 +256,47 @@ function updatePaginationUI() {
     if (infoEl) infoEl.textContent = '第 ' + currentScorePage + ' / ' + scoreTotalPages + ' 页';
 }
 
-function renderScoreTable(data) {
-    const container = document.getElementById('scoreTableContainer');
+var scoreClusterize = null;
+
+function renderScoreTable(scores) {
+    var container = document.getElementById('scoreTableContainer');
     if (!container) return;
-    let html = `<div class="table-wrapper"><table>
-        <thead><tr><th>#</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th></tr></thead>
-        <tbody>`;
-    data.forEach((r, i) => {
-        const cls = r.score >= 80 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
-        html += `<tr>
-            <td style="color:var(--text-muted);width:40px">${i + 1}</td>
-            <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span>
-                <span style="cursor:pointer;margin-left:4px;font-size:12px" onclick="showScoreHistory('${r.code}')" title="查看趋势">📈</span></td>
-            <td>${r.name || '-'}</td>
-            <td class="${cls}">${r.score}</td>
-            <td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.rule_name||'').replace(/"/g,'&quot;')}">${r.rule_name || '-'}</td></tr>`;
+
+    if (scoreClusterize) {
+        scoreClusterize.update(scores.map(function(row, i) { return rowToScoreHTML(row, i + 1); }));
+        return;
+    }
+
+    container.innerHTML =
+        '<div id="scoreScrollArea" class="clusterize-scroll" style="max-height:62vh;overflow-y:auto;">' +
+        '  <table id="scoreTable">' +
+        '    <thead><tr>' +
+        '      <th>#</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th>' +
+        '    </tr></thead>' +
+        '    <tbody id="scoreContentArea" class="clusterize-content"></tbody>' +
+        '  </table>' +
+        '</div>';
+
+    scoreClusterize = new Clusterize({
+        rows: scores.map(function(row, i) { return rowToScoreHTML(row, i + 1); }),
+        scrollElem: document.getElementById('scoreScrollArea'),
+        contentElem: document.getElementById('scoreContentArea'),
+        rows_in_block: 50,
+        blocks_in_cluster: 4,
     });
-    html += `</tbody></table></div>`;
-    container.innerHTML = html;
+}
+
+function rowToScoreHTML(row, idx) {
+    var scoreClass = row.score >= 80 ? 'score-high' : row.score >= 50 ? 'score-mid' : 'score-low';
+    var ruleName = (row.rule_name || '').replace(/"/g, '&quot;');
+    return '<tr>' +
+        '<td style="color:var(--text-muted);width:40px">' + (idx != null ? idx : '') + '</td>' +
+        '<td><span class="code-link" onclick="openKline(\'' + (row.code || '') + '\')">' + (row.code || '') + '</span>' +
+        ' <span style="cursor:pointer;margin-left:4px;font-size:12px" onclick="showScoreHistory(\'' + (row.code || '') + '\')" title="查看趋势">📈</span></td>' +
+        '<td>' + (row.name || '-') + '</td>' +
+        '<td class="' + scoreClass + '">' + (row.score != null ? row.score : '--') + '</td>' +
+        '<td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + ruleName + '">' + (row.rule_name || '-') + '</td>' +
+        '</tr>';
 }
 
 let _scoreData = [];
@@ -288,19 +312,30 @@ function debounceFilter() {
 }
 
 function filterScores() {
-    const query = (document.getElementById('stockSearch')?.value || '').toLowerCase();
-    const minScore = parseInt(document.getElementById('minScore')?.value || '0');
-    let filtered = _scoreData;
-    if (query) {
-        filtered = filtered.filter(r =>
-            (r.code || '').toLowerCase().includes(query) ||
-            (r.name || '').toLowerCase().includes(query));
+    var keyword = (document.getElementById('stockSearch') ? document.getElementById('stockSearch').value : '').toLowerCase();
+    var minScore = parseFloat(document.getElementById('minScore') ? document.getElementById('minScore').value : '0') || 0;
+
+    var filtered = _scoreData;
+    if (keyword) {
+        filtered = _scoreData.filter(function(r) {
+            return (r.code || '').toLowerCase().indexOf(keyword) !== -1 ||
+                   (r.name || '').toLowerCase().indexOf(keyword) !== -1;
+        });
     }
     if (minScore > 0) {
-        filtered = filtered.filter(r => (r.score || 0) >= minScore);
+        filtered = filtered.filter(function(r) { return (r.score || 0) >= minScore; });
     }
-    document.getElementById('scoreCount').textContent = '筛选: ' + filtered.length + ' / ' + _scoreData.length + ' (当前页)';
-    renderScoreTable(filtered);
+
+    var countEl = document.getElementById('scoreCount');
+    if (countEl) {
+        countEl.textContent = filtered.length === 0 ? '无匹配结果' : '显示 ' + filtered.length + ' / ' + _scoreData.length + ' 条';
+    }
+
+    if (scoreClusterize) {
+        scoreClusterize.update(filtered.map(function(row, i) { return rowToScoreHTML(row, i + 1); }));
+    } else {
+        renderScoreTable(filtered);
+    }
 }
 
 async function checkSyncStatus() {

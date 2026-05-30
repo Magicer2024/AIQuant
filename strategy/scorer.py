@@ -42,6 +42,34 @@ def _load_stock_data(trade_date: str) -> Dict[str, pd.DataFrame]:
     return result
 
 
+def _load_stock_data_streaming(trade_date, batch_size=100):
+    """流式加载股票数据，逐股 yield (code, DataFrame)，减少内存峰值"""
+    import pandas as pd
+    with get_conn() as conn:
+        cursor = conn.execute("""
+            SELECT dp.code, dp.trade_date, dp.open, dp.high, dp.low, dp.close,
+                   dp.volume, dp.amount, dp.turnover
+            FROM daily_price dp
+            INNER JOIN stock_info si ON dp.code = si.code AND si.is_active = 1
+            WHERE dp.trade_date <= ?
+            ORDER BY dp.code, dp.trade_date
+        """, (trade_date,))
+
+        batch = []
+        current_code = None
+
+        for row in cursor:
+            if row["code"] != current_code:
+                if batch:
+                    yield current_code, pd.DataFrame(batch).set_index("trade_date")
+                current_code = row["code"]
+                batch = []
+            batch.append(dict(row))
+
+        if batch:
+            yield current_code, pd.DataFrame(batch).set_index("trade_date")
+
+
 def _evaluate_condition(factor_values: Dict[str, float], condition):
     """评估单条规则条件是否满足，同时计算信号强度。
 
