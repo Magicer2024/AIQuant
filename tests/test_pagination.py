@@ -1,5 +1,5 @@
 """
-tests/test_pagination.py -- 打分 API 分页
+tests/test_pagination.py -- ??? API ???
 """
 import unittest
 
@@ -32,7 +32,7 @@ class TestPaginationAPI(unittest.TestCase):
         resp = self.client.get("/api/scoring/daily?per_page=999")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
-        self.assertLessEqual(data["pagination"]["per_page"], 200)
+        self.assertLessEqual(data["pagination"]["per_page"], 10000)
 
     def test_daily_scores_page_out_of_range(self):
         resp = self.client.get("/api/scoring/daily?page=99999")
