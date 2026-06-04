@@ -241,14 +241,18 @@ def _save_scores(trade_date: str, results: List[dict]):
 
 
 def get_daily_scores(trade_date: str, page: int = 1, per_page: int = 50) -> List[dict]:
-    """获取某日打分排名（分页）"""
-    per_page = min(per_page, 200)
+    """获取某日打分排名（分页），附带板块(market)和市值(market_cap)"""
+    per_page = min(per_page, 10000)
     offset = (page - 1) * per_page
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT * FROM stock_score
-            WHERE trade_date = ?
-            ORDER BY score DESC
+            SELECT s.*, i.market,
+                   CAST(COALESCE(dp.close * i.total_shares / 1e8, 0) AS REAL) AS market_cap
+            FROM stock_score s
+            LEFT JOIN stock_info i ON s.code = i.code
+            LEFT JOIN daily_price dp ON s.code = dp.code AND dp.trade_date = s.trade_date
+            WHERE s.trade_date = ?
+            ORDER BY s.score DESC
             LIMIT ? OFFSET ?
         """, (trade_date, per_page, offset)).fetchall()
         return [dict(r) for r in rows]

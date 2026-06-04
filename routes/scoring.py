@@ -21,7 +21,7 @@ def daily_scores():
         return jsonify({"success": True, "data": [], "date": None, "error": "No trade date available"})
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 50, type=int)
-    per_page = min(per_page, 200)
+    per_page = min(per_page, 10000)
 
     results = get_daily_scores(trade_date, page=page, per_page=per_page)
     total = get_daily_scores_count(trade_date)

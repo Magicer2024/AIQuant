@@ -36,6 +36,12 @@
 <div class="kline-overlay" id="klinePanel" onclick="if(event.target===this)closeKline()">
     <div class="kline-popup">
         <button class="close-btn" onclick="closeKline()">&#x2715;</button>
+        <!-- 副图指标切换按钮 -->
+        <div class="indicator-bar" id="indicatorBar">
+            <button class="indicator-btn active" data-indicator="vol" onclick="toggleIndicator('vol')">成交量</button>
+            <button class="indicator-btn" data-indicator="macd" onclick="toggleIndicator('macd')">MACD</button>
+            <button class="indicator-btn" data-indicator="kdj" onclick="toggleIndicator('kdj')">KDJ</button>
+        </div>
         <div class="chart" id="klineChart"></div>
         <div class="trade-info" id="klineTradeInfo"></div>
     </div>
@@ -45,6 +51,7 @@
 const API = '/api';
 let currentTab = 'scores';
 var pendingBacktestRuleId = null;
+var pendingScoreDate = null;
 
 // ─── Toast notification system ───
 var Toast = {
@@ -226,8 +233,17 @@ function switchTab(tab) {
     RequestManager.cancelAll();
     timerManager.clearAll();
 
-    // Save current tab state
-    if (currentTab) TabState.save(currentTab);
+    // 保存当前 tab 状态（包括 scores tab 的日期选择）
+    if (currentTab) {
+        // 在缓存 scores tab 前，记住当前选择的日期
+        if (currentTab === 'scores') {
+            var scoreDateEl = document.getElementById('scoreDate');
+            if (scoreDateEl && scoreDateEl.value) {
+                pendingScoreDate = scoreDateEl.value;
+            }
+        }
+        TabState.save(currentTab);
+    }
 
     currentTab = tab;
 
@@ -243,6 +259,11 @@ function switchTab(tab) {
         document.getElementById('content').innerHTML = cached.html;
         var scrollEl = document.querySelector('.content');
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
+        // 如果切回 scores tab，需要重新加载数据（确保日期选择和数据一致）
+        if (tab === 'scores') {
+            scoreClusterize = null;
+            loadScoresPage(1);
+        }
         return;
     }
 
@@ -265,6 +286,7 @@ async function loadTab(tab) {
 
 // ─── Tab 1: Scoring ───
 async function loadScoresTab(container) {
+    scoreClusterize = null;  // reset — DOM elements are being recreated
     var html = `<div class="panel">
         <div class="input-row">
             <span>日期</span>
@@ -273,6 +295,15 @@ async function loadScoresTab(container) {
             <input type="text" id="stockSearch" placeholder="代码或名称" oninput="debounceFilter()" style="width:120px">
             <span>最低分</span>
             <input type="number" id="minScore" value="0" step="1" min="0" onchange="filterScores()" style="width:70px">
+            <label style="cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px">
+                <input type="checkbox" id="filterKCB" onchange="filterScores()" style="accent-color:var(--accent)"> 科创板
+            </label>
+            <label style="cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px">
+                <input type="checkbox" id="filterCYB" onchange="filterScores()" style="accent-color:var(--accent)"> 创业板
+            </label>
+            <span>市值≥</span>
+            <input type="number" id="minMarketCap" value="300" step="10" min="0" onchange="filterScores()" style="width:65px" title="单位：亿元，0表示不筛选">
+            <span style="font-size:12px;color:var(--text-muted)">亿</span>
             <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
             <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
             <span id="syncStatus"></span>
@@ -296,12 +327,18 @@ async function loadScoresTab(container) {
         </div>
     </div>`;
     container.innerHTML = html;
+    if (pendingScoreDate) {
+        document.getElementById('scoreDate').value = pendingScoreDate;
+        pendingScoreDate = null;
+    }
     checkSyncStatus();
     loadScoresPage(1);
 }
 
 function refreshScores() {
     currentScorePage = 1;
+    // 重置 Clusterize 实例，确保表格完全重新渲染（避免 update 分支的潜在问题）
+    scoreClusterize = null;
     loadScoresPage(1);
 }
 
@@ -311,29 +348,59 @@ async function loadScoresPage(page) {
     if (container) showSkeleton(container, 10);
 
     try {
-        var resp = await RequestManager.fetch('scores',
-            API + '/scoring/daily?page=' + page + '&per_page=' + scorePerPage);
-        _scoreData = resp.data || [];
-        currentScorePage = resp.pagination.page;
-        scoreTotalPages = resp.pagination.pages;
-
-        var latestDate = _scoreData.length > 0 ? _scoreData[0].trade_date : (resp.date || '');
         var scoreDateEl = document.getElementById('scoreDate');
-        if (scoreDateEl && latestDate) scoreDateEl.value = latestDate;
-        document.getElementById('last-update').textContent = latestDate ? '最新打分 · ' + latestDate : '暂无数据';
+        var selectedDate = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
+        var dateParam = selectedDate ? '&date=' + encodeURIComponent(selectedDate) : '';
+        
+        // 调用新的API获取每日打分记录（一次性加载全部数据，前端筛选）
+        var resp = await RequestManager.fetch('scores',
+            API + '/scoring/daily?page=1&per_page=5000' + dateParam);
+        
+        _scoreData = resp.data || [];
+        currentScorePage = 1;
+        scoreTotalPages = 1;
+
+        // 获取返回的日期（如果没有选择日期，使用API返回的日期）
+        var returnedDate = resp.date || '';
+        
+        // 如果用户没有选择日期，用返回的日期更新输入框
+        if (scoreDateEl && returnedDate && !selectedDate) {
+            scoreDateEl.value = returnedDate;
+        }
+        
+        // 使用实际查看的日期显示在头部
+        var displayDate = selectedDate || returnedDate;
+        document.getElementById('last-update').textContent = displayDate ? '最新打分 · ' + displayDate : '暂无数据';
         document.getElementById('scoreCount').textContent = resp.pagination.total + ' 只股票';
 
         // Update metrics
         var metricsEl = document.getElementById('scoresMetrics');
         if (metricsEl && resp.pagination.total > 0) {
+            // 统计板块分布
+            var kcbCount = 0, cybCount = 0, bigCapCount = 0;
+            for (var i = 0; i < _scoreData.length; i++) {
+                var code = (_scoreData[i].code || '').substring(0, 3);
+                if (code === '688') kcbCount++;
+                if (code === '300' || code === '301') cybCount++;
+                if ((_scoreData[i].market_cap || 0) >= 300) bigCapCount++;
+            }
             metricsEl.innerHTML = '<div class="metrics-row">' +
-                '<div class="metric-card"><div class="val">' + _scoreData[0].score + '</div><div class="lbl">本页最高 · ' + _scoreData[0].code + '</div></div>' +
+                '<div class="metric-card"><div class="val">' + _scoreData[0].score + '</div><div class="lbl">最高分 · ' + _scoreData[0].code + '</div></div>' +
                 '<div class="metric-card"><div class="val">' + resp.pagination.total + '</div><div class="lbl">总计股票数</div></div>' +
-                '<div class="metric-card"><div class="val">' + resp.pagination.pages + '</div><div class="lbl">总页数</div></div>' +
-                '<div class="metric-card"><div class="val" style="color:var(--text-muted)">' + resp.pagination.page + '</div><div class="lbl">当前页</div></div>' +
+                '<div class="metric-card"><div class="val">' + kcbCount + '</div><div class="lbl">科创板</div></div>' +
+                '<div class="metric-card"><div class="val">' + cybCount + '</div><div class="lbl">创业板</div></div>' +
+                '<div class="metric-card"><div class="val">' + bigCapCount + '</div><div class="lbl">≥300亿市值</div></div>' +
                 '</div>';
         } else if (metricsEl) {
-            metricsEl.innerHTML = '<div class="empty-state">暂无打分数据<br><span style="color:var(--text-muted)">点击「同步并刷新」获取最新数据</span></div>';
+            // 如果没有记录，显示提示信息
+            var message = resp.message || '暂无打分数据';
+            var showSyncBtn = resp.has_records === false;
+            var html = '<div class="empty-state">' + message;
+            if (showSyncBtn) {
+                html += '<br><button class="btn btn-primary" onclick="calculateScoresForDate()" style="margin-top:12px;">计算该日期打分</button>';
+            }
+            html += '</div>';
+            metricsEl.innerHTML = html;
         }
 
         renderScoreTable(_scoreData);
@@ -342,6 +409,44 @@ async function loadScoresPage(page) {
         if (e.name !== 'AbortError') {
             showToast('加载失败: ' + (e.message || '未知错误'), 'error');
         }
+    }
+}
+
+// 计算指定日期的打分
+async function calculateScoresForDate() {
+    var scoreDateEl = document.getElementById('scoreDate');
+    var date = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
+    
+    if (!date) {
+        showToast('请先选择日期', 'warning');
+        return;
+    }
+    
+    var btn = event.target;
+    btn.disabled = true;
+    btn.textContent = '计算中...';
+    
+    try {
+        var resp = await RequestManager.fetch('calculate-scores',
+            API + '/scoring/run', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({date: date, force: true})
+            });
+        
+        if (resp.success) {
+            showToast(resp.message, 'success');
+            // 重新加载数据
+            loadScoresPage(1);
+        } else {
+            showToast(resp.error || '计算失败', 'error');
+            btn.disabled = false;
+            btn.textContent = '计算该日期打分';
+        }
+    } catch(e) {
+        showToast('计算失败: ' + e.message, 'error');
+        btn.disabled = false;
+        btn.textContent = '计算该日期打分';
     }
 }
 
@@ -374,7 +479,7 @@ function renderScoreTable(scores) {
         '<div id="scoreScrollArea" class="clusterize-scroll" style="max-height:62vh;overflow-y:auto;">' +
         '  <table id="scoreTable">' +
         '    <thead><tr>' +
-        '      <th>#</th><th>代码</th><th>名称</th><th>得分</th><th>命中策略</th>' +
+        '      <th>#</th><th>代码</th><th>名称</th><th>得分</th><th>市值(亿)</th><th>命中策略</th>' +
         '    </tr></thead>' +
         '    <tbody id="scoreContentArea" class="clusterize-content"></tbody>' +
         '  </table>' +
@@ -392,13 +497,21 @@ function renderScoreTable(scores) {
 function rowToScoreHTML(row, idx) {
     var scoreClass = row.score >= 80 ? 'score-high' : row.score >= 50 ? 'score-mid' : 'score-low';
     var ruleName = (row.rule_name || '').replace(/"/g, '&quot;');
+    var ruleId = row.rule_id || '';
+    var ruleDisplay = ruleId ? '#' + ruleId + ' ' + (row.rule_name || '-') : (row.rule_name || '-');
+    var ruleTitle = ruleDisplay.replace(/"/g, '&quot;');
+    var ruleCell = ruleId
+        ? '<span class="code-link" onclick="pendingBacktestRuleId=' + ruleId + ';switchTab(\'backtest\')" title="跳转到回测中心">' + ruleDisplay + '</span>'
+        : '<span style="color:var(--text-muted)">' + (row.rule_name || '-') + '</span>';
+    var marketCap = row.market_cap ? row.market_cap.toFixed(1) : '--';
     return '<tr>' +
         '<td style="color:var(--text-muted);width:40px">' + (idx != null ? idx : '') + '</td>' +
         '<td><span class="code-link" onclick="openKline(\'' + (row.code || '') + '\')">' + (row.code || '') + '</span>' +
         ' <span style="cursor:pointer;margin-left:4px;font-size:12px" onclick="showScoreHistory(\'' + (row.code || '') + '\')" title="查看趋势">📈</span></td>' +
         '<td>' + (row.name || '-') + '</td>' +
         '<td class="' + scoreClass + '">' + (row.score != null ? row.score : '--') + '</td>' +
-        '<td style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + ruleName + '">' + (row.rule_name || '-') + '</td>' +
+        '<td style="color:var(--text-secondary)">' + marketCap + '</td>' +
+        '<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + ruleTitle + '">' + ruleCell + '</td>' +
         '</tr>';
 }
 
@@ -416,6 +529,13 @@ function filterScores() {
     var keyword = (document.getElementById('stockSearch') ? document.getElementById('stockSearch').value : '').toLowerCase();
     var minScore = parseFloat(document.getElementById('minScore') ? document.getElementById('minScore').value : '0') || 0;
 
+    // 板块筛选：获取复选框状态（勾选=排除该板块）
+    var filterKCB = document.getElementById('filterKCB') ? document.getElementById('filterKCB').checked : false;
+    var filterCYB = document.getElementById('filterCYB') ? document.getElementById('filterCYB').checked : false;
+
+    // 市值筛选（单位：亿元，0 表示不筛选）
+    var minMarketCap = parseFloat(document.getElementById('minMarketCap') ? document.getElementById('minMarketCap').value : '0') || 0;
+
     var filtered = _scoreData;
     if (keyword) {
         filtered = _scoreData.filter(function(r) {
@@ -425,6 +545,24 @@ function filterScores() {
     }
     if (minScore > 0) {
         filtered = filtered.filter(function(r) { return (r.score || 0) >= minScore; });
+    }
+
+    // 板块筛选：勾选复选框则排除对应板块（688=科创板，300/301=创业板）
+    if (filterKCB || filterCYB) {
+        filtered = filtered.filter(function(r) {
+            var code = r.code || '';
+            var prefix = code.substring(0, 3);
+            // 科创板：688 开头
+            if (filterKCB && prefix === '688') return false;
+            // 创业板：300 或 301 开头
+            if (filterCYB && (prefix === '300' || prefix === '301')) return false;
+            return true;
+        });
+    }
+
+    // 市值筛选
+    if (minMarketCap > 0) {
+        filtered = filtered.filter(function(r) { return (r.market_cap || 0) >= minMarketCap; });
     }
 
     var countEl = document.getElementById('scoreCount');
@@ -488,6 +626,8 @@ function pollSyncProgress(onDone) {
 async function runSyncOnly() {
     const btn = document.getElementById('btnSyncOnly');
     const statusEl = document.getElementById('syncStatus');
+    var scoreDateEl = document.getElementById('scoreDate');
+    pendingScoreDate = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
     btn.disabled = true; btn.textContent = '启动中...';
     try {
         const resp = await RequestManager.fetch('sync-trigger', API + '/sync', { method: 'POST' });
@@ -510,30 +650,82 @@ async function runSyncOnly() {
 async function syncAndScore() {
     const btn = event.target;
     const statusEl = document.getElementById('syncStatus');
-    btn.disabled = true; btn.textContent = '同步中...';
+    var scoreDateEl = document.getElementById('scoreDate');
+    var selectedDate = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
+    
+    // 保存用户选择的日期，以便同步完成后恢复
+    pendingScoreDate = selectedDate;
+    
+    btn.disabled = true; 
+    btn.textContent = '同步中...';
+    
     try {
-        const syncResp = await RequestManager.fetch('sync-trigger', API + '/sync', { method: 'POST' });
-        if (syncResp.error) { statusEl.textContent = syncResp.error; btn.disabled = false; btn.textContent = '同步并刷新'; return; }
+        // 第一步：同步数据（传递选择的日期）
+        var syncBody = selectedDate ? JSON.stringify({date: selectedDate}) : '{}';
+        const syncResp = await RequestManager.fetch('sync-trigger', 
+            API + '/sync', { 
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: syncBody
+            });
+        if (syncResp.error) { 
+            statusEl.textContent = syncResp.error; 
+            btn.disabled = false; 
+            btn.textContent = '同步并刷新'; 
+            pendingScoreDate = null;
+            return; 
+        }
+        
         statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
         showSyncProgress();
-        pollSyncProgress(function(msg) {
+        
+        // 等待同步完成
+        pollSyncProgress(async function(msg) {
             if (msg) statusEl.textContent = msg;
+            
+            // 第二步：计算打分
             btn.textContent = '计算中...';
-            RequestManager.fetch('scoring-run', API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' }).then(function() {
-                btn.disabled = false; btn.textContent = '同步并刷新';
-                loadTab('scores');
-            }).catch(function() {
-                btn.disabled = false; btn.textContent = '同步并刷新';
-                loadTab('scores');
-            });
+            try {
+                var calcResp = await RequestManager.fetch('calculate-scores',
+                    API + '/scoring/run', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({date: selectedDate, force: true})
+                    });
+                
+                if (calcResp.success) {
+                    showToast(calcResp.message, 'success');
+                } else {
+                    showToast(calcResp.error || '计算失败', 'error');
+                }
+            } catch(e) {
+                showToast('计算失败: ' + e.message, 'error');
+            }
+            
+            btn.disabled = false; 
+            btn.textContent = '同步并刷新';
+            // loadTab 会使用 pendingScoreDate 恢复日期选择器
+            loadTab('scores');
         });
     } catch(e) {
-        statusEl.textContent = '同步启动失败，直接打分...';
+        statusEl.textContent = '同步启动失败，尝试直接计算...';
         btn.textContent = '计算中...';
+        
         try {
-            await RequestManager.fetch('scoring-run', API + '/scoring/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+            var calcResp = await RequestManager.fetch('calculate-scores',
+                API + '/scoring/run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({date: selectedDate, force: true})
+                });
+            
+            if (calcResp.success) {
+                showToast(calcResp.message, 'success');
+            }
         } catch(e2) {}
-        btn.disabled = false; btn.textContent = '同步并刷新';
+        
+        btn.disabled = false; 
+        btn.textContent = '同步并刷新';
         loadTab('scores');
     }
 }
@@ -611,7 +803,6 @@ function renderStrategyTable(rules) {
             html += `<tr>
                 <td style="color:var(--accent);font-weight:600">#${r.id}</td>
                 <td><span class="toggle ${r.is_active?'on':''}" onclick="toggleRule(${r.id},this)"></span></td>
-                <td><button class="btn btn-sm" onclick="showVersions(${r.id})">版本</button></td>
                 <td><span class="code-link" onclick="viewRuleTrades(${r.id},'${(r.rule_name||'').replace(/'/g,"\'")}')">${r.rule_name}</span></td>
                 <td><span class="badge badge-info">${r.rule_type}</span></td>
                 <td style="font-weight:600">${(r.fitness||0).toFixed(4)}</td>
@@ -620,7 +811,7 @@ function renderStrategyTable(rules) {
                 <td>${(r.sharpe_ratio||0).toFixed(2)}</td>
                 <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td>
                 <td>${r.total_trades||0}</td>
-                <td><button class="btn btn-danger btn-sm" onclick="deleteRule(${r.id})">删除</button></td></tr>`;
+                <td><button class="btn btn-sm" onclick="showVersions(${r.id})">版本</button> <button class="btn btn-danger btn-sm" onclick="deleteRule(${r.id})">删除</button></td></tr>`;
         });
         html += `</tbody></table></div>`;
     }
@@ -634,9 +825,10 @@ function strategySortBy(key) {
         strategySort.key = key;
         strategySort.dir = -1;
     }
+    // 使用 innerHTML 替换内容，保留外层 div（避免 id="strategyRules" 被销毁导致后续排序失效）
     const rulesEl = document.getElementById('strategyRules');
     if (rulesEl && window._strategyRules) {
-        rulesEl.outerHTML = renderStrategyTable(window._strategyRules);
+        rulesEl.innerHTML = renderStrategyTable(window._strategyRules);
     }
 }
 
@@ -1086,6 +1278,260 @@ function klineColor(d) {
     return d.close >= d.open ? '#ef5350' : '#26a69a';
 }
 
+// ─── 技术指标计算工具函数 ───
+
+/**
+ * 计算 EMA（指数移动平均线）
+ * @param {number[]} data - 收盘价序列
+ * @param {number} period - 周期
+ * @returns {number[]} EMA 序列
+ */
+function calcEMA(data, period) {
+    var k = 2 / (period + 1);
+    var ema = [data[0]];
+    for (var i = 1; i < data.length; i++) {
+        ema.push(data[i] * k + ema[i - 1] * (1 - k));
+    }
+    return ema;
+}
+
+/**
+ * 计算 MACD 指标
+ * 返回 { dif, dea, macd } 三个数组，长度与 kdata 一致
+ */
+function calcMACD(kdata, shortPeriod, longPeriod, signalPeriod) {
+    shortPeriod = shortPeriod || 12;
+    longPeriod = longPeriod || 26;
+    signalPeriod = signalPeriod || 9;
+    var closes = kdata.map(function(d) { return d.close; });
+    var emaShort = calcEMA(closes, shortPeriod);
+    var emaLong = calcEMA(closes, longPeriod);
+    var dif = emaShort.map(function(v, i) { return v - emaLong[i]; });
+    var dea = calcEMA(dif, signalPeriod);
+    // MACD柱 = (DIF - DEA) * 2，用于柱状图显示
+    var macd = dif.map(function(v, i) { return (v - dea[i]) * 2; });
+    return { dif: dif, dea: dea, macd: macd };
+}
+
+/**
+ * 计算 KDJ 指标
+ * 返回 { k, d, j } 三个数组
+ */
+function calcKDJ(kdata, n, m1, m2) {
+    n = n || 9;
+    m1 = m1 || 3;
+    m2 = m2 || 3;
+    var kArr = [], dArr = [], jArr = [];
+    var prevK = 50, prevD = 50; // 初始值
+
+    for (var i = 0; i < kdata.length; i++) {
+        // 取最近 n 天的最高价和最低价
+        var start = Math.max(0, i - n + 1);
+        var highMax = -Infinity, lowMin = Infinity;
+        for (var j = start; j <= i; j++) {
+            if (kdata[j].high > highMax) highMax = kdata[j].high;
+            if (kdata[j].low < lowMin) lowMin = kdata[j].low;
+        }
+        var rsv = highMax === lowMin ? 50 : ((kdata[i].close - lowMin) / (highMax - lowMin)) * 100;
+        // K = 前K * (m1-1)/m1 + RSV/m1
+        var curK = prevK * (m1 - 1) / m1 + rsv / m1;
+        // D = 前D * (m2-1)/m2 + K/m2
+        var curD = prevD * (m2 - 1) / m2 + curK / m2;
+        // J = 3K - 2D
+        var curJ = 3 * curK - 2 * curD;
+        kArr.push(curK);
+        dArr.push(curD);
+        jArr.push(curJ);
+        prevK = curK;
+        prevD = curD;
+    }
+    return { k: kArr, d: dArr, j: jArr };
+}
+
+// 当前激活的副图指标（可多选）
+var klineIndicators = { vol: true, macd: false, kdj: false };
+
+/**
+ * 根据当前激活的指标，动态构建 ECharts 配置
+ */
+function buildKlineOption(kdata, dates, ohlc, volData, marks) {
+    var ind = klineIndicators;
+    // 决定需要哪些副图 grid
+    var subCharts = [];
+    if (ind.vol) subCharts.push('vol');
+    if (ind.macd) subCharts.push('macd');
+    if (ind.kdj) subCharts.push('kdj');
+    // 至少保留成交量
+    if (subCharts.length === 0) { subCharts.push('vol'); ind.vol = true; }
+
+    var subCount = subCharts.length;
+    // 主图占固定 55% 高度，剩余空间平分给副图
+    var mainHeight = '55%';
+    // 每个副图高度 = (100 - 55 - 顶部留白 - 底部留白) / subCount
+    // 留出约 8% 的顶部标题+间距空间，底部 dataZoom 约 30px
+    var availableSubPct = 38; // 副图可用百分比空间
+    var eachSubHeight = Math.floor(availableSubPct / subCount);
+    var gap = 2; // 副图之间间距百分比
+
+    // 构建 grid 数组
+    var grids = [{ left: '10%', right: '10%', top: 50, height: mainHeight }];
+    var xAxisArr = [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#6b7a9a', rotate: 30 }, axisLine: { lineStyle: { color: '#182240' } } }];
+    var yAxisArr = [{ scale: true, gridIndex: 0, axisLabel: { color: '#6b7a9a' }, splitLine: { lineStyle: { color: '#111832' } } }];
+    var seriesArr = [
+        { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 20 }
+    ];
+
+    // 动态计算每个副图的 top 位置
+    // 主图底部约在 55% + 50px，从约 60% 开始放置副图
+    var subStartTop = 60;
+    for (var i = 0; i < subCharts.length; i++) {
+        var topVal = (subStartTop + i * (eachSubHeight + gap)) + '%';
+        var gridIdx = i + 1;
+        grids.push({ left: '10%', right: '10%', top: topVal, height: eachSubHeight + '%' });
+        xAxisArr.push({ type: 'category', data: dates, gridIndex: gridIdx, axisLabel: { show: false }, axisLine: { lineStyle: { color: '#182240' } } });
+        yAxisArr.push({ scale: true, gridIndex: gridIdx, axisLabel: { color: '#6b7a9a', fontSize: 10 }, splitLine: { show: false }, splitNumber: 2 });
+
+        var chartType = subCharts[i];
+        if (chartType === 'vol') {
+            seriesArr.push({ type: 'bar', name: '成交量', data: volData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' });
+        } else if (chartType === 'macd') {
+            var macdData = calcMACD(kdata);
+            // MACD 柱状图（正值红色，负值绿色）
+            var macdBarData = macdData.macd.map(function(v) {
+                return { value: v, itemStyle: { color: v >= 0 ? '#ef5350' : '#26a69a' } };
+            });
+            seriesArr.push(
+                { type: 'bar', name: 'MACD', data: macdBarData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' },
+                { type: 'line', name: 'DIF', data: macdData.dif, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#00d4f0' } },
+                { type: 'line', name: 'DEA', data: macdData.dea, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#f5a623' } }
+            );
+        } else if (chartType === 'kdj') {
+            var kdjData = calcKDJ(kdata);
+            seriesArr.push(
+                { type: 'line', name: 'K', data: kdjData.k, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#00d4f0' } },
+                { type: 'line', name: 'D', data: kdjData.d, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#f5a623' } },
+                { type: 'line', name: 'J', data: kdjData.j, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#ab47bc' } }
+            );
+        }
+    }
+
+    // dataZoom 联动所有 xAxis
+    var allXAxisIndexes = [];
+    for (var x = 0; x <= subCount; x++) allXAxisIndexes.push(x);
+
+    var opt = {
+        title: { text: '', left: 'center', textStyle: { color: '#dde4f0', fontSize: 14, fontFamily: "'JetBrains Mono', monospace" } },
+        tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'cross' },
+            formatter: function(params) {
+                var idx = params[0]?.dataIndex;
+                if (idx == null) return '';
+                var d = kdata[idx];
+                var chgColor = d.chgPct >= 0 ? '#ef5350' : '#26a69a';
+                var limitLabel = d.limitType === 'limit_up' ? ' [涨停]' : d.limitType === 'limit_down' ? ' [跌停]' : '';
+                var html = '<b>' + d.date + '</b>' + limitLabel + '<br/>' +
+                    '开: ' + d.open.toFixed(2) + ' &nbsp; 高: ' + d.high.toFixed(2) + '<br/>' +
+                    '收: ' + d.close.toFixed(2) + ' &nbsp; 低: ' + d.low.toFixed(2) + '<br/>' +
+                    '涨跌幅: <span style="color:' + chgColor + ';font-weight:bold">' + (d.chgPct >= 0 ? '+' : '') + d.chgPct.toFixed(2) + '%</span><br/>' +
+                    '成交量: ' + (d.vol / 10000).toFixed(0) + '万';
+                // 追加指标数据到 tooltip
+                params.forEach(function(p) {
+                    if (p.seriesName === 'DIF') html += '<br/>DIF: ' + (p.value != null ? p.value.toFixed(3) : '-');
+                    if (p.seriesName === 'DEA') html += '<br/>DEA: ' + (p.value != null ? p.value.toFixed(3) : '-');
+                    if (p.seriesName === 'MACD') html += '<br/>MACD: ' + (p.value != null ? p.value.toFixed(3) : '-');
+                    if (p.seriesName === 'K') html += '<br/>K: ' + (p.value != null ? p.value.toFixed(2) : '-');
+                    if (p.seriesName === 'D') html += '<br/>D: ' + (p.value != null ? p.value.toFixed(2) : '-');
+                    if (p.seriesName === 'J') html += '<br/>J: ' + (p.value != null ? p.value.toFixed(2) : '-');
+                });
+                return html;
+            }
+        },
+        grid: grids,
+        xAxis: xAxisArr,
+        yAxis: yAxisArr,
+        dataZoom: [
+            { type: 'slider', xAxisIndex: allXAxisIndexes, start: 50, end: 100, height: 25, bottom: 0,
+              borderColor: '#182240', backgroundColor: '#0c1124',
+              dataBackground: { lineStyle: { color: '#00d4f0' }, areaStyle: { color: 'rgba(0,212,240,0.08)' } },
+              textStyle: { color: '#6b7a9a' }, handleStyle: { color: '#00d4f0' } },
+            { type: 'inside', xAxisIndex: allXAxisIndexes, zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false }
+        ],
+        series: seriesArr
+    };
+
+    // 买卖点标记
+    if (marks && marks.length > 0) {
+        opt.series.push({
+            type: 'scatter', name: '买卖点', data: marks.map(function(m) { return [m.date, m.price]; }), xAxisIndex: 0, yAxisIndex: 0,
+            symbolSize: 14, symbol: 'pin',
+            itemStyle: { color: function(p) { return marks[p.dataIndex]?.type === 'buy' ? '#ef5350' : '#26a69a'; } },
+            label: { show: true, formatter: function(p) { return marks[p.dataIndex]?.type === 'buy' ? 'B' : 'S'; }, color: '#fff', fontSize: 10, fontWeight: 'bold', position: 'top' }
+        });
+    }
+
+    return opt;
+}
+
+/**
+ * 切换副图指标并重新渲染
+ */
+function toggleIndicator(name) {
+    klineIndicators[name] = !klineIndicators[name];
+    // 更新按钮样式
+    updateIndicatorButtons();
+    // 重新渲染（使用缓存的 kdata）
+    if (window._klineCache) {
+        renderKlineWithIndicators(window._klineCache);
+    }
+}
+
+/**
+ * 更新指标按钮的激活状态样式
+ */
+function updateIndicatorButtons() {
+    var btns = document.querySelectorAll('.indicator-btn');
+    btns.forEach(function(btn) {
+        var key = btn.dataset.indicator;
+        if (klineIndicators[key]) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+}
+
+/**
+ * 使用当前指标配置渲染K线图
+ */
+function renderKlineWithIndicators(cache) {
+    var dates = cache.kdata.map(function(d) { return d.date; });
+    var ohlc = cache.kdata.map(function(d) {
+        var color = klineColor(d);
+        return { value: [d.open, d.close, d.low, d.high], itemStyle: { color: color, color0: color, borderColor: color, borderColor0: color } };
+    });
+    var volData = cache.kdata.map(function(d) {
+        return {
+            value: d.vol,
+            itemStyle: { color: d.chgPct >= 0 ? '#ef5350' : '#26a69a' }
+        };
+    });
+
+    var klineChartInst = ChartManager.get('kline', document.getElementById('klineChart'));
+    klineChartInst.clear();
+
+    // 根据激活的副图数量动态调整图表高度
+    var activeCount = Object.values(klineIndicators).filter(Boolean).length;
+    var chartHeight = 560 + (activeCount - 1) * 100; // 每多一个副图增加100px
+    chartHeight = Math.min(chartHeight, 800); // 最大800px
+    document.getElementById('klineChart').style.height = chartHeight + 'px';
+
+    var opt = buildKlineOption(cache.kdata, dates, ohlc, volData, cache.marks);
+    opt.title.text = cache.code + ' K线图';
+    klineChartInst.setOption(opt);
+    klineChartInst.resize();
+}
+
 async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resultId) {
     const panel = document.getElementById('klinePanel'); panel.classList.add('open');
     let start = '2024-01-01', end = new Date().toISOString().split('T')[0];
@@ -1110,6 +1556,7 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
         return;
     }
 
+    // 计算涨跌幅和涨跌停标记
     for (let i = 0; i < kdata.length; i++) {
         kdata[i].prevClose = i > 0 ? kdata[i-1].close : kdata[i].open;
         kdata[i].chgPct = kdata[i].prevClose > 0 ? ((kdata[i].close / kdata[i].prevClose - 1) * 100) : 0;
@@ -1123,73 +1570,14 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
         })();
     }
 
-    const dates = kdata.map(d => d.date);
-    const ohlc = kdata.map(d => {
-        const color = klineColor(d);
-        return { value: [d.open, d.close, d.low, d.high], itemStyle: { color: color, color0: color, borderColor: color, borderColor0: color } };
-    });
-    const volData = kdata.map(d => ({
-        value: d.vol,
-        itemStyle: { color: d.chgPct >= 0 ? '#ef5350' : '#26a69a' }
-    }));
+    // 缓存数据，供切换指标时复用（无需重新请求后端）
+    window._klineCache = { code: code, kdata: kdata, marks: marks };
 
-    var klineChartInst = ChartManager.get('kline', document.getElementById('klineChart'));
-    klineChartInst.clear();
+    // 更新指标按钮状态
+    updateIndicatorButtons();
 
-    var opt = {
-        title: { text: code + ' K线图', left: 'center', textStyle: { color: '#dde4f0', fontSize: 14, fontFamily: "'JetBrains Mono', monospace" } },
-        tooltip: {
-            trigger: 'axis',
-            axisPointer: { type: 'cross' },
-            formatter: function(params) {
-                var idx = params[0]?.dataIndex;
-                if (idx == null) return '';
-                var d = kdata[idx];
-                var chgColor = d.chgPct >= 0 ? '#ef5350' : '#26a69a';
-                var limitLabel = d.limitType === 'limit_up' ? ' [涨停]' : d.limitType === 'limit_down' ? ' [跌停]' : '';
-                return '<b>' + d.date + '</b>' + limitLabel + '<br/>' +
-                    '开: ' + d.open.toFixed(2) + ' &nbsp; 高: ' + d.high.toFixed(2) + '<br/>' +
-                    '收: ' + d.close.toFixed(2) + ' &nbsp; 低: ' + d.low.toFixed(2) + '<br/>' +
-                    '涨跌幅: <span style="color:' + chgColor + ';font-weight:bold">' + (d.chgPct >= 0 ? '+' : '') + d.chgPct.toFixed(2) + '%</span><br/>' +
-                    '成交量: ' + (d.vol/10000).toFixed(0) + '万';
-            }
-        },
-        grid: [
-            { left: '10%', right: '10%', top: 50, height: '60%' },
-            { left: '10%', right: '10%', top: '78%', height: '12%' }
-        ],
-        xAxis: [
-            { type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#6b7a9a', rotate: 30 }, axisLine: { lineStyle: { color: '#182240' } } },
-            { type: 'category', data: dates, gridIndex: 1, axisLabel: { show: false }, axisLine: { lineStyle: { color: '#182240' } } }
-        ],
-        yAxis: [
-            { scale: true, gridIndex: 0, axisLabel: { color: '#6b7a9a' }, splitLine: { lineStyle: { color: '#111832' } } },
-            { scale: true, gridIndex: 1, axisLabel: { color: '#6b7a9a', fontSize: 10 }, splitLine: { show: false }, splitNumber: 2 }
-        ],
-        dataZoom: [
-            { type: 'slider', xAxisIndex: [0, 1], start: 50, end: 100, height: 25, bottom: 0,
-              borderColor: '#182240', backgroundColor: '#0c1124',
-              dataBackground: { lineStyle: { color: '#00d4f0' }, areaStyle: { color: 'rgba(0,212,240,0.08)' } },
-              textStyle: { color: '#6b7a9a' }, handleStyle: { color: '#00d4f0' } },
-            { type: 'inside', xAxisIndex: [0, 1], zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false }
-        ],
-        series: [
-            { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 20 },
-            { type: 'bar', name: '成交量', data: volData, xAxisIndex: 1, yAxisIndex: 1, barWidth: '60%' }
-        ]
-    };
-
-    if (marks.length > 0) {
-        opt.series.push({
-            type: 'scatter', name: '买卖点', data: marks.map(function(m) { return [m.date, m.price]; }), xAxisIndex: 0, yAxisIndex: 0,
-            symbolSize: 14, symbol: 'pin',
-            itemStyle: { color: function(p) { return marks[p.dataIndex]?.type === 'buy' ? '#ef5350' : '#26a69a'; } },
-            label: { show: true, formatter: function(p) { return marks[p.dataIndex]?.type === 'buy' ? 'B' : 'S'; }, color: '#fff', fontSize: 10, fontWeight: 'bold', position: 'top' }
-        });
-    }
-
-    klineChartInst.setOption(opt);
-    klineChartInst.resize();
+    // 使用动态指标渲染
+    renderKlineWithIndicators(window._klineCache);
 
     let infoHtml = `<h4 style="font-family:var(--font-mono);margin-bottom:8px;color:var(--text-primary)">${code}</h4>`;
     if (entryDate && entryPrice) {
@@ -1203,7 +1591,10 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
     document.getElementById('klineTradeInfo').innerHTML = infoHtml;
 }
 
-function closeKline() { document.getElementById('klinePanel').classList.remove('open'); }
+function closeKline() {
+    document.getElementById('klinePanel').classList.remove('open');
+    window._klineCache = null; // 关闭弹窗时清理缓存
+}
 
 // ─── Init ───
 loadTab('scores');
