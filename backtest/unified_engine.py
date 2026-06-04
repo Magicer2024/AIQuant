@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from typing import List
+from config.settings import BACKTEST
 import pandas as pd
 
 
@@ -17,8 +18,8 @@ class UnifiedBacktester:
     """Unified backtest engine with configurable parameters."""
 
     def __init__(self,
-                 commission_rate: float = 0.0003,
-                 stamp_tax: float = 0.001,
+                 commission_rate: float = BACKTEST.get("open_cost", 0.0003),
+                 stamp_tax: float = BACKTEST.get("close_cost", 0.0015) - 0.0003,
                  slippage_rate: float = 0.001,
                  stop_loss: float = -0.08,
                  take_profit: float = 0.20,

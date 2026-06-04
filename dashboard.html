@@ -1522,8 +1522,9 @@ function renderKlineWithIndicators(cache) {
 
     // 根据激活的副图数量动态调整图表高度
     var activeCount = Object.values(klineIndicators).filter(Boolean).length;
-    var chartHeight = 560 + (activeCount - 1) * 100; // 每多一个副图增加100px
-    chartHeight = Math.min(chartHeight, 800); // 最大800px
+    var baseChartH = window.innerWidth < 480 ? 280 : window.innerWidth < 768 ? 380 : 560;
+    var chartHeight = baseChartH + (activeCount - 1) * (window.innerWidth < 768 ? 70 : 100); // 每多一个副图增加100px
+    chartHeight = Math.min(chartHeight, window.innerWidth < 768 ? 500 : 800); // 最大800px
     document.getElementById('klineChart').style.height = chartHeight + 'px';
 
     var opt = buildKlineOption(cache.kdata, dates, ohlc, volData, cache.marks);
