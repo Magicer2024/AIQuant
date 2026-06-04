@@ -5,6 +5,8 @@ Flask 入口
 import os
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from utils.timing import init_app as init_timing
+from utils.api import ok, fail
 
 from routes.system import system_bp
 from routes.sync import sync_bp
@@ -30,6 +32,8 @@ app.register_blueprint(scoring_bp)
 app.register_blueprint(strategy_bp)
 app.register_blueprint(backtest_bp)
 
+init_timing(app)
+
 
 @app.route("/")
 @app.route("/dashboard")
@@ -44,17 +48,17 @@ def serve_report(filename):
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "message": "AIQuant 个人股票评分系统"})
+    return ok({"status": "ok", "message": "AIQuant 个人股票评分系统"})
 
 
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify({"error": f"404: {request.path} not found"}), 404
+    return fail(f"404: {request.path} not found", 404)
 
 
 @app.errorhandler(500)
 def server_error(e):
-    return jsonify({"error": f"500: {str(e)}"}), 500
+    return fail(f"500: {str(e)}", 500)
 
 
 if __name__ == "__main__":

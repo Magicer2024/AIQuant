@@ -5,6 +5,7 @@ import json
 from datetime import date
 from utils.serialization import sanitize_numeric as _sanitize
 from flask import Blueprint, request, jsonify
+from utils.api import ok, fail
 from strategy.scorer import score_stocks, get_daily_scores, get_daily_scores_count, get_latest_score_date
 from core.db import get_conn
 
@@ -26,18 +27,17 @@ def daily_scores():
     results = get_daily_scores(trade_date, page=page, per_page=per_page)
     total = get_daily_scores_count(trade_date)
 
-    return jsonify({
-        "success": True,
-        "data": _sanitize(results),
-        "pagination": {
+    return ok(
+        _sanitize(results),
+        pagination={
             "page": page,
             "per_page": per_page,
             "total": total,
             "pages": max(1, (total + per_page - 1) // per_page)
         },
-        "date": trade_date,
-        "error": None
-    })
+        date=trade_date,
+        error=None
+    )
 
 
 @scoring_bp.route("/run", methods=["POST"])

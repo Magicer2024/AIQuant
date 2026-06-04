@@ -6,6 +6,7 @@ import threading
 from utils.serialization import sanitize_numeric as _sanitize
 from datetime import date
 from flask import Blueprint, request, jsonify
+from utils.api import ok, fail
 from backtest.reporter import build_result_list, build_result_detail
 from backtest.trade_store import get_result, get_trades, delete_result
 from strategy.rules_store import get_rule
