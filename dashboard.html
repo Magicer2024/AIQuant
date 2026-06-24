@@ -17,7 +17,7 @@
 <header class="header">
     <div class="header-brand">
         <div class="header-logo"></div>
-        <h1>AI<span>Quant</span> · 量化终端</h1>
+        <h1>AI<span>Quant</span> · 个人投研台</h1>
     </div>
     <div class="header-status">
         <div class="status-dot" id="sysStatus"></div>
@@ -26,12 +26,24 @@
 </header>
 
 <nav class="nav-bar">
-    <button class="nav-item active" onclick="switchTab('scores')">每日打分</button>
+    <button class="nav-item active" onclick="switchTab('home')">首页</button>
+    <button class="nav-item" onclick="switchTab('scores')" style="font-size:12px;opacity:0.7">高级筛选</button>
     <button class="nav-item" onclick="switchTab('strategy')">策略管理</button>
     <button class="nav-item" onclick="switchTab('backtest')">回测中心</button>
 </nav>
 
 <main class="content" id="content"></main>
+
+<!-- 全局同步进度条（所有 tab 共用） -->
+<div id="syncProgress" style="display:none; margin: 12px 20px; padding: 12px 16px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px;">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+        <div id="syncProgressBar" style="flex:1; height:8px; background:var(--border); border-radius:4px; overflow:hidden;">
+            <div id="syncProgressFill" style="height:100%; width:0%; background:var(--accent); border-radius:4px; transition:width 0.3s;"></div>
+        </div>
+        <span id="syncProgressPct" style="font-size:12px; color:var(--text-secondary); white-space:nowrap;">0%</span>
+    </div>
+    <div id="syncProgressText" style="font-size:12px; color:var(--text-secondary);"></div>
+</div>
 
 <div class="kline-overlay" id="klinePanel" onclick="if(event.target===this)closeKline()">
     <div class="kline-popup">
@@ -49,7 +61,7 @@
 
 <script>
 const API = '/api';
-let currentTab = 'scores';
+let currentTab = 'home';
 var pendingBacktestRuleId = null;
 var pendingScoreDate = null;
 
@@ -274,7 +286,8 @@ async function loadTab(tab) {
     const c = document.getElementById('content');
     showSkeleton(c, 10);
     try {
-        if (tab === 'scores') await loadScoresTab(c);
+        if (tab === 'home') await loadHomeTab(c);
+        else if (tab === 'scores') await loadScoresTab(c);
         else if (tab === 'strategy') await loadStrategyTab(c);
         else if (tab === 'backtest') await loadBacktestTab(c);
         c.firstElementChild?.classList.add('tab-content');
@@ -282,6 +295,648 @@ async function loadTab(tab) {
         showToast('加载失败，请重试', 'error');
         c.innerHTML = '<div class="empty-state" style="color:var(--danger)">加载失败: ' + e.message + '</div>';
     }
+}
+
+// ─── Tab 0: Home (个人投资者首页) ───
+async function loadHomeTab(container) {
+    container.innerHTML = `
+        <div class="hero-banner">
+            <div class="hero-left">
+                <div class="hero-greeting" id="heroGreeting">早上好 👋</div>
+                <div class="hero-title">今天投资，看这一页就够了</div>
+                <div class="hero-sub" id="heroSub">正在加载市场状态…</div>
+                <div class="hero-fund-tip" style="margin-top:8px;padding:8px 12px;background:rgba(255,171,64,0.08);border-left:3px solid var(--warning);border-radius:4px;font-size:13px;color:var(--text-secondary)">
+                    💰 当前账户假设 1.5 万，今日新增投入 ≤ 3000 元（单票不超过 20% 仓位）
+                </div>
+            </div>
+            <div class="hero-right">
+                <div class="regime-card" id="regimeCard">--</div>
+                <div class="regime-tip" id="regimeTip"></div>
+            </div>
+        </div>
+
+        <div class="panel" id="dataStatusPanel">
+            <div class="panel-header">
+                <h3>📊 数据状态</h3>
+                <span class="text-muted" id="dataStatusHint" style="font-size:12px"></span>
+            </div>
+            <div class="data-status-grid">
+                <div class="data-status-cell">
+                    <div class="label">行情数据 (daily_price)</div>
+                    <div class="state" id="syncDataState"><span class="badge badge-running">检查中…</span></div>
+                    <div class="time" id="syncDataTime"></div>
+                </div>
+                <div class="data-status-cell">
+                    <div class="label">推荐打分 (stock_signal)</div>
+                    <div class="state" id="recalcState"><span class="badge badge-running">检查中…</span></div>
+                    <div class="time" id="recalcTime"></div>
+                </div>
+            </div>
+            <div class="data-status-actions">
+                <button class="btn btn-primary btn-sm" id="btnHomeSync" onclick="homeSync()">立即同步行情</button>
+                <button class="btn btn-sm" id="btnHomeRecalc" onclick="homeRecalc()">立即重算打分</button>
+                <span class="inline-progress" id="homeInlineProgress"></span>
+            </div>
+        </div>
+
+        <div id="alertsBanner"></div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>市场速览</h3>
+                <span class="text-muted" id="marketUpdatedAt" style="font-size:12px"></span>
+            </div>
+            <div id="indexCards" class="index-grid">加载中…</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>今日推荐 · 已经有明确的买卖价位</h3>
+                <input type="date" id="pickDate" value="" onchange="loadTodayPicks()" style="font-size:12px;padding:2px 6px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+                <span class="text-muted" style="font-size:12px">基于量价 + 主力 + 趋势综合评估，点击查看 K 线</span>
+            </div>
+            <div id="todayPicks" class="action-plan-grid">加载中…</div>
+        </div>
+
+        <div class="grid-2col">
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>我的持仓</h3>
+                    <button class="btn btn-primary btn-sm" onclick="showAddPositionDialog()">+ 添加</button>
+                </div>
+                <div id="myPositions">加载中…</div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>我的自选</h3>
+                    <button class="btn btn-sm" onclick="showAddWatchlistDialog()">+ 添加</button>
+                </div>
+                <div id="myWatchlist">加载中…</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>新手入门 · 量化指标速查</h3>
+                <span class="text-muted" style="font-size:12px">点指标看白话解释</span>
+            </div>
+            <div id="explainerGrid" class="explainer-grid"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>历史推荐回测 · 过去30天推荐的真实表现</h3>
+                <span class="text-muted" style="font-size:12px" id="recHistoryUpdatedAt"></span>
+            </div>
+            <div id="recHistorySummary"></div>
+            <div id="recHistoryTable">加载中…</div>
+        </div>
+    `;
+
+    // 并行加载所有数据
+    await Promise.all([
+        loadMarketOverview(),
+        loadTodayPicks(),
+        loadMyPositions(),
+        loadMyWatchlist(),
+        loadAlertsBanner(),
+        loadExplainerGrid(),
+        loadRecHistory(),
+        loadSyncStatusPanel(),
+    ]);
+
+    // 首次进入或今日尚未同步时，自动触发同步
+    maybeAutoSync();
+}
+
+function greetingByHour() {
+    var h = new Date().getHours();
+    if (h < 6)  return '夜深了 🌙';
+    if (h < 11) return '早上好 ☀️';
+    if (h < 14) return '中午好 🌤';
+    if (h < 18) return '下午好 🌞';
+    return '晚上好 🌙';
+}
+
+const REGIME_META = {
+    hot:     { color: '#ff5252', emoji: '🔥', tag: '火热' },
+    warm:    { color: '#ff9d45', emoji: '🌤', tag: '偏暖' },
+    neutral: { color: '#00d4f0', emoji: '⚖️', tag: '震荡' },
+    cool:    { color: '#7baaff', emoji: '🌧', tag: '偏冷' },
+    cold:    { color: '#5b88c2', emoji: '❄️', tag: '冰点' },
+    unknown: { color: '#888',    emoji: '·',  tag: '未知' },
+};
+
+async function loadMarketOverview() {
+    try {
+        const resp = await RequestManager.fetch('market', API + '/investor/market-overview');
+        const d = resp.data || {};
+
+        // Hero
+        const greet = document.getElementById('heroGreeting');
+        const sub = document.getElementById('heroSub');
+        if (greet) greet.textContent = greetingByHour();
+        const senti = d.sentiment || {};
+        const meta = REGIME_META[senti.regime] || REGIME_META.unknown;
+        if (sub) {
+            sub.innerHTML = `大盘状态：<b style="color:${meta.color}">${meta.tag}</b> · ${senti.label || ''}` +
+                (senti.total_amount ? ` · 今日总成交 <b>${senti.total_amount} 亿</b>` : '');
+        }
+
+        // Regime card
+        const card = document.getElementById('regimeCard');
+        const tip = document.getElementById('regimeTip');
+        if (card) {
+            card.style.borderColor = meta.color;
+            card.innerHTML = `<div class="regime-emoji">${meta.emoji}</div><div class="regime-tag" style="color:${meta.color}">${meta.tag}</div>`;
+        }
+        if (tip) {
+            const tipMap = {
+                hot:     '注意追高风险，建议减仓',
+                warm:    '可适度参与，重点关注个股',
+                neutral: '精选个股，避免追涨杀跌',
+                cool:    '控制仓位，少动多看',
+                cold:    '防守为主，保留现金',
+                unknown: '数据不足',
+            };
+            tip.textContent = tipMap[senti.regime] || '';
+        }
+
+        // Index cards
+        const grid = document.getElementById('indexCards');
+        const idxList = d.indices || [];
+        const idxHtml = idxList.map(idx => {
+            const chg = idx.pct_change || 0;
+            const cls = chg >= 0 ? 'idx-up' : 'idx-down';
+            const sign = chg >= 0 ? '+' : '';
+            const trend5 = idx.trend_5d_pct;
+            const trend5Html = trend5 == null ? '' :
+                `<div class="idx-trend ${trend5>=0?'idx-up':'idx-down'}">5日 ${trend5>=0?'+':''}${trend5}%</div>`;
+            return `
+                <div class="idx-card">
+                    <div class="idx-name">${idx.name}</div>
+                    <div class="idx-price">${idx.close.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
+                    <div class="idx-pct ${cls}">${sign}${chg.toFixed(2)}%</div>
+                    ${trend5Html}
+                </div>`;
+        }).join('');
+
+        const north = d.north_bound || {};
+        const northHtml = north.north_net_buy != null ? `
+            <div class="idx-card north-card">
+                <div class="idx-name">北向资金</div>
+                <div class="idx-price ${(north.north_net_buy||0)>=0?'idx-up':'idx-down'}">${(north.north_net_buy/1e8).toFixed(1)}<span style="font-size:14px;color:var(--text-muted)"> 亿</span></div>
+                <div class="idx-trend" style="color:var(--text-secondary);font-size:11px">${north.label || ''}</div>
+            </div>
+        ` : '';
+        if (grid) grid.innerHTML = idxHtml + northHtml;
+
+        const upd = document.getElementById('marketUpdatedAt');
+        if (upd && d.updated_at) upd.textContent = '更新于 ' + d.updated_at;
+    } catch(e) {
+        console.error('market overview failed', e);
+        const sub = document.getElementById('heroSub');
+        if (sub) sub.textContent = '市场数据加载失败';
+    }
+}
+
+async function loadTodayPicks() {
+    const box = document.getElementById('todayPicks');
+    const dateEl = document.getElementById('pickDate');
+    const dateParam = dateEl && dateEl.value ? '&date=' + dateEl.value : '';
+    try {
+        const resp = await RequestManager.fetch('today', API + '/investor/today?limit=8' + dateParam);
+        const items = (resp.data && resp.data.items) || [];
+        const serverDate = resp.data && resp.data.date;
+        // 自动回填日期（首次加载时）
+        if (dateEl && !dateEl.value && serverDate) {
+            dateEl.value = serverDate;
+        }
+        if (items.length === 0) {
+            box.innerHTML = '<div class="empty-state">暂无推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「高级筛选」跑一遍打分</span></div>';
+            return;
+        }
+        box.innerHTML = items.map(it => {
+            const ap = it.action_plan || {};
+            const es = it.entry_strategy || {};
+            const pp = it.position_plan || {};
+            const sg = it.signal || {};
+            const entry = ap.entry_price ? ap.entry_price.toFixed(2) : '--';
+            const stop   = ap.stop_loss   ? ap.stop_loss.toFixed(2)   : '--';
+            const tp     = ap.take_profit ? ap.take_profit.toFixed(2) : '--';
+            const rr     = ap.risk_reward_ratio;
+            const rrCls  = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
+            const rrHtml = rr != null ? `<span class="rr-tag ${rrCls}">盈亏比 ${rr.toFixed(2)}</span>` : '';
+            const reasons = (it.reasons || []).map(r => `<span class="reason-chip">${r}</span>`).join('');
+            const pctChg = it.latest_pct;
+            const pctHtml = pctChg != null ?
+                `<span class="${pctChg>=0?'idx-up':'idx-down'}" style="font-weight:600">${pctChg>=0?'+':''}${pctChg.toFixed(2)}%</span>` : '';
+
+            // ── 信号灯徽章 ──
+            const sigClass = 'sig-' + (sg.level || 'wait');
+            const sigHtml = sg.label ? `
+                <div class="signal-badge ${sigClass}" title="${(sg.reasons||[]).concat(sg.warnings||[]).join(' · ')}">
+                    <span class="sig-emoji">${sg.emoji||'⚪'}</span>
+                    <span class="sig-label">${sg.label}</span>
+                </div>
+                <div class="signal-reasons">
+                    ${(sg.reasons||[]).map(r => `<span class="reason-chip sig-reason-good">${r}</span>`).join('')}
+                    ${(sg.warnings||[]).map(w => `<span class="reason-chip sig-reason-warn">⚠ ${w}</span>`).join('')}
+                </div>
+            ` : '';
+
+            // ── 3 个挂单位置 ──
+            let entryHtml = '';
+            if (es.aggressive && es.stable && es.conservative) {
+                const clsA = es.recommend === 'aggressive' ? 'entry-pick' : '';
+                const clsS = es.recommend === 'stable' ? 'entry-pick' : '';
+                const clsC = es.recommend === 'conservative' ? 'entry-pick' : '';
+                entryHtml = `
+                <div class="entry-strategy">
+                    <div class="entry-strategy-head">
+                        <span>📍 挂单位置</span>
+                        <span class="entry-recommend">${es.recommend_hint||''}</span>
+                    </div>
+                    <div class="entry-prices">
+                        <div class="entry-price ${clsA}">
+                            <div class="entry-tag">激进</div>
+                            <div class="entry-val">${es.aggressive.toFixed(2)}</div>
+                            <div class="entry-sub">现价 -1%</div>
+                        </div>
+                        <div class="entry-price ${clsS}">
+                            <div class="entry-tag">稳健</div>
+                            <div class="entry-val">${es.stable.toFixed(2)}</div>
+                            <div class="entry-sub">现价 -3%</div>
+                        </div>
+                        <div class="entry-price ${clsC}">
+                            <div class="entry-tag">保守</div>
+                            <div class="entry-val">${es.conservative.toFixed(2)}</div>
+                            <div class="entry-sub">回踩 -6%</div>
+                        </div>
+                    </div>
+                </div>`;
+            }
+
+            // ── 建仓分批 ──
+            let ppHtml = '';
+            if (pp.batches && pp.batches.length) {
+                const totalStr = pp.total_shares ? `${pp.total_shares} 股 · 约 ¥${pp.total_cost_est}` : '资金不足 1 手';
+                ppHtml = `
+                <div class="position-plan">
+                    <div class="position-plan-head">
+                        <span>💰 建仓分批 · 1.5万账户</span>
+                        <span class="position-plan-total">${totalStr}</span>
+                    </div>
+                    <div class="position-batches">
+                        ${pp.batches.map(b => `
+                            <div class="batch-row">
+                                <span class="batch-ratio">${(b.ratio*100).toFixed(0)}%</span>
+                                <span class="batch-note">${b.note}</span>
+                                <span class="batch-shares">${b.shares}股</span>
+                                <span class="batch-price">@${b.price.toFixed(2)}</span>
+                                <span class="batch-trigger">${b.trigger}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>`;
+            }
+
+            return `
+                <div class="action-card" onclick="openKline('${it.code}')">
+                    <div class="action-head">
+                        <div>
+                            <div class="action-name">${it.name || it.code}</div>
+                            <div class="action-code">${it.code}${it.industry?` · ${it.industry}`:''}</div>
+                        </div>
+                        <div class="action-score">
+                            <div class="score-num">${it.fusion_score||'--'}</div>
+                            <div class="score-lbl">综合分</div>
+                        </div>
+                    </div>
+                    ${sigHtml}
+                    <div class="action-prices">
+                        <div class="price-cell buy">
+                            <div class="price-lbl">建议买入</div>
+                            <div class="price-val">${entry}</div>
+                            ${pctHtml?`<div class="price-sub">最新 ${it.latest_close?.toFixed(2) || '--'} ${pctHtml}</div>`:''}
+                        </div>
+                        <div class="action-arrow">·</div>
+                        <div class="price-cell sell">
+                            <div class="price-lbl">止盈目标</div>
+                            <div class="price-val">${tp}</div>
+                            <div class="price-sub">${ap.reward_pct!=null?`+${ap.reward_pct}%`:'--'}</div>
+                        </div>
+                        <div class="price-arrow">⛔</div>
+                        <div class="price-cell stop">
+                            <div class="price-lbl">止损</div>
+                            <div class="price-val">${stop}</div>
+                            <div class="price-sub">${ap.risk_pct!=null?`-${ap.risk_pct}%`:'--'}</div>
+                        </div>
+                    </div>
+                    ${entryHtml}
+                    ${ppHtml}
+                    <div class="action-foot">
+                        <div class="reasons">${reasons || '<span class="text-muted" style="font-size:11px">暂无明显信号</span>'}</div>
+                        <div class="reasons" style="margin-top:4px">${(it.weaknesses||[]).map(w => '<span class="reason-chip" style="background:rgba(255,100,100,0.08);color:var(--text-muted)">⚠ ' + w + '</span>').join('')}</div>
+                        ${rrHtml}
+                    </div>
+                </div>`;
+        }).join('');
+    } catch(e) {
+        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+async function loadMyPositions() {
+    const box = document.getElementById('myPositions');
+    try {
+        const resp = await RequestManager.fetch('positions', API + '/investor/positions');
+        const d = resp.data || {};
+        const positions = d.positions || [];
+        const summary = d.summary || {};
+
+        if (positions.length === 0) {
+            box.innerHTML = '<div class="empty-state">还没有添加持仓<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你已经买/想买的股票</span></div>';
+            return;
+        }
+
+        const pnlCls = summary.total_pnl >= 0 ? 'idx-up' : 'idx-down';
+        const sign = summary.total_pnl >= 0 ? '+' : '';
+
+        let html = `<div class="position-summary">
+            <div class="ps-cell"><div class="ps-lbl">总市值</div><div class="ps-val">¥${summary.total_value.toLocaleString()}</div></div>
+            <div class="ps-cell"><div class="ps-lbl">总成本</div><div class="ps-val">¥${summary.total_cost.toLocaleString()}</div></div>
+            <div class="ps-cell"><div class="ps-lbl">浮动盈亏</div><div class="ps-val ${pnlCls}">${sign}¥${summary.total_pnl.toLocaleString()} (${sign}${summary.total_pnl_pct}%)</div></div>
+        </div>`;
+
+        html += positions.map(p => {
+            const pnlCls2 = p.pnl >= 0 ? 'idx-up' : 'idx-down';
+            const sign2 = p.pnl >= 0 ? '+' : '';
+            const warnHtml = p.warning ? `<div class="position-warn">⚠ ${p.warning}</div>` : '';
+            return `
+            <div class="position-row">
+                <div class="pr-left" onclick="openKline('${p.code}')">
+                    <div class="pr-name">${p.name||p.code}</div>
+                    <div class="pr-code">${p.code} · ${p.shares}股 · 成本${p.cost_price.toFixed(2)}</div>
+                </div>
+                <div class="pr-mid">
+                    <div class="pr-price">${p.latest_close?p.latest_close.toFixed(2):'--'}</div>
+                    <div class="pr-pct ${pnlCls2}">${p.latest_pct!=null?(p.latest_pct>=0?'+':'')+p.latest_pct.toFixed(2)+'%':''}</div>
+                </div>
+                <div class="pr-right">
+                    <div class="pr-pnl ${pnlCls2}">${sign2}¥${p.pnl.toLocaleString()}</div>
+                    <div class="pr-pct-sm ${pnlCls2}">${sign2}${p.pnl_pct}%</div>
+                </div>
+                <button class="btn btn-danger btn-sm" onclick="closeMyPosition(${p.id})" title="平仓">×</button>
+            </div>${warnHtml}`;
+        }).join('');
+
+        box.innerHTML = html;
+    } catch(e) {
+        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+async function loadMyWatchlist() {
+    const box = document.getElementById('myWatchlist');
+    try {
+        const resp = await RequestManager.fetch('watchlist', API + '/investor/watchlist');
+        const items = resp.data || [];
+        if (items.length === 0) {
+            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你想跟踪的股票</span></div>';
+            return;
+        }
+        box.innerHTML = items.map(w => {
+            const pctCls = (w.latest_pct||0) >= 0 ? 'idx-up' : 'idx-down';
+            const sign = (w.latest_pct||0) >= 0 ? '+' : '';
+            return `
+            <div class="watch-row">
+                <div class="wr-left" onclick="openKline('${w.code}')">
+                    <div class="wr-name">${w.name||w.code}</div>
+                    <div class="wr-code">${w.code}${w.industry?` · ${w.industry}`:''}</div>
+                </div>
+                <div class="wr-mid">
+                    <div class="wr-price">${w.latest_close?w.latest_close.toFixed(2):'--'}</div>
+                    <div class="wr-pct ${pctCls}">${w.latest_pct!=null?sign+w.latest_pct.toFixed(2)+'%':''}</div>
+                </div>
+                <div class="wr-score">
+                    <div class="wr-score-num">${w.latest_score!=null?w.latest_score.toFixed(0):'--'}</div>
+                    <div class="wr-score-lbl">打分</div>
+                </div>
+                <button class="btn btn-danger btn-sm" onclick="removeFromWatchlist('${w.code}')">×</button>
+            </div>`;
+        }).join('');
+    } catch(e) {
+        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+async function loadAlertsBanner() {
+    const banner = document.getElementById('alertsBanner');
+    try {
+        const resp = await RequestManager.fetch('alerts', API + '/investor/alerts');
+        const alerts = (resp.data && resp.data.alerts) || [];
+        if (alerts.length === 0) {
+            banner.innerHTML = '';
+            return;
+        }
+        banner.innerHTML = '<div class="alerts-banner">' +
+            '<div class="ab-title">⚠ 风险告警 (' + alerts.length + ')</div>' +
+            alerts.map(a => `<div class="ab-item ab-${a.level}">${a.msg}</div>`).join('') +
+            '</div>';
+    } catch(e) {}
+}
+
+async function loadExplainerGrid() {
+    const grid = document.getElementById('explainerGrid');
+    try {
+        const resp = await RequestManager.fetch('explain', API + '/investor/explain');
+        const items = (resp.data && resp.data.items) || {};
+        grid.innerHTML = Object.entries(items).map(([key, val]) => `
+            <div class="exp-card" onclick="showExplainDialog('${key}')">
+                <div class="exp-title">${val.title}</div>
+                <div class="exp-desc">${val.desc}</div>
+                <div class="exp-tip">💡 ${val.tip}</div>
+            </div>
+        `).join('');
+    } catch(e) {}
+}
+
+async function loadRecHistory() {
+    const summaryEl = document.getElementById('recHistorySummary');
+    const tableEl = document.getElementById('recHistoryTable');
+    const updEl = document.getElementById('recHistoryUpdatedAt');
+    try {
+        const resp = await RequestManager.fetch('rec-history', API + '/investor/recommendations/history?days=30');
+        const d = resp.data || {};
+        const items = d.items || [];
+        const summary = d.summary || {};
+        if (updEl) updEl.textContent = '统计区间：近 ' + (d.days || 30) + ' 天';
+
+        if (!items || items.length === 0) {
+            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无历史推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「每日打分」生成推荐</span></div>';
+            return;
+        }
+
+        // 汇总卡片
+        if (summaryEl && summary.total) {
+            const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
+            const avgSign = summary.avg_return >= 0 ? '+' : '';
+            const bestCls = summary.best_return >= 0 ? 'idx-up' : 'idx-down';
+            const worstCls = summary.worst_return >= 0 ? 'idx-up' : 'idx-down';
+            summaryEl.innerHTML = `
+                <div class="metrics-row" style="margin-bottom:12px">
+                    <div class="metric-card"><div class="val">${summary.total}</div><div class="lbl">推荐总数</div></div>
+                    <div class="metric-card"><div class="val" style="color:${summary.win_rate>=50?'var(--green, #10b981)':'var(--danger)'}">${summary.win_rate}%</div><div class="lbl">胜率</div></div>
+                    <div class="metric-card"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
+                    <div class="metric-card"><div class="val ${bestCls}">+${summary.best_return}%</div><div class="lbl">最佳</div></div>
+                    <div class="metric-card"><div class="val ${worstCls}">${summary.worst_return}%</div><div class="lbl">最差</div></div>
+                    <div class="metric-card"><div class="val" style="color:var(--danger)">${summary.stop_loss_count||0}</div><div class="lbl">触发止损</div></div>
+                    <div class="metric-card"><div class="val" style="color:var(--green, #10b981)">${summary.take_profit_count||0}</div><div class="lbl">触发止盈</div></div>
+                </div>`;
+        }
+
+        // 明细表格（只显示前 15 条）
+        if (tableEl) {
+            const show = items.slice(0, 15);
+            let html = '<div class="table-wrapper"><table><thead><tr>';
+            html += '<th>代码</th><th>名称</th><th>推荐日</th><th>买入价</th><th>当前价</th><th>收益</th><th>状态</th>';
+            html += '</tr></thead><tbody>';
+            show.forEach(r => {
+                const pnlCls = r.pnl_pct >= 0 ? 'positive' : 'negative';
+                const sign = r.pnl_pct >= 0 ? '+' : '';
+                let status = '持有中';
+                if (r.hit_stop_loss) status = '<span style="color:var(--danger)">已止损</span>';
+                else if (r.hit_take_profit) status = '<span style="color:var(--green, #10b981)">已止盈</span>';
+                html += `<tr>
+                    <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
+                    <td>${r.name||''}</td>
+                    <td>${r.scan_date||''}</td>
+                    <td>${r.entry_price}</td>
+                    <td>${r.current_price}</td>
+                    <td class="${pnlCls}">${sign}${r.pnl_pct}%</td>
+                    <td>${status}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+            tableEl.innerHTML = html;
+        }
+    } catch(e) {
+        if (tableEl) tableEl.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+async function showExplainDialog(key) {
+    try {
+        const resp = await RequestManager.fetch('explain-' + key, API + '/investor/explain/' + key);
+        const d = resp.data || {};
+        const html = `
+            <div style="line-height:1.7">
+                <p style="color:var(--text-primary);font-size:15px">${d.title||key}</p>
+                <p style="color:var(--text-secondary)">${d.desc||''}</p>
+                <div style="margin-top:16px;padding:14px;background:rgba(0,212,240,0.06);border-left:3px solid var(--accent);border-radius:4px">
+                    <b style="color:var(--accent)">说人话：</b><br>${d.for_dummies||''}
+                </div>
+                <div style="margin-top:12px;padding:14px;background:rgba(255,171,64,0.06);border-left:3px solid var(--warning);border-radius:4px">
+                    <b style="color:var(--warning)">实战建议：</b><br>${d.tip||''}
+                </div>
+            </div>
+        `;
+        showModal('指标解读 · ' + (d.title||key), html);
+    } catch(e) {}
+}
+
+function showAddPositionDialog() {
+    const html = `
+        <div style="line-height:1.7">
+            <div style="margin-bottom:10px"><label>股票代码 <input type="text" id="addPosCode" placeholder="如 002150" style="width:120px"></label></div>
+            <div style="margin-bottom:10px"><label>持股数 <input type="number" id="addPosShares" placeholder="1000" style="width:120px"></label></div>
+            <div style="margin-bottom:10px"><label>成本价 <input type="number" id="addPosCost" placeholder="29.72" step="0.01" style="width:120px"></label></div>
+            <div style="margin-bottom:10px"><label>止损价 <input type="number" id="addPosStop" placeholder="27.94" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:11px">可留空</span></div>
+            <div style="margin-bottom:10px"><label>止盈价 <input type="number" id="addPosTP" placeholder="35.66" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:11px">可留空</span></div>
+            <div style="margin-bottom:10px"><label>备注 <input type="text" id="addPosNote" placeholder="例如：超跌反弹" style="width:240px"></label></div>
+            <div style="margin-top:16px"><button class="btn btn-primary" onclick="submitAddPosition()">保存</button></div>
+        </div>
+    `;
+    showModal('添加持仓', html);
+}
+
+async function submitAddPosition() {
+    const body = {
+        code: document.getElementById('addPosCode').value.trim(),
+        shares: parseInt(document.getElementById('addPosShares').value) || 0,
+        cost_price: parseFloat(document.getElementById('addPosCost').value) || 0,
+        stop_loss: parseFloat(document.getElementById('addPosStop').value) || null,
+        take_profit: parseFloat(document.getElementById('addPosTP').value) || null,
+        note: document.getElementById('addPosNote').value.trim(),
+    };
+    if (!body.code || !body.shares || !body.cost_price) {
+        showToast('请填写代码/股数/成本价', 'warning');
+        return;
+    }
+    try {
+        const resp = await RequestManager.fetch('add-pos', API + '/api/investor/positions', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        if (resp.success) {
+            showToast('已添加', 'success');
+            closeModal();
+            loadMyPositions();
+            loadAlertsBanner();
+        } else {
+            showToast(resp.error || '添加失败', 'error');
+        }
+    } catch(e) {
+        showToast('网络错误', 'error');
+    }
+}
+
+async function closeMyPosition(pid) {
+    if (!confirm('确认平仓这条记录？')) return;
+    try {
+        await RequestManager.fetch('close-pos-' + pid, API + '/api/investor/positions/' + pid, {method:'DELETE'});
+        showToast('已平仓', 'success');
+        loadMyPositions();
+        loadAlertsBanner();
+    } catch(e) { showToast('操作失败', 'error'); }
+}
+
+function showAddWatchlistDialog() {
+    const html = `
+        <div style="line-height:1.7">
+            <div style="margin-bottom:10px"><label>股票代码 <input type="text" id="addWatchCode" placeholder="如 002150" style="width:120px"></label></div>
+            <div style="margin-bottom:10px"><label>备注 <input type="text" id="addWatchNote" placeholder="例如：底部启动" style="width:240px"></label></div>
+            <div style="margin-top:16px"><button class="btn btn-primary" onclick="submitAddWatch()">加入自选</button></div>
+        </div>
+    `;
+    showModal('加入自选', html);
+}
+
+async function submitAddWatch() {
+    const code = document.getElementById('addWatchCode').value.trim();
+    const note = document.getElementById('addWatchNote').value.trim();
+    if (!code) { showToast('请填写代码', 'warning'); return; }
+    try {
+        await RequestManager.fetch('add-watch', API + '/api/investor/watchlist', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code, note}),
+        });
+        showToast('已加入自选', 'success');
+        closeModal();
+        loadMyWatchlist();
+    } catch(e) { showToast('操作失败', 'error'); }
+}
+
+async function removeFromWatchlist(code) {
+    if (!confirm('移出自选 ' + code + '?')) return;
+    try {
+        await RequestManager.fetch('rm-watch-' + code, API + '/api/investor/watchlist/' + code, {method:'DELETE'});
+        loadMyWatchlist();
+    } catch(e) {}
 }
 
 // ─── Tab 1: Scoring ───
@@ -301,22 +956,13 @@ async function loadScoresTab(container) {
             <label style="cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px">
                 <input type="checkbox" id="filterCYB" onchange="filterScores()" style="accent-color:var(--accent)"> 创业板
             </label>
-            <span>市值≥</span>
-            <input type="number" id="minMarketCap" value="300" step="10" min="0" onchange="filterScores()" style="width:65px" title="单位：亿元，0表示不筛选">
+            <span>市值≤</span>
+            <input type="number" id="minMarketCap" value="100" step="10" min="0" onchange="filterScores()" style="width:65px" title="单位：亿元，0表示不筛选">
             <span style="font-size:12px;color:var(--text-muted)">亿</span>
             <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
             <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
             <span id="syncStatus"></span>
             <span class="text-muted" style="margin-left:auto" id="scoreCount">-- 只股票</span>
-        </div>
-        <div id="syncProgress" style="display:none; margin-top: 12px;">
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-                <div id="syncProgressBar" style="flex:1; height:8px; background:var(--border); border-radius:4px; overflow:hidden;">
-                    <div id="syncProgressFill" style="height:100%; width:0%; background:var(--accent); border-radius:4px; transition:width 0.3s;"></div>
-                </div>
-                <span id="syncProgressPct" style="font-size:12px; color:var(--text-secondary); white-space:nowrap;">0%</span>
-            </div>
-            <div id="syncProgressText" style="font-size:12px; color:var(--text-secondary);"></div>
         </div>
         <div id="scoresMetrics"></div>
         <div id="scoreTableContainer"><div class="empty-state">加载中...</div></div>
@@ -377,19 +1023,19 @@ async function loadScoresPage(page) {
         var metricsEl = document.getElementById('scoresMetrics');
         if (metricsEl && resp.pagination.total > 0) {
             // 统计板块分布
-            var kcbCount = 0, cybCount = 0, bigCapCount = 0;
+            var kcbCount = 0, cybCount = 0, smallCapCount = 0;
             for (var i = 0; i < _scoreData.length; i++) {
                 var code = (_scoreData[i].code || '').substring(0, 3);
                 if (code === '688') kcbCount++;
                 if (code === '300' || code === '301') cybCount++;
-                if ((_scoreData[i].market_cap || 0) >= 300) bigCapCount++;
+                if ((_scoreData[i].market_cap || 0) > 0 && (_scoreData[i].market_cap || 0) <= 100) smallCapCount++;
             }
             metricsEl.innerHTML = '<div class="metrics-row">' +
                 '<div class="metric-card"><div class="val">' + _scoreData[0].score + '</div><div class="lbl">最高分 · ' + _scoreData[0].code + '</div></div>' +
                 '<div class="metric-card"><div class="val">' + resp.pagination.total + '</div><div class="lbl">总计股票数</div></div>' +
                 '<div class="metric-card"><div class="val">' + kcbCount + '</div><div class="lbl">科创板</div></div>' +
                 '<div class="metric-card"><div class="val">' + cybCount + '</div><div class="lbl">创业板</div></div>' +
-                '<div class="metric-card"><div class="val">' + bigCapCount + '</div><div class="lbl">≥300亿市值</div></div>' +
+                '<div class="metric-card"><div class="val">' + smallCapCount + '</div><div class="lbl">≤100亿小票</div></div>' +
                 '</div>';
         } else if (metricsEl) {
             // 如果没有记录，显示提示信息
@@ -560,9 +1206,9 @@ function filterScores() {
         });
     }
 
-    // 市值筛选
+    // 市值筛选（≤ 选中的市值）
     if (minMarketCap > 0) {
-        filtered = filtered.filter(function(r) { return (r.market_cap || 0) >= minMarketCap; });
+        filtered = filtered.filter(function(r) { return (r.market_cap || 0) <= minMarketCap; });
     }
 
     var countEl = document.getElementById('scoreCount');
@@ -594,6 +1240,80 @@ async function checkSyncStatus() {
     } catch(e) {}
 }
 
+// ─── 首页自动同步：首次进入 / 今日尚未同步时自动触发 ───
+async function maybeAutoSync() {
+    try {
+        const resp = await RequestManager.fetch('sync-auto-status', API + '/sync/auto-status');
+        if (resp && resp.running) {
+            // 同步已经在跑（可能是调度器 07:00 跑的，或其他 tab 触发的），只挂上进度展示
+            showSyncProgress();
+            pollSyncProgress(onAutoSyncDone);
+            return;
+        }
+        if (resp && resp.needs_sync) {
+            showToast('今日尚未同步，开始自动拉取最新行情…', 'info', 4000);
+            let start;
+            try {
+                start = await RequestManager.fetch('sync-trigger', API + '/sync', { method: 'POST' });
+            } catch (e) {
+                showToast('自动同步启动失败，可到"高级筛选"标签页手动同步', 'error', 5000);
+                return;
+            }
+            if (start && start.error) {
+                showToast('自动同步启动失败: ' + start.error, 'error', 5000);
+                return;
+            }
+            showSyncProgress();
+            pollSyncProgress(onAutoSyncDone);
+        }
+    } catch (e) {
+        // 自动同步失败不打扰用户，只在控制台记一下
+        console.warn('[autoSync] 检查失败:', e);
+    }
+}
+
+function onAutoSyncDone(msg) {
+    if (msg) showToast(msg, 'success');
+    // 同步完成后，刷新首页数据 + 检查今日推荐是否最新
+    if (typeof currentTab !== 'undefined' && currentTab === 'home') {
+        const c = document.getElementById('content');
+        if (c) loadHomeTab(c);
+        // 异步检查推荐是否今天的，否则触发自动重算
+        ensureTodayRecs(true);
+        loadSyncStatusPanel();
+    } else {
+        // 不在首页就不打扰，但后台跑一次打分刷新（让用户下次切回首页时看到新数据）
+        ensureTodayRecs(false);
+    }
+}
+
+// 检查今日推荐是否最新（基于 today 接口返回的 date），不是今天就触发重算
+async function ensureTodayRecs(silent) {
+    try {
+        const resp = await RequestManager.fetch('today-reco', API + '/investor/today?limit=1');
+        const today = new Date().toISOString().slice(0, 10);
+        const lastDate = resp && resp.data && resp.data.date;
+        if (lastDate === today) return;  // 推荐已是今天
+        if (silent) showToast('同步行情完成，开始重算今日打分…', 'info', 3500);
+        // 触发重算（异步任务），拿到 task_id 后轮询
+        const r = await RequestManager.fetch('recalc-start-auto', API + '/sync/recalc', { method: 'POST' });
+        if (!r || !r.task_id) {
+            showToast('自动重算启动失败，请手动点击"立即重算打分"', 'warning', 4000);
+            return;
+        }
+        pollRecalcTask(r.task_id, function(ok, msg) {
+            showToast(ok ? ('今日推荐已更新 · ' + (msg || '')) : ('重算失败: ' + (msg || '')), ok ? 'success' : 'error');
+            // 重算完后，如果用户在首页就刷新一下数据
+            if (typeof currentTab !== 'undefined' && currentTab === 'home') {
+                const c = document.getElementById('content');
+                if (c) loadHomeTab(c);
+            }
+        });
+    } catch (e) {
+        console.warn('[ensureTodayRecs] 失败:', e);
+    }
+}
+
 function showSyncProgress() {
     document.getElementById('syncProgress').style.display = 'block';
 }
@@ -621,6 +1341,200 @@ function pollSyncProgress(onDone) {
             }
         }).catch(function(e) { hideSyncProgress(); if (onDone) onDone(''); });
     }, 1000);
+}
+
+// ─── 首页"数据状态"面板 ─────────────────────────────────
+async function loadSyncStatusPanel() {
+    const syncState = document.getElementById('syncDataState');
+    const syncTime  = document.getElementById('syncDataTime');
+    const calcState = document.getElementById('recalcState');
+    const calcTime  = document.getElementById('recalcTime');
+    const hint      = document.getElementById('dataStatusHint');
+    if (!syncState || !calcState) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    // ① 行情数据状态：/api/sync/auto-status
+    try {
+        const r = await RequestManager.fetch('sync-auto-status', API + '/sync/auto-status');
+        const d = r.data || {};
+        if (d.running) {
+            syncState.className = 'state run';
+            syncState.innerHTML = '<span class="badge badge-running">同步中</span>';
+        } else if (!d.last_time) {
+            syncState.className = 'state warn';
+            syncState.innerHTML = '⚠ 今日尚未同步';
+        } else {
+            const lastDate = String(d.last_time).split(' ')[0];
+            if (lastDate === today) {
+                syncState.className = 'state ok';
+                syncState.innerHTML = '✓ 今日已同步';
+            } else {
+                syncState.className = 'state warn';
+                syncState.innerHTML = '⚠ 上次同步是 ' + lastDate;
+            }
+        }
+        syncTime.textContent = d.last_time ? '上次同步: ' + d.last_time : '从未同步';
+        if (hint && d.running) hint.textContent = '后台正在同步…';
+    } catch (e) {
+        syncState.className = 'state bad';
+        syncState.innerHTML = '✗ 状态读取失败';
+        syncTime.textContent = e.message || '';
+    }
+
+    // ② 推荐打分状态：/api/investor/today 返回的 date 字段就是 stock_signal 的最新 scan_date
+    try {
+        const r = await RequestManager.fetch('today-reco-status', API + '/investor/today?limit=1');
+        const d = r.data || {};
+        const lastDate = d.date;
+        if (!lastDate) {
+            calcState.className = 'state warn';
+            calcState.innerHTML = '⚠ 暂无打分记录';
+            calcTime.textContent = '请到"高级筛选"跑一次打分';
+        } else if (lastDate === today) {
+            calcState.className = 'state ok';
+            calcState.innerHTML = '✓ 今日推荐已更新';
+        } else {
+            calcState.className = 'state warn';
+            calcState.innerHTML = '⚠ 推荐基于 ' + lastDate + ' 数据';
+        }
+        calcTime.textContent = '最新打分日期: ' + (lastDate || '—');
+    } catch (e) {
+        calcState.className = 'state bad';
+        calcState.innerHTML = '✗ 状态读取失败';
+        calcTime.textContent = e.message || '';
+    }
+
+    // ③ 顺手提示：是否有正在跑的同步/重算任务
+    const ip = document.getElementById('homeInlineProgress');
+    if (ip && !ip.textContent) ip.textContent = '';
+}
+
+// 底部内联进度条（左文 + 中条 + 右百分比）
+function setInlineProgress(stage, current, total, message) {
+    const ip = document.getElementById('homeInlineProgress');
+    if (!ip) return;
+    if (!stage) {
+        ip.innerHTML = '';
+        return;
+    }
+    let pct = 0;
+    if (typeof current === 'number' && typeof total === 'number' && total > 0) {
+        pct = Math.min(100, Math.round(current / total * 100));
+    } else if (stage === 'sync-finish' || stage === 'recalc-finish') {
+        pct = 100;
+    }
+    const label = ({
+        'sync':         '同步行情',
+        'recalc':       '重算打分',
+        'sync-finish':  '✓ 行情同步完成',
+        'recalc-finish':'✓ 打分重算完成',
+    })[stage] || stage;
+    ip.innerHTML =
+        '<span>' + label + '</span>' +
+        '<span class="bar"><div style="width:' + pct + '%"></div></span>' +
+        '<span style="font-family:var(--font-mono);min-width:42px;text-align:right;">' + pct + '%</span>' +
+        (message ? ' <span style="color:var(--text-muted)">· ' + message + '</span>' : '');
+}
+
+// 首页"立即同步行情"按钮
+async function homeSync() {
+    const btn = document.getElementById('btnHomeSync');
+    const btn2 = document.getElementById('btnHomeRecalc');
+    if (btn) { btn.disabled = true; btn.textContent = '同步中...'; }
+    if (btn2) btn2.disabled = true;
+    setInlineProgress('sync', 0, 0, '启动中...');
+    try {
+        const resp = await RequestManager.fetch('sync-trigger', API + '/sync', { method: 'POST' });
+        if (resp && resp.error) {
+            showToast('同步启动失败: ' + resp.error, 'error');
+            if (btn) { btn.disabled = false; btn.textContent = '立即同步行情'; }
+            if (btn2) btn2.disabled = false;
+            setInlineProgress(null);
+            return;
+        }
+        showSyncProgress();  // 同时启用全局进度条
+        pollSyncProgress(function(msg) {
+            // 同步完成回调
+            setInlineProgress('sync-finish', null, null, msg || '');
+            setTimeout(() => setInlineProgress(null), 4000);
+            if (btn) { btn.disabled = false; btn.textContent = '立即同步行情'; }
+            if (btn2) btn2.disabled = false;
+            // 同步完成 → 自动检查/触发推荐重算
+            ensureTodayRecs(true);
+            // 同步状态刷新
+            loadSyncStatusPanel();
+        });
+        // 立刻刷新一次状态（让面板显示"同步中"）
+        loadSyncStatusPanel();
+    } catch (e) {
+        showToast('同步启动失败: ' + (e.message || e), 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '立即同步行情'; }
+        if (btn2) btn2.disabled = false;
+        setInlineProgress(null);
+    }
+}
+
+// 首页"立即重算打分"按钮
+async function homeRecalc() {
+    const btn  = document.getElementById('btnHomeRecalc');
+    const btn2 = document.getElementById('btnHomeSync');
+    if (btn)  { btn.disabled  = true; btn.textContent  = '重算中...'; }
+    if (btn2) btn2.disabled = true;
+    setInlineProgress('recalc', 0, 0, '提交任务...');
+    try {
+        const r = await RequestManager.fetch('recalc-start', API + '/sync/recalc', { method: 'POST' });
+        if (!r || !r.success) {
+            showToast('重算启动失败: ' + (r && r.error || '未知错误'), 'error');
+            if (btn)  { btn.disabled  = false; btn.textContent  = '立即重算打分'; }
+            if (btn2) btn2.disabled = false;
+            setInlineProgress(null);
+            return;
+        }
+        showToast('打分重算已启动…', 'info', 2500);
+        pollRecalcTask(r.task_id, function(ok, msg) {
+            setInlineProgress(ok ? 'recalc-finish' : null, null, null, msg || '');
+            if (ok) setTimeout(() => setInlineProgress(null), 5000);
+            if (btn)  { btn.disabled  = false; btn.textContent  = '立即重算打分'; }
+            if (btn2) btn2.disabled = false;
+            // 刷新首页数据 + 状态
+            if (typeof currentTab !== 'undefined' && currentTab === 'home') {
+                const c = document.getElementById('content');
+                if (c) loadHomeTab(c);
+            } else {
+                loadSyncStatusPanel();
+            }
+        });
+    } catch (e) {
+        showToast('重算启动失败: ' + (e.message || e), 'error');
+        if (btn)  { btn.disabled  = false; btn.textContent  = '立即重算打分'; }
+        if (btn2) btn2.disabled = false;
+        setInlineProgress(null);
+    }
+}
+
+// 轮询重算任务（task_queue 提交的任务）
+function pollRecalcTask(taskId, onDone) {
+    if (!taskId) { onDone && onDone(false, 'task_id 缺失'); return; }
+    timerManager.setInterval('recalcPoll', function() {
+        RequestManager.fetch('recalc-status-' + taskId, API + '/sync/status/' + taskId)
+            .then(function(resp) {
+                const t = resp.data || {};
+                setInlineProgress('recalc', t.progress || 0, 100, t.message || '');
+                if (t.status === 'success') {
+                    timerManager.clear('recalcPoll');
+                    onDone && onDone(true, t.message || t.result || '');
+                } else if (t.status === 'error') {
+                    timerManager.clear('recalcPoll');
+                    onDone && onDone(false, t.message || '重算失败');
+                }
+                // pending / running 继续轮询
+            })
+            .catch(function(e) {
+                timerManager.clear('recalcPoll');
+                onDone && onDone(false, e.message || '轮询失败');
+            });
+    }, 1500);
 }
 
 async function runSyncOnly() {
@@ -989,9 +1903,9 @@ async function loadBacktestTab(container) {
             <span>策略</span><select id="btRule">${opts}</select>
             <span>起始</span><input type="date" id="btStart" value="2024-01-01">
             <span>结束</span><input type="date" id="btEnd" value="${new Date().toISOString().split('T')[0]}">
-            <span>止损(%)</span><input type="number" id="btStopLoss" value="${loadBTSetting('btStopLoss', -8)}" step="0.1" min="-50" max="0" style="width:70px">
-            <span>止盈(%)</span><input type="number" id="btTakeProfit" value="${loadBTSetting('btTakeProfit', 20)}" step="0.1" min="0" max="100" style="width:70px">
-            <span>持仓(天)</span><input type="number" id="btHolding" value="${loadBTSetting('btHolding', 20)}" step="1" min="1" max="100" style="width:60px">
+            <span>止损(%)</span><input type="number" id="btStopLoss" value="${loadBTSetting('btStopLoss', -5)}" step="0.1" min="-50" max="0" style="width:70px">
+            <span>止盈(%)</span><input type="number" id="btTakeProfit" value="${loadBTSetting('btTakeProfit', 12)}" step="0.1" min="0" max="100" style="width:70px">
+            <span>持仓(天)</span><input type="number" id="btHolding" value="${loadBTSetting('btHolding', 10)}" step="1" min="1" max="100" style="width:60px">
             <button class="btn btn-primary" onclick="startBacktest()">开始回测</button>
             <span id="btStatus"></span>
         </div>
@@ -1043,9 +1957,9 @@ function saveBTSetting(key, val) { try { localStorage.setItem(key, val); } catch
 async function startBacktest() {
     const ruleId = document.getElementById('btRule').value;
     const start = document.getElementById('btStart').value, end = document.getElementById('btEnd').value;
-    const stopLoss = parseFloat(document.getElementById('btStopLoss').value) || -8;
-    const takeProfit = parseFloat(document.getElementById('btTakeProfit').value) || 20;
-    const holdingMax = parseInt(document.getElementById('btHolding').value) || 20;
+    const stopLoss = parseFloat(document.getElementById('btStopLoss').value) || -5;
+    const takeProfit = parseFloat(document.getElementById('btTakeProfit').value) || 12;
+    const holdingMax = parseInt(document.getElementById('btHolding').value) || 10;
     saveBTSetting('btStopLoss', stopLoss); saveBTSetting('btTakeProfit', takeProfit); saveBTSetting('btHolding', holdingMax);
     const st = document.getElementById('btStatus');
     st.innerHTML = '<span class="badge badge-running">回测中</span>';
@@ -1598,7 +2512,7 @@ function closeKline() {
 }
 
 // ─── Init ───
-loadTab('scores');
+loadTab('home');
 </script>
 </body>
 </html>

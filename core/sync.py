@@ -47,15 +47,22 @@ def _write_daily_price(code: str, df: pd.DataFrame) -> int:
 
     records = []
     for dt, row in df.iterrows():
+        close = float(row.get("close", 0) or 0)
+        amount = float(row.get("amount", 0) or 0)
+        volume = float(row.get("volume", 0) or 0)
+        # 修复：腾讯数据源返回的成交额单位是"万元"，不是"元"
+        # 用 amount*10000/close 估算成交量（股）
+        if volume == 0 and amount > 0 and close > 0:
+            volume = amount * 10000 / close
         records.append({
             "code":       code,
             "trade_date": str(dt.date()) if hasattr(dt, "date") else str(dt)[:10],
             "open":       float(row.get("open", 0) or 0),
             "high":       float(row.get("high", 0) or 0),
             "low":        float(row.get("low", 0) or 0),
-            "close":      float(row.get("close", 0) or 0),
-            "volume":     float(row.get("volume", 0) or 0),
-            "amount":     float(row.get("amount", 0) or 0),
+            "close":      close,
+            "volume":     volume,
+            "amount":     amount * 10000 if volume > 0 and amount < 1000000 else amount,  # 统一为元
             "pct_change": float(row.get("pct_change", 0) or 0),
             "turnover":   float(row.get("turnover", 0) or 0),
         })
@@ -1080,6 +1087,238 @@ def recalc_all_scores(progress_callback=None):
 
 
 # ─────────────────────────────────────────────
+# 按日批量同步（东财 push2his，一次 HTTP 拉全 A，秒级完成）
+# ─────────────────────────────────────────────
+def daily_sync_by_date(trade_dates: list[str] | None = None,
+                        verbose: bool = True,
+                        progress_callback=None) -> dict:
+    """
+    盘后/盘前推荐主入口：按交易日批量同步，一次 HTTP 拉全 A
+
+    :param trade_dates: 交易日期列表 ['20260624', '20260625']，None 则取最近 1 个交易日
+    :param verbose: 打印详细日志
+    :param progress_callback: 进度回调 fn(stage, current, total)
+    :return: {"dates": [...], "rows": N, "elapsed_s": x.x}
+    """
+    init_db()
+    _init_qlib()
+    from core.em_realtime import fetch_klines_by_date
+
+    if trade_dates is None:
+        # 默认拉最近 1 个交易日
+        end = date.today()
+        for _ in range(7):
+            if is_trading_day(end.strftime('%Y-%m-%d')):
+                break
+            end -= timedelta(days=1)
+        trade_dates = [end.strftime('%Y%m%d')]
+
+    t0 = time.time()
+    total_rows = 0
+    results = {}
+
+    for trade_date in trade_dates:
+        if verbose:
+            print(f"\n>>> 批量同步 {trade_date}（东财 push2his，一次 HTTP）")
+
+        try:
+            df = fetch_klines_by_date(
+                trade_date,
+                progress_cb=lambda f, t: (
+                    print(f"\r  拉取 {f}/{t}", end="", flush=True) if verbose else None
+                ),
+            )
+        except Exception as e:
+            if verbose:
+                print(f"  [ERROR] 东财接口失败: {e}")
+            results[trade_date] = {"rows": 0, "error": str(e)}
+            continue
+
+        if df.empty:
+            if verbose:
+                print(f"  {trade_date} 无数据（可能非交易日）")
+            results[trade_date] = {"rows": 0}
+            continue
+
+        # 写数据库
+        try:
+            n = _batch_write_daily_price(df)
+            total_rows += n
+            if verbose:
+                print(f"\n  {trade_date} 写入 {n} 行（东财）")
+            results[trade_date] = {"rows": n}
+        except Exception as e:
+            if verbose:
+                print(f"  [ERROR] 写库失败: {e}")
+            results[trade_date] = {"rows": 0, "error": str(e)}
+
+        if progress_callback:
+            progress_callback("date_done", trade_dates.index(trade_date) + 1, len(trade_dates))
+
+    # 触发策略分数重算
+    if total_rows > 0:
+        try:
+            _recompute_strategy_scores_for_updated(trade_dates, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 策略分数重算失败: {e}")
+
+    elapsed = time.time() - t0
+    if verbose:
+        print(f"\n>>> 批量同步完成  耗时: {elapsed:.1f}s  共 {total_rows} 行")
+
+    return {"dates": trade_dates, "rows": total_rows, "elapsed_s": round(elapsed, 1), "detail": results}
+
+
+def _batch_write_daily_price(df: pd.DataFrame) -> int:
+    """
+    把东财返回的全市场日线 DataFrame 写入 daily_price 表
+    期望 df.columns: code, trade_date, open, close, high, low, volume, amount, pct_change
+    """
+    if df.empty:
+        return 0
+
+    records = []
+    for _, row in df.iterrows():
+        # 过滤无效数据
+        close = float(row.get("close", 0) or 0)
+        if close <= 0 or close > 3000:
+            continue
+        records.append({
+            "code":       str(row["code"]),
+            "trade_date": str(row["trade_date"]),
+            "open":       float(row.get("open", 0) or 0),
+            "high":       float(row.get("high", 0) or 0),
+            "low":        float(row.get("low", 0) or 0),
+            "close":      close,
+            "volume":     float(row.get("volume", 0) or 0),
+            "amount":     float(row.get("amount", 0) or 0),
+            "pct_change": float(row.get("pct_change", 0) or 0),
+            "turnover":   float(row.get("turnover", 0) or 0),
+        })
+
+    if not records:
+        return 0
+
+    with get_conn() as conn:
+        conn.executemany("""
+            INSERT INTO daily_price
+              (code,trade_date,open,high,low,close,volume,amount,pct_change,turnover)
+            VALUES
+              (:code,:trade_date,:open,:high,:low,:close,:volume,:amount,:pct_change,:turnover)
+            ON CONFLICT(code, trade_date) DO UPDATE SET
+              open=excluded.open, high=excluded.high, low=excluded.low,
+              close=excluded.close, volume=excluded.volume, amount=excluded.amount,
+              pct_change=excluded.pct_change, turnover=excluded.turnover
+        """, records)
+
+    # 同步到 Qlib
+    try:
+        from qlib_engine.data_bridge import batch_append_daily
+        qlib_records = [{
+            "code": r["code"],
+            "trade_date": r["trade_date"],
+            "open": r["open"], "high": r["high"], "low": r["low"],
+            "close": r["close"], "volume": r["volume"], "amount": r["amount"],
+            "pct_change": r["pct_change"], "turnover": r["turnover"],
+        } for r in records]
+        batch_append_daily(qlib_records)
+    except Exception:
+        pass  # Qlib 失败不影响主流程
+
+    return len(records)
+
+
+def _recompute_strategy_scores_for_updated(trade_dates: list[str], verbose: bool = True) -> None:
+    """对受影响股票重新计算策略分数（仅重算最近有更新的，不全量重算）"""
+    try:
+        from qlib_engine.data_bridge import init_qlib as _qinit
+        _qinit()
+    except Exception:
+        pass
+
+    # 取所有需要重算的 code
+    with get_conn() as conn:
+        placeholders = ",".join("?" * len(trade_dates))
+        rows = conn.execute(
+            f"SELECT DISTINCT code FROM daily_price WHERE trade_date IN ({placeholders})",
+            trade_dates,
+        ).fetchall()
+    codes = [r["code"] for r in rows]
+    if not codes:
+        return
+
+    if verbose:
+        print(f"  重算策略分数: {len(codes)} 只")
+
+    # 复用原有的逐只打分逻辑（已经是串行，但只重算受影响股票）
+    for i, code in enumerate(codes):
+        try:
+            sync_strategy_score(code, verbose=False)
+        except Exception:
+            pass
+        if verbose and (i + 1) % 100 == 0:
+            print(f"    重算进度: {i+1}/{len(codes)}")
+
+
+# ─────────────────────────────────────────────
+# 推荐池并行拉取（盘前/盘后给推荐系统用）
+# ─────────────────────────────────────────────
+def fetch_recommend_pool_parallel(codes: list[str],
+                                   start_date: str = None,
+                                   end_date: str = None,
+                                   max_workers: int = 8,
+                                   progress_callback=None,
+                                   use_em_cache: bool = True) -> dict:
+    """
+    并行拉取推荐池的 K 线（盘前/盘后推荐用）
+
+    :param codes: 推荐股票代码列表（一般 50-200 只）
+    :param max_workers: 并发数（东财接口建议 4-8）
+    :return: {"success": [...], "failed": [...], "elapsed_s": x.x}
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from core.em_kline import get_stock_history
+
+    if end_date is None:
+        end_date = date.today().strftime("%Y%m%d")
+    if start_date is None:
+        start_date = (date.today() - timedelta(days=180)).strftime("%Y%m%d")
+
+    success: list[str] = []
+    failed: list[tuple[str, str]] = []
+    t0 = time.time()
+    total = len(codes)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(get_stock_history, c, start_date, end_date, "qfq", use_em_cache): c
+            for c in codes
+        }
+        for i, fut in enumerate(as_completed(future_map)):
+            code = future_map[fut]
+            try:
+                df = fut.result(timeout=20)
+                if df is not None and not df.empty:
+                    success.append(code)
+                else:
+                    failed.append((code, "empty"))
+            except Exception as e:
+                failed.append((code, str(e)[:60]))
+
+            if progress_callback:
+                progress_callback(i + 1, total, len(success), len(failed))
+
+    elapsed = time.time() - t0
+    return {
+        "success": success,
+        "failed": failed,
+        "elapsed_s": round(elapsed, 1),
+        "total": total,
+    }
+
+
+# ─────────────────────────────────────────────
 # 命令行接口
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
@@ -1096,6 +1335,22 @@ if __name__ == "__main__":
         initial_sync(limit=50, verbose=True)
     elif cmd == "daily":
         daily_sync(verbose=True)
+    elif cmd == "daily_fast":
+        # 按日批量同步（东财直连，1 次 HTTP 拉全 A）
+        daily_sync_by_date(verbose=True)
+    elif cmd == "pool_test":
+        # 推荐池并行拉取测试
+        from core.db import get_all_stocks
+        df = get_all_stocks()
+        codes = df["code"].head(50).tolist() if not df.empty else ["000001", "600519", "300750"]
+        result = fetch_recommend_pool_parallel(codes, max_workers=8, verbose=True)
+        print(f"  成功: {len(result['success'])}  失败: {len(result['failed'])}  耗时: {result['elapsed_s']}s")
+    elif cmd == "em_test":
+        # 东财 clist 自检
+        from core.em_realtime import fetch_realtime_all
+        df = fetch_realtime_all()
+        print(f"  全 A: {len(df)} 只")
+        print(df.head(5).to_string(index=False))
     elif cmd == "stat":
         s = db_stats()
         for k, v in s.items():

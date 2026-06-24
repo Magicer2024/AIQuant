@@ -13,6 +13,7 @@ from routes.sync import sync_bp
 from routes.scoring import scoring_bp
 from routes.strategy import strategy_bp
 from routes.backtest import backtest_bp
+from routes.investor import investor_bp, init_investor_tables
 
 # ── Qlib engine initialization ──────────────────────
 try:
@@ -31,8 +32,15 @@ app.register_blueprint(sync_bp)
 app.register_blueprint(scoring_bp)
 app.register_blueprint(strategy_bp)
 app.register_blueprint(backtest_bp)
+app.register_blueprint(investor_bp)
 
 init_timing(app)
+
+# 个人投资者表（轻量、自动迁移）
+try:
+    init_investor_tables()
+except Exception as e:
+    print(f"[investor] 表初始化跳过: {e}")
 
 
 @app.route("/")
