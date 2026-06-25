@@ -93,20 +93,38 @@ def to_em_secid(code: str) -> str:
 def fetch_realtime_all(page_size: int = 5000,
                        progress_cb: Callable[[int, int], None] | None = None) -> pd.DataFrame:
     """
-    一次拉全 A 股最新行情（盘前/盘后推荐主入口）
+    一次拉全 A 股最新行情（盘前/盘后推荐主入口，带护栏）
 
     实现策略：先尝试东财 clist（最快）；失败/被反爬时降级到 akshare
+    返回 DataFrame，如果缓存命中则不消耗网络配额
     """
-    # 优先：东财 clist（直接 HTTP，最快 2-3s 拉 5000 只）
-    try:
-        df = _fetch_realtime_all_em(progress_cb)
-        if not df.empty:
-            return df
-    except Exception as e:
-        logger.info("东财 clist 失败，降级 akshare: %s", e)
+    from core.em_guard import cached_fetch, GUARD_CONFIG
 
-    # 降级：akshare（底层是东财，但 UA 不同，常能绕过反爬）
-    return _fetch_realtime_all_akshare(progress_cb)
+    # 默认 TTL 120s（盘前 9:00 / 盘后 16:00 各刷一次就够了）
+    cfg = GUARD_CONFIG.get("realtime_all", {})
+    ttl = cfg.get("default_ttl", 120)
+
+    def _do_fetch():
+        # 优先：东财 clist（直接 HTTP，最快 2-3s 拉 5000 只）
+        try:
+            df = _fetch_realtime_all_em(progress_cb)
+            if not df.empty:
+                return df
+        except Exception as e:
+            logger.info("东财 clist 失败，降级 akshare: %s", e)
+        # 降级：akshare（底层是东财，但 UA 不同）
+        return _fetch_realtime_all_akshare(progress_cb)
+
+    params = {"page_size": page_size}
+    df, source = cached_fetch("realtime_all", params, _do_fetch, ttl=ttl)
+
+    if source == "fresh":
+        logger.info("[fetch_realtime_all] 缓存命中, 0 网络请求")
+    elif source == "stale":
+        logger.warning("[fetch_realtime_all] 配额超限，使用 stale 缓存（防反爬）")
+    elif source == "empty":
+        logger.error("[fetch_realtime_all] 无数据可用")
+    return df if df is not None else pd.DataFrame()
 
 
 def _fetch_realtime_all_em(progress_cb=None) -> pd.DataFrame:
@@ -218,19 +236,31 @@ def fetch_klines_by_date(trade_date: str,
                          page_size: int = 5000,
                          progress_cb: Callable[[int, int], None] | None = None) -> pd.DataFrame:
     """
-    拉取某个交易日的全 A 日线行情（盘后批量同步主入口）
+    拉取某个交易日的全 A 日线行情（盘后批量同步主入口，带护栏）
 
     优先东财（最近 30 天可能因反爬失败），降级 akshare stock_zh_a_hist
     """
-    # 优先：东财（之前直连的尝试在 30 天后会被反爬挡）
-    try:
-        df = _fetch_klines_by_date_em(trade_date, progress_cb)
-        if not df.empty:
-            return df
-    except Exception as e:
-        logger.info("东财 hist 失败，降级 akshare: %s", e)
+    from core.em_guard import cached_fetch, GUARD_CONFIG
 
-    return _fetch_klines_by_date_akshare(trade_date, progress_cb)
+    cfg = GUARD_CONFIG.get("klines_by_date", {})
+    ttl = cfg.get("default_ttl", 86400)  # 日线数据，1 天 1 拉
+
+    def _do_fetch():
+        # 优先：东财（之前直连的尝试在 30 天后会被反爬挡）
+        try:
+            df = _fetch_klines_by_date_em(trade_date, progress_cb)
+            if not df.empty:
+                return df
+        except Exception as e:
+            logger.info("东财 hist 失败，降级 akshare: %s", e)
+        return _fetch_klines_by_date_akshare(trade_date, progress_cb)
+
+    params = {"trade_date": trade_date, "page_size": page_size}
+    df, source = cached_fetch("klines_by_date", params, _do_fetch, ttl=ttl)
+
+    if source in ("stale", "empty"):
+        logger.warning("[fetch_klines_by_date] %s 走降级路径 source=%s", trade_date, source)
+    return df if df is not None else pd.DataFrame()
 
 
 def _fetch_klines_by_date_em(trade_date: str, progress_cb=None) -> pd.DataFrame:

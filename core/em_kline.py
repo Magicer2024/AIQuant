@@ -100,7 +100,7 @@ def _write_cache(df: pd.DataFrame, code: str, adjust: str, klt: str) -> None:
 def fetch_kline(code: str, adjust: str = "qfq", klt: str = "d",
                 beg: int = 0, end: int = 20500101) -> pd.DataFrame:
     """
-    单次 HTTP 拉单只股票全历史 K 线
+    单次 HTTP 拉单只股票全历史 K 线（带护栏：单只接口 TTL 内直接走缓存）
 
     :param code: 纯代码 '600519'
     :param adjust: qfq/hfq/none
@@ -109,32 +109,49 @@ def fetch_kline(code: str, adjust: str = "qfq", klt: str = "d",
     :param end: 结束日期 YYYYMMDD（20500101 表示到最远）
     :return: DataFrame, index=trade_date
     """
-    secid = to_em_secid(code)
-    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-    params = {
-        "secid": secid,
-        "ut": _UT,
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": _KLT_MAP.get(klt, "101"),
-        "fqt": _ADJUST_MAP.get(adjust, "1"),
-        "beg": str(beg),
-        "end": str(end),
-        "lmt": "1000",
-    }
-    resp = _SESSION.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    klines = (data or {}).get("data", {}).get("klines") or []
-    if not klines:
-        return pd.DataFrame()
+    from core.em_guard import cached_fetch, GUARD_CONFIG
 
+    cfg = GUARD_CONFIG.get("kline", {})
+    ttl = cfg.get("default_ttl", 86400)
+
+    def _do_fetch():
+        secid = to_em_secid(code)
+        url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        params = {
+            "secid": secid,
+            "ut": _UT,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": _KLT_MAP.get(klt, "101"),
+            "fqt": _ADJUST_MAP.get(adjust, "1"),
+            "beg": str(beg),
+            "end": str(end),
+            "lmt": "1000",
+        }
+        resp = _SESSION.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        klines = (data or {}).get("data", {}).get("klines") or []
+        if not klines:
+            return pd.DataFrame()
+        return _parse_klines(klines)
+
+    cache_params = {
+        "code": code, "adjust": adjust, "klt": klt,
+        "beg": str(beg), "end": str(end),
+    }
+    df, source = cached_fetch("kline", cache_params, _do_fetch, ttl=ttl)
+    return df if df is not None else pd.DataFrame()
+
+
+def _parse_klines(klines: list[str]) -> pd.DataFrame:
+    """把东财返回的 kline 字符串列表解析为 DataFrame"""
     rows = [k.split(",") for k in klines]
-    # 字段顺序: 日期, 开, 收, 高, 低, 量, 额, 振幅, 涨跌幅, 换手率
+    # 字段顺序: 日期, 开, 收, 高, 低, 量, 额, 振幅, 涨跌幅, 换手率, 5日换手
     df = pd.DataFrame(rows, columns=[
         "date", "open", "close", "high", "low",
         "volume", "amount", "amplitude", "pct_change", "turnover",
-        "turnover_5d",  # 5日换手率，akshare/baostock 都不需要
+        "turnover_5d",
     ])
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)

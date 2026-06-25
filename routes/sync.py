@@ -158,18 +158,61 @@ def fetch_recommend_pool():
 @sync_bp.route("/realtime", methods=["GET"])
 def get_realtime():
     """
-    一次 HTTP 拉全 A 最新行情（盘前/盘后推荐专用）
-    3 秒内返回 ~5000 只
+    一次 HTTP 拉全 A 最新行情（盘前/盘后推荐专用，带护栏）
+
+    护栏行为：
+      - TTL=120s 内直接返回缓存，0 次网络请求
+      - 超过频次/配额：返回 stale 缓存，0 次网络请求
+      - 返回 data 里包含 source 字段（fresh/network/stale/empty）
     """
     from core.em_realtime import fetch_realtime_all
-    df = fetch_realtime_all()
-    if df.empty:
-        return jsonify({"success": False, "error": "东财接口无数据"}), 502
+    from core.em_guard import cached_fetch, GUARD_CONFIG
+
+    cfg = GUARD_CONFIG.get("realtime_all", {})
+    ttl = cfg.get("default_ttl", 120)
+
+    def _do_fetch():
+        return fetch_realtime_all()  # 实际网络调用
+
+    # 再包一层（fetch_realtime_all 内部已经走护栏了，这里双保险）
+    df, source = cached_fetch("realtime_all", {"endpoint": "/realtime"}, _do_fetch, ttl=ttl)
+    if df is None or df.empty:
+        return jsonify({
+            "success": False,
+            "source": source,
+            "error": "东财接口无数据，可能被反爬封禁",
+        }), 502
+
     return jsonify({
         "success": True,
+        "source": source,            # 告诉前端数据是 fresh / network / stale
         "count": len(df),
         "data": df.to_dict("records"),
     })
+
+
+@sync_bp.route("/guard-status", methods=["GET"])
+def guard_status():
+    """
+    查询东财接口护栏状态（供前端监控面板）
+    返回每个接口的：今日调用次数、剩余配额、最后调用时间、缓存条数
+    """
+    from core.em_guard import guard_status as _gs
+    status = _gs()
+    return jsonify({"success": True, "data": status})
+
+
+@sync_bp.route("/guard-clear", methods=["POST"])
+def guard_clear():
+    """
+    手动清空护栏缓存（运维用）
+    请求体: {"name": "realtime_all"}  不传 name 则清空全部
+    """
+    from flask import request
+    from core.em_guard import force_clear_cache
+    body = request.get_json(silent=True) or {}
+    n = force_clear_cache(name=body.get("name"))
+    return jsonify({"success": True, "cleared": n})
 
 
 @sync_bp.route("/recalc_all_scores", methods=["GET"])
