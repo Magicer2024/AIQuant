@@ -27,9 +27,9 @@
 
 <nav class="nav-bar">
     <button class="nav-item active" onclick="switchTab('home')">首页</button>
-    <button class="nav-item" onclick="switchTab('scores')" style="font-size:12px;opacity:0.7">高级筛选</button>
-    <button class="nav-item" onclick="switchTab('strategy')">策略管理</button>
-    <button class="nav-item" onclick="switchTab('backtest')">回测中心</button>
+    <button class="nav-item" onclick="switchTab('screen')">指标筛选</button>
+    <button class="nav-item" onclick="switchTab('scores')">每日打分</button>
+
 </nav>
 
 <main class="content" id="content"></main>
@@ -62,7 +62,6 @@
 <script>
 const API = '/api';
 let currentTab = 'home';
-var pendingBacktestRuleId = null;
 var pendingScoreDate = null;
 
 // ─── Toast notification system ───
@@ -287,9 +286,9 @@ async function loadTab(tab) {
     showSkeleton(c, 10);
     try {
         if (tab === 'home') await loadHomeTab(c);
+        else if (tab === 'screen') await loadScreenTab(c);
         else if (tab === 'scores') await loadScoresTab(c);
-        else if (tab === 'strategy') await loadStrategyTab(c);
-        else if (tab === 'backtest') await loadBacktestTab(c);
+
         c.firstElementChild?.classList.add('tab-content');
     } catch(e) {
         showToast('加载失败，请重试', 'error');
@@ -408,6 +407,417 @@ async function loadHomeTab(container) {
 
     // 首次进入或今日尚未同步时，自动触发同步
     maybeAutoSync();
+}
+
+// ─── Tab 1: 指标筛选 (Stock Screener) ───
+var _screenData = [];
+var screenClusterize = null;
+
+async function loadScreenTab(container) {
+    screenClusterize = null;
+    
+    // 获取最新数据日期
+    var latestDate = '--';
+    try {
+        var resp = await fetch(API + '/screen', {method: 'OPTIONS'});
+        // 用一个简单的请求获取日期
+        var dateResp = await RequestManager.fetch('screen-date', API + '/scoring/daily?per_page=1');
+        if (dateResp && dateResp.date) latestDate = dateResp.date;
+    } catch(e) {}
+    
+    var html = `<div class="panel">
+        <div class="panel-header">
+            <h3>📊 指标筛选</h3>
+            <span class="text-muted" style="font-size:12px">数据日期: <b id="screenDataDate">${latestDate}</b> · 勾选指标条件，筛选符合条件的股票</span>
+        </div>
+        
+        <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:16px;">
+            <!-- 基础筛选 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">基础筛选</div>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_filterKCB" style="accent-color:var(--accent)"> 排除科创板(688)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_filterCYB" style="accent-color:var(--accent)"> 排除创业板(300/301)
+                </label>
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                    <span style="font-size:13px">市值≤</span>
+                    <input type="number" id="scr_marketCap" value="0" step="10" min="0" style="width:60px;font-size:12px;color:#f0f4ff;background:#0a0f1e;border:1px solid #182240;border-radius:2px;" title="0=不限">
+                    <span style="font-size:12px;color:var(--text-muted)">亿</span>
+                </div>
+            </div>
+            
+            <!-- MACD 指标 -->
+            <div style="min-width:260px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">MACD</div>
+                <!-- 周期参数：明显可见 -->
+                <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#9ca3c4;">
+                        快线
+                        <input type="number" id="scr_macd_fast" value="12" min="1" max="50"
+                               style="width:48px;padding:3px 4px;font-size:12px;color:#0a0f1e;background:#e8ecf5;border:1px solid #4a5878;border-radius:3px;text-align:center;font-weight:600;">
+                    </label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#9ca3c4;">
+                        慢线
+                        <input type="number" id="scr_macd_slow" value="26" min="1" max="100"
+                               style="width:48px;padding:3px 4px;font-size:12px;color:#0a0f1e;background:#e8ecf5;border:1px solid #4a5878;border-radius:3px;text-align:center;font-weight:600;">
+                    </label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#9ca3c4;">
+                        信号
+                        <input type="number" id="scr_macd_signal" value="9" min="1" max="50"
+                               style="width:48px;padding:3px 4px;font-size:12px;color:#0a0f1e;background:#e8ecf5;border:1px solid #4a5878;border-radius:3px;text-align:center;font-weight:600;">
+                    </label>
+                </div>
+                <!-- 金叉/死叉复选 -->
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;font-size:13px;">
+                    <input type="checkbox" id="scr_macd_golden" class="scr-macd" style="accent-color:#10b981;width:14px;height:14px;"> 金叉 (DIF&gt;DEA)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;font-size:13px;">
+                    <input type="checkbox" id="scr_macd_death" class="scr-macd" style="accent-color:#ef4444;width:14px;height:14px;"> 死叉 (DIF&lt;DEA)
+                </label>
+                <!-- DIF 数值范围：明显可见 -->
+                <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;font-size:12px;background:#111827;padding:6px 8px;border-radius:4px;border-left:2px solid #06b6d4;">
+                    <span style="color:#06b6d4;font-weight:600;min-width:36px;">DIF</span>
+                    <select id="scr_macd_dif_op" class="scr-num-op"
+                            style="font-size:12px;padding:3px 6px;background:#e8ecf5;color:#0a0f1e;border:1px solid #4a5878;border-radius:3px;font-weight:600;cursor:pointer;">
+                        <option value="">不限</option>
+                        <option value="gt">&gt;</option>
+                        <option value="gte">≥</option>
+                        <option value="lt">&lt;</option>
+                        <option value="lte">≤</option>
+                        <option value="eq">≈</option>
+                    </select>
+                    <input type="number" id="scr_macd_dif_val" value="0" step="0.01"
+                           style="flex:1;min-width:50px;padding:3px 6px;font-size:12px;color:#0a0f1e;background:#fef9c3;border:1px solid #ca8a04;border-radius:3px;text-align:center;font-weight:600;">
+                </div>
+                <!-- DEA 数值范围（与 DIF 保持一致） -->
+                <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;font-size:12px;background:#111827;padding:6px 8px;border-radius:4px;border-left:2px solid #a855f7;">
+                    <span style="color:#a855f7;font-weight:600;min-width:36px;">DEA</span>
+                    <select id="scr_macd_dea_op" class="scr-num-op"
+                            style="font-size:12px;padding:3px 6px;background:#e8ecf5;color:#0a0f1e;border:1px solid #4a5878;border-radius:3px;font-weight:600;cursor:pointer;">
+                        <option value="">不限</option>
+                        <option value="gt">&gt;</option>
+                        <option value="gte">≥</option>
+                        <option value="lt">&lt;</option>
+                        <option value="lte">≤</option>
+                        <option value="eq">≈</option>
+                    </select>
+                    <input type="number" id="scr_macd_dea_val" value="0" step="0.01"
+                           style="flex:1;min-width:50px;padding:3px 6px;font-size:12px;color:#0a0f1e;background:#fef9c3;border:1px solid #ca8a04;border-radius:3px;text-align:center;font-weight:600;">
+                </div>
+                <!-- 柱状图数值范围 -->
+                <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;font-size:12px;background:#111827;padding:6px 8px;border-radius:4px;border-left:2px solid #f59e0b;">
+                    <span style="color:#f59e0b;font-weight:600;min-width:36px;">柱体</span>
+                    <select id="scr_macd_hist_op" class="scr-num-op"
+                            style="font-size:12px;padding:3px 6px;background:#e8ecf5;color:#0a0f1e;border:1px solid #4a5878;border-radius:3px;font-weight:600;cursor:pointer;">
+                        <option value="">不限</option>
+                        <option value="gt">&gt;</option>
+                        <option value="gte">≥</option>
+                        <option value="lt">&lt;</option>
+                        <option value="lte">≤</option>
+                        <option value="eq">≈</option>
+                    </select>
+                    <input type="number" id="scr_macd_hist_val" value="0" step="0.01"
+                           style="flex:1;min-width:50px;padding:3px 6px;font-size:12px;color:#0a0f1e;background:#fef9c3;border:1px solid #ca8a04;border-radius:3px;text-align:center;font-weight:600;">
+                </div>
+            </div>
+            
+            <!-- RSI 指标 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">RSI</div>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_rsi_oversold" class="scr-rsi" style="accent-color:var(--green, #10b981)"> 超卖 (RSI14<30)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_rsi_overbought" class="scr-rsi" style="accent-color:var(--danger)"> 超买 (RSI14>70)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_rsi_mid" class="scr-rsi" style="accent-color:var(--accent)"> 中性 (30-70)
+                </label>
+            </div>
+            
+            <!-- KDJ 指标 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">KDJ</div>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_kdj_golden" class="scr-kdj" style="accent-color:var(--green, #10b981)"> 金叉 (K>D)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_kdj_death" class="scr-kdj" style="accent-color:var(--danger)"> 死叉 (K<D)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_kdj_oversold" class="scr-kdj" style="accent-color:var(--green, #10b981)"> 超卖 (J<0)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_kdj_overbought" class="scr-kdj" style="accent-color:var(--danger)"> 超买 (J>100)
+                </label>
+            </div>
+            
+            <!-- 均线指标 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">均线</div>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_ma_bull" class="scr-ma" style="accent-color:var(--green, #10b981)"> 多头排列 (MA5>MA10>MA20)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_ma_bear" class="scr-ma" style="accent-color:var(--danger)"> 空头排列 (MA5<MA10<MA20)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_ma_above20" class="scr-ma" style="accent-color:var(--accent)"> 站上20日线
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_ma_below20" class="scr-ma" style="accent-color:var(--accent)"> 跌破20日线
+                </label>
+            </div>
+            
+            <!-- 量能指标 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">量能</div>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_vol_surge" class="scr-vol" style="accent-color:var(--warning)"> 放量 (量比>2)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_vol_shrink" class="scr-vol" style="accent-color:var(--accent)"> 缩量 (量比<0.5)
+                </label>
+            </div>
+        </div>
+        
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+            <button class="btn btn-primary" onclick="runScreen()">开始筛选</button>
+            <button class="btn" onclick="clearScreenFilters()">清空条件</button>
+            <span id="screenStatus" style="margin-left:auto;font-size:12px;color:var(--text-secondary)"></span>
+        </div>
+        
+        <div id="screenMetrics"></div>
+        <div id="screenTableContainer"><div class="empty-state">请勾选筛选条件后点击"开始筛选"</div></div>
+    </div>`;
+    container.innerHTML = html;
+}
+
+function clearScreenFilters() {
+    document.querySelectorAll('#content input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
+    document.getElementById('scr_marketCap').value = '0';
+    document.getElementById('scr_macd_fast').value = '12';
+    document.getElementById('scr_macd_slow').value = '26';
+    document.getElementById('scr_macd_signal').value = '9';
+    document.getElementById('scr_macd_dif_op').value = '';
+    document.getElementById('scr_macd_dif_val').value = '0';
+    // 同时清空 DEA / 柱体 数值范围
+    document.getElementById('scr_macd_dea_op').value = '';
+    document.getElementById('scr_macd_dea_val').value = '0';
+    document.getElementById('scr_macd_hist_op').value = '';
+    document.getElementById('scr_macd_hist_val').value = '0';
+    document.getElementById('screenTableContainer').innerHTML = '<div class="empty-state">请勾选筛选条件后点击"开始筛选"</div>';
+    document.getElementById('screenMetrics').innerHTML = '';
+    document.getElementById('screenStatus').textContent = '';
+    screenClusterize = null;
+}
+
+async function runScreen() {
+    var container = document.getElementById('screenTableContainer');
+    var statusEl = document.getElementById('screenStatus');
+    var metricsEl = document.getElementById('screenMetrics');
+    
+    // 收集筛选条件
+    var filters = {};
+    
+    // 基础筛选
+    filters.exclude_kcb = document.getElementById('scr_filterKCB').checked;
+    filters.exclude_cyb = document.getElementById('scr_filterCYB').checked;
+    filters.max_market_cap = parseFloat(document.getElementById('scr_marketCap').value) || 0;
+    
+    // MACD 条件
+    filters.macd_fast = parseInt(document.getElementById('scr_macd_fast').value) || 12;
+    filters.macd_slow = parseInt(document.getElementById('scr_macd_slow').value) || 26;
+    filters.macd_signal = parseInt(document.getElementById('scr_macd_signal').value) || 9;
+    filters.macd = [];
+    if (document.getElementById('scr_macd_golden').checked) filters.macd.push('golden');
+    if (document.getElementById('scr_macd_death').checked) filters.macd.push('death');
+    // 柱状图正负复选框已由"柱体数值范围"替代，不再使用 hist_positive/hist_negative
+    // DIF 值筛选
+    var difOp = document.getElementById('scr_macd_dif_op').value;
+    var difVal = parseFloat(document.getElementById('scr_macd_dif_val').value);
+    if (difOp && !isNaN(difVal)) {
+        filters.macd_dif = {op: difOp, value: difVal};
+    }
+    // DEA 值筛选
+    var deaOp = document.getElementById('scr_macd_dea_op').value;
+    var deaVal = parseFloat(document.getElementById('scr_macd_dea_val').value);
+    if (deaOp && !isNaN(deaVal)) {
+        filters.macd_dea = {op: deaOp, value: deaVal};
+    }
+    // 柱状图数值筛选
+    var histOp = document.getElementById('scr_macd_hist_op').value;
+    var histVal = parseFloat(document.getElementById('scr_macd_hist_val').value);
+    if (histOp && !isNaN(histVal)) {
+        filters.macd_hist = {op: histOp, value: histVal};
+    }
+    
+    // RSI 条件
+    filters.rsi = [];
+    if (document.getElementById('scr_rsi_oversold').checked) filters.rsi.push('oversold');
+    if (document.getElementById('scr_rsi_overbought').checked) filters.rsi.push('overbought');
+    if (document.getElementById('scr_rsi_mid').checked) filters.rsi.push('mid');
+    
+    // KDJ 条件
+    filters.kdj = [];
+    if (document.getElementById('scr_kdj_golden').checked) filters.kdj.push('golden');
+    if (document.getElementById('scr_kdj_death').checked) filters.kdj.push('death');
+    if (document.getElementById('scr_kdj_oversold').checked) filters.kdj.push('oversold');
+    if (document.getElementById('scr_kdj_overbought').checked) filters.kdj.push('overbought');
+    
+    // 均线条件
+    filters.ma = [];
+    if (document.getElementById('scr_ma_bull').checked) filters.ma.push('bull');
+    if (document.getElementById('scr_ma_bear').checked) filters.ma.push('bear');
+    if (document.getElementById('scr_ma_above20').checked) filters.ma.push('above20');
+    if (document.getElementById('scr_ma_below20').checked) filters.ma.push('below20');
+    
+    // 量能条件
+    filters.vol = [];
+    if (document.getElementById('scr_vol_surge').checked) filters.vol.push('surge');
+    if (document.getElementById('scr_vol_shrink').checked) filters.vol.push('shrink');
+    
+    // 检查是否有筛选条件
+    var hasFilter = filters.exclude_kcb || filters.exclude_cyb || filters.max_market_cap > 0 ||
+        filters.macd.length > 0 || filters.rsi.length > 0 || filters.kdj.length > 0 ||
+        filters.ma.length > 0 || filters.vol.length > 0 ||
+        filters.macd_dif || filters.macd_dea || filters.macd_hist;
+    
+    if (!hasFilter) {
+        showToast('请至少勾选一个筛选条件', 'warning');
+        return;
+    }
+    
+    statusEl.textContent = '筛选中...';
+    showSkeleton(container, 10);
+    
+    try {
+        var resp = await RequestManager.fetch('screen', API + '/screen', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(filters)
+        });
+        
+        if (!resp.success) {
+            throw new Error(resp.error || '筛选失败');
+        }
+        
+        _screenData = resp.data || [];
+        statusEl.textContent = '共 ' + _screenData.length + ' 只股票符合条件';
+        
+        // 更新日期显示
+        var dateEl = document.getElementById('screenDataDate');
+        if (dateEl && resp.date) dateEl.textContent = resp.date;
+        
+        // 显示指标统计
+        if (metricsEl && _screenData.length > 0) {
+            var macdGolden = 0, rsiOversold = 0, kdjGolden = 0;
+            _screenData.forEach(function(s) {
+                if (s.macd_state === 'golden') macdGolden++;
+                if (s.rsi_state === 'oversold') rsiOversold++;
+                if (s.kdj_state === 'golden') kdjGolden++;
+            });
+            metricsEl.innerHTML = '<div class="metrics-row">' +
+                '<div class="metric-card"><div class="val">' + _screenData.length + '</div><div class="lbl">符合条件</div></div>' +
+                '<div class="metric-card"><div class="val" style="color:var(--green, #10b981)">' + macdGolden + '</div><div class="lbl">MACD金叉</div></div>' +
+                '<div class="metric-card"><div class="val" style="color:var(--green, #10b981)">' + rsiOversold + '</div><div class="lbl">RSI超卖</div></div>' +
+                '<div class="metric-card"><div class="val" style="color:var(--green, #10b981)">' + kdjGolden + '</div><div class="lbl">KDJ金叉</div></div>' +
+                '</div>';
+        }
+        
+        renderScreenTable(_screenData);
+    } catch(e) {
+        statusEl.textContent = '筛选失败: ' + e.message;
+        container.innerHTML = '<div class="empty-state">筛选失败: ' + e.message + '</div>';
+    }
+}
+
+function renderScreenTable(stocks) {
+    var container = document.getElementById('screenTableContainer');
+    if (!container) return;
+    
+    if (stocks.length === 0) {
+        container.innerHTML = '<div class="empty-state">没有符合条件的股票</div>';
+        screenClusterize = null;
+        return;
+    }
+    
+    container.innerHTML = '<div id="screenScrollArea" class="clusterize-scroll" style="max-height:60vh;overflow-y:auto;">' +
+        '<table><thead><tr>' +
+        '<th>#</th><th>代码</th><th>名称</th><th>MACD</th><th>RSI14</th><th>KDJ</th><th>均线</th><th>量比</th><th>市值(亿)</th>' +
+        '</tr></thead>' +
+        '<tbody id="screenContentArea" class="clusterize-content"></tbody>' +
+        '</table></div>';
+    
+    // 等待 DOM 更新后再初始化 Clusterize
+    var scrollElem = document.getElementById('screenScrollArea');
+    var contentElem = document.getElementById('screenContentArea');
+    
+    if (scrollElem && contentElem) {
+        screenClusterize = new Clusterize({
+            rows: stocks.map(function(s, i) { return screenRowToHTML(s, i + 1); }),
+            scrollElem: scrollElem,
+            contentElem: contentElem,
+            rows_in_block: 50,
+            blocks_in_cluster: 4,
+        });
+    }
+}
+
+function screenRowToHTML(stock, idx) {
+    // MACD 状态
+    var macdHtml = '<span style="color:var(--text-muted)">--</span>';
+    if (stock.macd_state) {
+        var macdColor = stock.macd_state === 'golden' ? 'var(--green, #10b981)' : 'var(--danger)';
+        var macdLabel = stock.macd_state === 'golden' ? '▲多' : '▼空';
+        macdHtml = '<span style="color:' + macdColor + ';font-weight:600">' + macdLabel + '</span>';
+    }
+    
+    // RSI 值
+    var rsiHtml = '--';
+    if (stock.rsi14 != null) {
+        var rsiColor = stock.rsi14 < 30 ? 'var(--green, #10b981)' : stock.rsi14 > 70 ? 'var(--danger)' : 'var(--text-primary)';
+        rsiHtml = '<span style="color:' + rsiColor + '">' + stock.rsi14.toFixed(1) + '</span>';
+    }
+    
+    // KDJ 状态
+    var kdjHtml = '--';
+    if (stock.kdj_state) {
+        var kdjColor = stock.kdj_state === 'golden' ? 'var(--green, #10b981)' : 'var(--danger)';
+        var kdjLabel = stock.kdj_state === 'golden' ? 'K>D' : 'K<D';
+        kdjHtml = '<span style="color:' + kdjColor + '">' + kdjLabel + '</span>';
+    }
+    
+    // 均线状态
+    var maHtml = '--';
+    if (stock.ma_state) {
+        var maColor = stock.ma_state === 'bull' ? 'var(--green, #10b981)' : stock.ma_state === 'bear' ? 'var(--danger)' : 'var(--accent)';
+        var maLabel = stock.ma_state === 'bull' ? '多头' : stock.ma_state === 'bear' ? '空头' : stock.ma_state;
+        maHtml = '<span style="color:' + maColor + '">' + maLabel + '</span>';
+    }
+    
+    // 量比
+    var volHtml = '--';
+    if (stock.vol_ratio != null) {
+        var volColor = stock.vol_ratio > 2 ? 'var(--warning)' : stock.vol_ratio < 0.5 ? 'var(--accent)' : 'var(--text-primary)';
+        volHtml = '<span style="color:' + volColor + '">' + stock.vol_ratio.toFixed(2) + '</span>';
+    }
+    
+    var marketCap = stock.market_cap ? stock.market_cap.toFixed(1) : '--';
+    
+    return '<tr>' +
+        '<td style="color:var(--text-muted);width:40px">' + idx + '</td>' +
+        '<td><span class="code-link" onclick="openKline(\'' + stock.code + '\')">' + stock.code + '</span></td>' +
+        '<td>' + (stock.name || '--') + '</td>' +
+        '<td>' + macdHtml + '</td>' +
+        '<td>' + rsiHtml + '</td>' +
+        '<td>' + kdjHtml + '</td>' +
+        '<td>' + maHtml + '</td>' +
+        '<td>' + volHtml + '</td>' +
+        '<td style="color:var(--text-secondary)">' + marketCap + '</td>' +
+        '</tr>';
 }
 
 function greetingByHour() {
@@ -959,6 +1369,7 @@ async function loadScoresTab(container) {
             <span>市值≤</span>
             <input type="number" id="minMarketCap" value="100" step="10" min="0" onchange="filterScores()" style="width:65px" title="单位：亿元，0表示不筛选">
             <span style="font-size:12px;color:var(--text-muted)">亿</span>
+
             <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
             <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
             <span id="syncStatus"></span>
@@ -1146,9 +1557,7 @@ function rowToScoreHTML(row, idx) {
     var ruleId = row.rule_id || '';
     var ruleDisplay = ruleId ? '#' + ruleId + ' ' + (row.rule_name || '-') : (row.rule_name || '-');
     var ruleTitle = ruleDisplay.replace(/"/g, '&quot;');
-    var ruleCell = ruleId
-        ? '<span class="code-link" onclick="pendingBacktestRuleId=' + ruleId + ';switchTab(\'backtest\')" title="跳转到回测中心">' + ruleDisplay + '</span>'
-        : '<span style="color:var(--text-muted)">' + (row.rule_name || '-') + '</span>';
+    var ruleCell = '<span style="color:var(--text-muted)">' + (row.rule_name || '-') + '</span>';
     var marketCap = row.market_cap ? row.market_cap.toFixed(1) : '--';
     return '<tr>' +
         '<td style="color:var(--text-muted);width:40px">' + (idx != null ? idx : '') + '</td>' +
@@ -1644,455 +2053,7 @@ async function syncAndScore() {
     }
 }
 
-// ─── Tab 2: Strategy ───
-let strategySort = { key: 'fitness', dir: -1 };
 
-const STRATEGY_COLS = [
-    { key: 'id', label: '编号', sortable: true },
-    { key: 'is_active', label: '状态', sortable: true },
-    { key: 'rule_name', label: '策略名称', sortable: true },
-    { key: 'rule_type', label: '类型', sortable: true },
-    { key: 'fitness', label: '评分', sortable: true },
-    { key: 'annual_return', label: '年化收益', sortable: true },
-    { key: 'win_rate', label: '胜率', sortable: true },
-    { key: 'sharpe_ratio', label: '夏普', sortable: true },
-    { key: 'max_drawdown', label: '最大回撤', sortable: true },
-    { key: 'total_trades', label: '交易数', sortable: true },
-    { key: null, label: '操作', sortable: false }
-];
-
-function sortRules(rules) {
-    const { key, dir } = strategySort;
-    return [...rules].sort((a, b) => {
-        let va = a[key] ?? 0, vb = b[key] ?? 0;
-        if (typeof va === 'string') va = va.toLowerCase();
-        if (typeof vb === 'string') vb = vb.toLowerCase();
-        if (va < vb) return -dir;
-        if (va > vb) return dir;
-        return 0;
-    });
-}
-
-function renderStrategyTable(rules) {
-    let html = '';
-    if (rules.length > 0) {
-        const activeCount = rules.filter(r => r.is_active).length;
-        const topFitness = rules.reduce((best, r) => (r.fitness||0) > (best.fitness||0) ? r : best, rules[0]);
-        const avgReturn = (rules.reduce((s,r) => s + (r.annual_return||0), 0) / rules.length).toFixed(1);
-
-        html += `<div class="metrics-row">
-            <div class="metric-card">
-                <div class="val">${(topFitness.fitness||0).toFixed(4)}</div>
-                <div class="lbl">最高评分 · #${topFitness.id}</div>
-            </div>
-            <div class="metric-card">
-                <div class="val ${parseFloat(avgReturn) >= 0 ? 'positive' : 'negative'}">${avgReturn}%</div>
-                <div class="lbl">平均年化收益</div>
-            </div>
-            <div class="metric-card">
-                <div class="val">${activeCount}</div>
-                <div class="lbl">已启用策略</div>
-            </div>
-            <div class="metric-card">
-                <div class="val" style="color:var(--text-muted)">${rules.length}</div>
-                <div class="lbl">策略总数</div>
-            </div>
-        </div>`;
-
-        html += `<div class="table-wrapper"><table><thead><tr>`;
-        STRATEGY_COLS.forEach(col => {
-            if (col.sortable) {
-                const active = strategySort.key === col.key;
-                const arrow = active ? (strategySort.dir === 1 ? ' &#9650;' : ' &#9660;') : '';
-                html += `<th style="cursor:pointer;user-select:none" onclick="strategySortBy('${col.key}')">${col.label}${arrow}</th>`;
-            } else {
-                html += `<th>${col.label}</th>`;
-            }
-        });
-        html += `</tr></thead><tbody>`;
-
-        const sorted = sortRules(rules);
-        sorted.forEach(r => {
-            const retCls = (r.annual_return||0) >= 0 ? 'positive' : 'negative';
-            html += `<tr>
-                <td style="color:var(--accent);font-weight:600">#${r.id}</td>
-                <td><span class="toggle ${r.is_active?'on':''}" onclick="toggleRule(${r.id},this)"></span></td>
-                <td><span class="code-link" onclick="viewRuleTrades(${r.id},'${(r.rule_name||'').replace(/'/g,"\'")}')">${r.rule_name}</span></td>
-                <td><span class="badge badge-info">${r.rule_type}</span></td>
-                <td style="font-weight:600">${(r.fitness||0).toFixed(4)}</td>
-                <td class="${retCls}">${(r.annual_return||0).toFixed(1)}%</td>
-                <td>${(r.win_rate||0).toFixed(1)}%</td>
-                <td>${(r.sharpe_ratio||0).toFixed(2)}</td>
-                <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td>
-                <td>${r.total_trades||0}</td>
-                <td><button class="btn btn-sm" onclick="showVersions(${r.id})">版本</button> <button class="btn btn-danger btn-sm" onclick="deleteRule(${r.id})">删除</button></td></tr>`;
-        });
-        html += `</tbody></table></div>`;
-    }
-    return html;
-}
-
-function strategySortBy(key) {
-    if (strategySort.key === key) {
-        strategySort.dir *= -1;
-    } else {
-        strategySort.key = key;
-        strategySort.dir = -1;
-    }
-    // 使用 innerHTML 替换内容，保留外层 div（避免 id="strategyRules" 被销毁导致后续排序失效）
-    const rulesEl = document.getElementById('strategyRules');
-    if (rulesEl && window._strategyRules) {
-        rulesEl.innerHTML = renderStrategyTable(window._strategyRules);
-    }
-}
-
-window._strategyRules = [];
-
-async function loadStrategyTab(container) {
-    const resp = await RequestManager.fetch('strategy', API + '/strategy/rules');
-    const rules = resp.data || [];
-    window._strategyRules = rules;
-    const activeCount = rules.filter(r => r.is_active).length;
-
-    let html = `<div class="panel">
-        <div class="input-row">
-            <button id="mineBtn" class="btn btn-primary" onclick="toggleMining()">挖掘新策略</button>
-            <button id="resetMineBtn" class="btn" onclick="resetMining()" style="display:none">重置</button>
-            <span id="miningStatus"></span>
-            <span class="text-muted" style="margin-left:auto">
-                共 <span style="color:var(--accent)">${rules.length}</span> 条 ·
-                启用 <span style="color:var(--accent)">${activeCount}</span> 条
-            </span>
-        </div>
-        <div id="strategyRules">${renderStrategyTable(rules)}</div>`;
-
-    if (rules.length === 0) {
-        html += '<div class="empty-state">暂无策略<br><span style="color:var(--text-muted)">点击「挖掘新策略」生成量化规则</span></div>';
-    }
-    html += `<div id="ruleTradesPanel" class="hidden sub-panel"></div></div>`;
-    container.innerHTML = html;
-}
-
-async function toggleRule(id, el) {
-    const resp = await RequestManager.fetch('rule-toggle-' + id, API + '/strategy/rules/' + id + '/toggle', {method:'PUT'});
-    if (resp.success) el.classList.toggle('on', resp.data.is_active);
-}
-
-async function deleteRule(id) {
-    if (!confirm('确定删除此策略?')) return;
-    await RequestManager.fetch('rule-delete-' + id, API + '/strategy/rules/' + id, {method:'DELETE'});
-    showToast('删除成功', 'success');
-    loadTab('strategy');
-}
-
-async function showVersions(ruleId) {
-    const resp = await RequestManager.fetch('rule-versions-' + ruleId, API + '/strategy/rules/' + ruleId + '/versions');
-    const versions = resp.data || [];
-    let html = '<table><thead><tr><th>版本</th><th>Fitness</th><th>年化收益</th><th>胜率</th><th>时间</th><th>操作</th></tr></thead><tbody>';
-    versions.forEach(v => {
-        html += `<tr>
-            <td>v${v.version}</td>
-            <td>${v.fitness != null ? v.fitness.toFixed(4) : '--'}</td>
-            <td>${v.annual_return != null ? v.annual_return.toFixed(1)+'%' : '--'}</td>
-            <td>${v.win_rate != null ? v.win_rate.toFixed(1)+'%' : '--'}</td>
-            <td>${v.created_at || ''}</td>
-            <td><button class="btn btn-sm btn-danger" onclick="rollbackRule(${ruleId}, ${v.version})">回滚</button></td>
-        </tr>`;
-    });
-    html += '</tbody></table>';
-    if (versions.length === 0) html = '<div style="text-align:center;padding:40px;color:var(--text-secondary)">暂无历史版本</div>';
-    showModal('策略版本历史', html);
-}
-
-async function rollbackRule(ruleId, version) {
-    if (!confirm('确认回滚到 v' + version + '？当前版本会被保存为历史。')) return;
-    const resp = await RequestManager.fetch('rule-rollback-' + ruleId, API + '/strategy/rules/' + ruleId + '/rollback/' + version, { method: 'POST' });
-    if (resp.success) {
-        closeModal();
-        loadTab('strategy');
-    }
-}
-
-let miningActive = false;
-
-async function toggleMining() {
-    if (miningActive) {
-        await RequestManager.fetch('mine-stop', API + '/strategy/mine/stop', { method: 'POST' });
-        document.getElementById('miningStatus').innerHTML = '<span class="badge badge-warning">已请求停止</span>';
-        return;
-    }
-    const st = document.getElementById('miningStatus');
-    st.innerHTML = '<span class="badge badge-running">挖掘中</span>';
-    const resp = await RequestManager.fetch('mine-start', API + '/strategy/mine', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-    if (resp.success) {
-        miningActive = true;
-        updateMiningButton();
-        pollMining();
-    } else {
-        st.innerHTML = '<span class="badge badge-error">启动失败: '+(resp.error||'')+'</span>';
-    }
-}
-
-async function pollMining() {
-    const st = document.getElementById('miningStatus');
-    const resp = await RequestManager.fetch('mine-status', API + '/strategy/mine/status');
-    if (resp.data.running) {
-        st.innerHTML = '<span class="badge badge-running">挖掘中</span>';
-        timerManager.setTimeout('minePoll', pollMining, 3000);
-    } else if (resp.data.progress === 'error') {
-        st.innerHTML = '<span class="badge badge-error">错误: '+(resp.data.result||'')+'</span>';
-        miningActive = false; updateMiningButton();
-    } else {
-        const count = resp.data.result ? resp.data.result.length : 0;
-        st.innerHTML = '<span class="badge badge-done">完成 '+count+' 条</span>';
-        miningActive = false; updateMiningButton();
-        loadTab('strategy');
-    }
-}
-
-async function resetMining() {
-    await RequestManager.fetch('mine-reset', API + '/strategy/mine/reset', { method: 'POST' });
-    miningActive = false;
-    updateMiningButton();
-    document.getElementById('miningStatus').textContent = '';
-}
-
-function updateMiningButton() {
-    const btn = document.getElementById('mineBtn');
-    btn.textContent = miningActive ? '停止挖掘' : '挖掘新策略';
-    btn.className = miningActive ? 'btn btn-danger' : 'btn btn-primary';
-    document.getElementById('resetMineBtn').style.display = miningActive ? 'none' : '';
-}
-
-async function viewRuleTrades(ruleId, ruleName) {
-    const panel = document.getElementById('ruleTradesPanel');
-    const resp = await RequestManager.fetch('rule-trades-' + ruleId, API + '/strategy/rules/' + ruleId + '/trades');
-    const trades = resp.data || [];
-    let html = '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">';
-    html += '<h3 style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text-secondary);margin:0">' + ruleName + ' · 交易明细 (' + trades.length + '笔)</h3>';
-    html += `<button class="btn btn-primary btn-sm" onclick="pendingBacktestRuleId=${ruleId};switchTab('backtest')">回测中心查看</button></div>`;
-    if (trades.length === 0) {
-        html += '<div class="empty-state">暂无交易记录</div>';
-    } else {
-        html += '<div class="table-wrapper"><table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>持仓天</th><th>收益率</th><th>卖出原因</th></tr></thead><tbody>';
-        trades.forEach(t => {
-            const pnlCls = (t.pnl_pct||0) >= 0 ? 'positive' : 'negative';
-            const reasonMap = {expire:'到期', stop_loss:'止损', take_profit:'止盈', period_end:'周期结束'};
-            const reason = reasonMap[t.exit_reason] || t.exit_reason || '-';
-            html += `<tr><td><span class="code-link" onclick="openKline('${t.code}','${t.entry_date||''}',${t.entry_price||0},'${t.exit_date||''}',${t.exit_price||0})">${t.code}</span></td>
-                <td>${t.name||''}</td><td>${t.entry_date||''}</td><td>${t.entry_price||''}</td>
-                <td>${t.exit_date||''}</td><td>${t.exit_price||''}</td>
-                <td>${t.holding_days||''}</td><td class="${pnlCls}">${(t.pnl_pct||0).toFixed(2)}%</td><td>${reason}</td></tr>`;
-        });
-        html += '</tbody></table></div>';
-    }
-    panel.innerHTML = html; panel.classList.remove('hidden');
-}
-
-// ─── Tab 3: Backtest ───
-async function loadBacktestTab(container) {
-    const [rulesResp, resultsResp] = await Promise.all([
-        RequestManager.fetch('backtest-rules', API + '/strategy/rules?active_only=0'),
-        RequestManager.fetch('backtest', API + '/backtest/results')
-    ]);
-    const rules = rulesResp.data || [], results = resultsResp.data || [];
-    const opts = rules.map(r => `<option value="${r.id}">#${r.id} ${r.rule_name}</option>`).join('');
-
-    let html = `<div class="panel">
-        <div class="input-row">
-            <span>策略</span><select id="btRule">${opts}</select>
-            <span>起始</span><input type="date" id="btStart" value="2024-01-01">
-            <span>结束</span><input type="date" id="btEnd" value="${new Date().toISOString().split('T')[0]}">
-            <span>止损(%)</span><input type="number" id="btStopLoss" value="${loadBTSetting('btStopLoss', -5)}" step="0.1" min="-50" max="0" style="width:70px">
-            <span>止盈(%)</span><input type="number" id="btTakeProfit" value="${loadBTSetting('btTakeProfit', 12)}" step="0.1" min="0" max="100" style="width:70px">
-            <span>持仓(天)</span><input type="number" id="btHolding" value="${loadBTSetting('btHolding', 10)}" step="1" min="1" max="100" style="width:60px">
-            <button class="btn btn-primary" onclick="startBacktest()">开始回测</button>
-            <span id="btStatus"></span>
-        </div>
-        <div id="btResult" class="hidden"></div>
-        <div class="panel-header" style="margin-top:8px">
-            <h3>历史回测记录 (${results.length})</h3>
-        </div>`;
-
-    if (results.length > 0) {
-        html += `<div class="table-wrapper"><table><thead><tr>
-            <th><input type="checkbox" id="selectAllCompare" onchange="toggleAllCompare(this)"></th>
-            <th>ID</th><th>策略</th><th>区间</th><th>年化收益</th><th>胜率</th>
-            <th>夏普</th><th>回撤</th><th>交易数</th><th>操作</th>
-        </tr></thead><tbody>`;
-        results.forEach(r => {
-            const retCls = (r.annual_return||0) >= 0 ? 'positive' : 'negative';
-            html += `<tr>
-                <td><input type="checkbox" class="compare-check" value="${r.id}"></td>
-                <td><span class="code-link" onclick="viewResult(${r.id})">#${r.id}</span></td>
-                <td>${r.rule_name||''}</td><td>${r.start_date||''} ~ ${r.end_date||''}</td>
-                <td class="${retCls}">${(r.annual_return||0).toFixed(1)}%</td>
-                <td>${(r.win_rate||0).toFixed(1)}%</td>
-                <td>${(r.sharpe_ratio||0).toFixed(2)}</td>
-                <td class="negative">${(r.max_drawdown||0).toFixed(1)}%</td>
-                <td>${r.total_trades||0}</td>
-                <td><button class="btn btn-danger btn-sm" onclick="deleteBacktest(${r.id})">删除</button></td></tr>`;
-        });
-        html += `</tbody></table></div>
-        <button id="compareBtn" class="btn btn-primary" onclick="compareSelected()" disabled style="margin-top:8px">对比选中 (0)</button>`;
-    } else {
-        html += '<div class="empty-state">暂无回测记录</div>';
-    }
-    html += `<div id="btTradesPanel" class="hidden sub-panel"></div></div>`;
-    container.innerHTML = html;
-
-    if (pendingBacktestRuleId) {
-        const sel = document.getElementById('btRule');
-        if (sel) sel.value = String(pendingBacktestRuleId);
-        pendingBacktestRuleId = null;
-    }
-}
-
-function loadBTSetting(key, defaultVal) {
-    try { const v = localStorage.getItem(key); return v !== null ? v : defaultVal; }
-    catch(e) { return defaultVal; }
-}
-function saveBTSetting(key, val) { try { localStorage.setItem(key, val); } catch(e) {} }
-
-async function startBacktest() {
-    const ruleId = document.getElementById('btRule').value;
-    const start = document.getElementById('btStart').value, end = document.getElementById('btEnd').value;
-    const stopLoss = parseFloat(document.getElementById('btStopLoss').value) || -5;
-    const takeProfit = parseFloat(document.getElementById('btTakeProfit').value) || 12;
-    const holdingMax = parseInt(document.getElementById('btHolding').value) || 10;
-    saveBTSetting('btStopLoss', stopLoss); saveBTSetting('btTakeProfit', takeProfit); saveBTSetting('btHolding', holdingMax);
-    const st = document.getElementById('btStatus');
-    st.innerHTML = '<span class="badge badge-running">回测中</span>';
-    const resp = await RequestManager.fetch('bt-run', API + '/backtest/run', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-        rule_id:parseInt(ruleId),start_date:start,end_date:end,
-        stop_loss:stopLoss/100, take_profit:takeProfit/100, holding_max:holdingMax
-    })});
-    if (resp.success) { pollBt(0); }
-    else { st.innerHTML = '<span class="badge badge-error">'+(resp.error||'')+'</span>'; }
-}
-
-const BT_MAX_POLLS = 400;
-
-async function pollBt(n) {
-    const st = document.getElementById('btStatus');
-    if (n >= BT_MAX_POLLS) {
-        st.innerHTML = '<span class="badge badge-error">超时</span>';
-        return;
-    }
-    const resp = await RequestManager.fetch('bt-status', API + '/backtest/status');
-    if (resp.data.running) {
-        const p = resp.data.progress || 0, t = resp.data.total || 0;
-        st.innerHTML = '<span class="badge badge-running">回测中 ' + (t > 0 ? `(${p}/${t})` : '') + '</span>';
-        timerManager.setTimeout('btPoll', function() { pollBt(n + 1); }, 3000);
-    }
-    else if (resp.data.error) { st.innerHTML = '<span class="badge badge-error">'+resp.data.error+'</span>'; }
-    else if (resp.data.result_id) { st.innerHTML = '<span class="badge badge-done">完成</span>'; viewResult(resp.data.result_id); }
-    else { st.innerHTML = '<span class="badge badge-done">完成</span>'; loadTab('backtest'); }
-}
-
-async function viewResult(resultId) {
-    const [detailResp, tradesResp] = await Promise.all([
-        RequestManager.fetch('bt-result-' + resultId, API + '/backtest/results/' + resultId),
-        RequestManager.fetch('bt-trades-' + resultId, API + '/backtest/results/' + resultId + '/trades')
-    ]);
-    const s = detailResp.data || {}, trades = tradesResp.data || [];
-    const panel = document.getElementById('btTradesPanel');
-    const retCls = (s.annual_return||0) >= 0 ? '' : ' negative';
-    let html = `<div class="panel-header"><h3>回测结果 #${resultId}</h3></div>
-        <div class="metrics-row">
-            <div class="metric-card">
-                <div class="val${retCls}">${(s.annual_return||0).toFixed(1)}%</div>
-                <div class="lbl">年化收益</div>
-            </div>
-            <div class="metric-card">
-                <div class="val">${(s.win_rate||0).toFixed(1)}%</div>
-                <div class="lbl">胜率</div>
-            </div>
-            <div class="metric-card">
-                <div class="val">${(s.sharpe_ratio||0).toFixed(2)}</div>
-                <div class="lbl">夏普比率</div>
-            </div>
-            <div class="metric-card">
-                <div class="val negative">${(s.max_drawdown||0).toFixed(1)}%</div>
-                <div class="lbl">最大回撤</div>
-            </div>
-            <div class="metric-card">
-                <div class="val">${s.total_trades||0}</div>
-                <div class="lbl">交易次数</div>
-            </div>
-        </div>`;
-    if (trades.length > 0) {
-        html += '<div class="table-wrapper"><table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>持仓天</th><th>收益率</th><th>卖出原因</th></tr></thead><tbody>';
-        trades.forEach(t => {
-            const pnlCls = (t.pnl_pct||0) >= 0 ? 'positive' : 'negative';
-            const reasonMap = {expire:'到期', stop_loss:'止损', take_profit:'止盈', period_end:'周期结束'};
-            const reason = reasonMap[t.exit_reason] || t.exit_reason || '-';
-            html += `<tr><td><span class="code-link" onclick="openKline('${t.code}','${t.entry_date||''}',${t.entry_price||0},'${t.exit_date||''}',${t.exit_price||0},${resultId})">${t.code}</span></td>
-                <td>${t.name||''}</td><td>${t.entry_date||''}</td><td>${t.entry_price||''}</td>
-                <td>${t.exit_date||''}</td><td>${t.exit_price||''}</td>
-                <td>${t.holding_days||''}</td><td class="${pnlCls}">${(t.pnl_pct||0).toFixed(2)}%</td><td>${reason}</td></tr>`;
-        });
-        html += '</tbody></table></div>';
-    }
-    panel.innerHTML = html; panel.classList.remove('hidden');
-}
-
-async function deleteBacktest(id) {
-    if (!confirm('确定删除此回测记录?')) return;
-    await RequestManager.fetch('bt-delete-' + id, API + '/backtest/results/' + id, {method:'DELETE'});
-    showToast('删除成功', 'success');
-    loadTab('backtest');
-}
-
-// ─── Compare ───
-function toggleAllCompare(el) {
-    document.querySelectorAll('.compare-check').forEach(cb => cb.checked = el.checked);
-    updateCompareButton();
-}
-
-function updateCompareButton() {
-    const cbs = document.querySelectorAll('.compare-check:checked');
-    const btn = document.getElementById('compareBtn');
-    if (btn) { btn.disabled = cbs.length < 2; btn.textContent = `对比选中 (${cbs.length})`; }
-}
-
-async function compareSelected() {
-    const ids = Array.from(document.querySelectorAll('.compare-check:checked')).map(cb => cb.value).join(',');
-    const resp = await RequestManager.fetch('bt-compare', API + '/backtest/compare?ids=' + ids);
-    if (!resp.data || !resp.data.length) return;
-    showCompareModal(resp.data);
-}
-
-function showCompareModal(results) {
-    const metrics = ['annual_return', 'win_rate', 'sharpe_ratio', 'max_drawdown', 'total_trades'];
-    const metricLabels = ['年化收益(%)', '胜率(%)', '夏普比率', '最大回撤(%)', '总交易数'];
-    const bestAnnual = Math.max(...results.map(r => r.annual_return || -Infinity));
-    const bestDrawdown = Math.max(...results.map(r => r.max_drawdown || -Infinity));
-
-    let html = '<div style="overflow-x:auto;"><table><thead><tr><th>指标</th>';
-    results.forEach(r => html += `<th>${r.rule_name || '#' + r.result_id}</th>`);
-    html += '</tr></thead><tbody>';
-
-    metrics.forEach((m, i) => {
-        html += `<tr><td>${metricLabels[i]}</td>`;
-        results.forEach(r => {
-            const val = r[m];
-            const display = val != null ? (typeof val === 'number' ? val.toFixed(2) : val) : '--';
-            let style = '';
-            if ((m === 'annual_return' && val === bestAnnual) || (m === 'max_drawdown' && val === bestDrawdown)) {
-                style = 'color:var(--green, #10b981);font-weight:bold;';
-            }
-            html += `<td style="${style}">${display}</td>`;
-        });
-        html += '</tr>';
-    });
-    html += '</tbody></table></div>';
-    showModal('回测结果对比', html);
-}
-
-document.addEventListener('change', e => {
-    if (e.target.classList.contains('compare-check')) updateCompareButton();
-});
 
 async function showScoreHistory(code) {
     const days = document.getElementById('historyDays')?.value || '30';
@@ -2309,15 +2270,24 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
         if (chartType === 'vol') {
             seriesArr.push({ type: 'bar', name: '成交量', data: volData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' });
         } else if (chartType === 'macd') {
-            var macdData = calcMACD(kdata);
+            // 读取筛选界面设定的 MACD 参数（若存在），否则用默认 12/26/9
+            var mfEl = document.getElementById('scr_macd_fast');
+            var msEl = document.getElementById('scr_macd_slow');
+            var msigEl = document.getElementById('scr_macd_signal');
+            var mf = (mfEl && parseInt(mfEl.value)) || 12;
+            var ms = (msEl && parseInt(msEl.value)) || 26;
+            var msig = (msigEl && parseInt(msigEl.value)) || 9;
+            var macdData = calcMACD(kdata, mf, ms, msig);
+            // 参数标签，显示在系列名上，让用户知道当前用的是哪个参数
+            var paramLabel = '(' + mf + ',' + ms + ',' + msig + ')';
             // MACD 柱状图（正值红色，负值绿色）
             var macdBarData = macdData.macd.map(function(v) {
                 return { value: v, itemStyle: { color: v >= 0 ? '#ef5350' : '#26a69a' } };
             });
             seriesArr.push(
-                { type: 'bar', name: 'MACD', data: macdBarData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' },
-                { type: 'line', name: 'DIF', data: macdData.dif, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#00d4f0' } },
-                { type: 'line', name: 'DEA', data: macdData.dea, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#f5a623' } }
+                { type: 'bar', name: 'MACD' + paramLabel, data: macdBarData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' },
+                { type: 'line', name: 'DIF' + paramLabel, data: macdData.dif, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#00d4f0' } },
+                { type: 'line', name: 'DEA' + paramLabel, data: macdData.dea, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#f5a623' } }
             );
         } else if (chartType === 'kdj') {
             var kdjData = calcKDJ(kdata);
@@ -2349,14 +2319,18 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
                     '收: ' + d.close.toFixed(2) + ' &nbsp; 低: ' + d.low.toFixed(2) + '<br/>' +
                     '涨跌幅: <span style="color:' + chgColor + ';font-weight:bold">' + (d.chgPct >= 0 ? '+' : '') + d.chgPct.toFixed(2) + '%</span><br/>' +
                     '成交量: ' + (d.vol / 10000).toFixed(0) + '万';
-                // 追加指标数据到 tooltip
+                // 追加指标数据到 tooltip（seriesName 可能带参数后缀，用 indexOf 匹配）
                 params.forEach(function(p) {
-                    if (p.seriesName === 'DIF') html += '<br/>DIF: ' + (p.value != null ? p.value.toFixed(3) : '-');
-                    if (p.seriesName === 'DEA') html += '<br/>DEA: ' + (p.value != null ? p.value.toFixed(3) : '-');
-                    if (p.seriesName === 'MACD') html += '<br/>MACD: ' + (p.value != null ? p.value.toFixed(3) : '-');
-                    if (p.seriesName === 'K') html += '<br/>K: ' + (p.value != null ? p.value.toFixed(2) : '-');
-                    if (p.seriesName === 'D') html += '<br/>D: ' + (p.value != null ? p.value.toFixed(2) : '-');
-                    if (p.seriesName === 'J') html += '<br/>J: ' + (p.value != null ? p.value.toFixed(2) : '-');
+                    var sn = p.seriesName || '';
+                    if (sn.indexOf('DIF') === 0) html += '<br/><span style="color:#00d4f0">DIF</span>: ' + (p.value != null ? p.value.toFixed(3) : '-');
+                    if (sn.indexOf('DEA') === 0) html += '<br/><span style="color:#f5a623">DEA</span>: ' + (p.value != null ? p.value.toFixed(3) : '-');
+                    if (sn.indexOf('MACD') === 0 && sn.indexOf('MACD(') !== 0) {
+                        // 纯 MACD 柱（不带参数后缀的不算，避免与 MACD(3,20,3) 重复）
+                    }
+                    if (sn.indexOf('MACD') === 0) html += '<br/><span style="color:#9ca3c4">柱</span>: ' + (p.value != null ? p.value.toFixed(3) : '-');
+                    if (sn === 'K') html += '<br/>K: ' + (p.value != null ? p.value.toFixed(2) : '-');
+                    if (sn === 'D') html += '<br/>D: ' + (p.value != null ? p.value.toFixed(2) : '-');
+                    if (sn === 'J') html += '<br/>J: ' + (p.value != null ? p.value.toFixed(2) : '-');
                 });
                 return html;
             }
@@ -2382,6 +2356,53 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
             itemStyle: { color: function(p) { return marks[p.dataIndex]?.type === 'buy' ? '#ef5350' : '#26a69a'; } },
             label: { show: true, formatter: function(p) { return marks[p.dataIndex]?.type === 'buy' ? 'B' : 'S'; }, color: '#fff', fontSize: 10, fontWeight: 'bold', position: 'top' }
         });
+    }
+
+    // MACD 数值面板：在 MACD 副图左上角显示参数 + 最新 DIF/DEA/柱体值
+    if (ind.macd) {
+        var mfEl2 = document.getElementById('scr_macd_fast');
+        var msEl2 = document.getElementById('scr_macd_slow');
+        var msigEl2 = document.getElementById('scr_macd_signal');
+        var mf2 = (mfEl2 && parseInt(mfEl2.value)) || 12;
+        var ms2 = (msEl2 && parseInt(msEl2.value)) || 26;
+        var msig2 = (msigEl2 && parseInt(msigEl2.value)) || 9;
+        // 重新计算（确保拿到最新值）
+        var macdPanelData = calcMACD(kdata, mf2, ms2, msig2);
+        var lastDif = macdPanelData.dif[macdPanelData.dif.length - 1];
+        var lastDea = macdPanelData.dea[macdPanelData.dea.length - 1];
+        var lastMacd = macdPanelData.macd[macdPanelData.macd.length - 1];
+        var macdColor = lastMacd >= 0 ? '#ef5350' : '#26a69a';
+        // 找 MACD 副图的 grid 索引（成交量在第1个，MACD 在第2个；若无成交量则 MACD 在第1个）
+        var macdGridIdx = ind.vol ? 2 : 1;
+        var macdGridTop = grids[macdGridIdx] ? parseFloat(grids[macdGridIdx].top) : 70;
+
+        opt.graphic = [{
+            type: 'group',
+            left: '12%',
+            top: macdGridTop + 2 + '%',
+            children: [
+                // 参数标签
+                { type: 'text', left: 0, top: 0, style: {
+                    text: 'MACD(' + mf2 + ',' + ms2 + ',' + msig2 + ')',
+                    fill: '#9ca3c4', fontSize: 11, fontWeight: 'bold'
+                }},
+                // DIF 值
+                { type: 'text', left: 110, top: 0, style: {
+                    text: 'DIF:' + (lastDif != null ? lastDif.toFixed(3) : '-'),
+                    fill: '#00d4f0', fontSize: 11, fontWeight: 'bold'
+                }},
+                // DEA 值
+                { type: 'text', left: 185, top: 0, style: {
+                    text: 'DEA:' + (lastDea != null ? lastDea.toFixed(3) : '-'),
+                    fill: '#f5a623', fontSize: 11, fontWeight: 'bold'
+                }},
+                // 柱体值
+                { type: 'text', left: 260, top: 0, style: {
+                    text: '柱:' + (lastMacd != null ? lastMacd.toFixed(3) : '-'),
+                    fill: macdColor, fontSize: 11, fontWeight: 'bold'
+                }}
+            ]
+        }];
     }
 
     return opt;
