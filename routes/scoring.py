@@ -135,16 +135,6 @@ def kline_data(code: str):
             ])
 
         marks = []
-        if result_id:
-            trades = conn.execute("""
-                SELECT * FROM backtest_trades WHERE result_id = ? AND code = ?
-            """, (int(result_id), code)).fetchall()
-            for t in trades:
-                t = dict(t)
-                if t.get("entry_date"):
-                    marks.append({"date": t["entry_date"], "price": _sanitize(t.get("entry_price")), "type": "buy"})
-                if t.get("exit_date"):
-                    marks.append({"date": t["exit_date"], "price": _sanitize(t.get("exit_price")), "type": "sell"})
 
         return jsonify({"success": True, "data": {"kline": kline, "marks": marks}, "error": None})
 
