@@ -29,6 +29,7 @@
     <button class="nav-item active" onclick="switchTab('home')">首页</button>
     <button class="nav-item" onclick="switchTab('screen')">指标筛选</button>
     <button class="nav-item" onclick="switchTab('scores')">每日打分</button>
+    <button class="nav-item" onclick="switchTab('backtest')">智能回测</button>
 
 </nav>
 
@@ -288,6 +289,7 @@ async function loadTab(tab) {
         if (tab === 'home') await loadHomeTab(c);
         else if (tab === 'screen') await loadScreenTab(c);
         else if (tab === 'scores') await loadScoresTab(c);
+        else if (tab === 'backtest') await loadBacktestTab(c);
 
         c.firstElementChild?.classList.add('tab-content');
     } catch(e) {
@@ -2534,6 +2536,611 @@ function closeKline() {
 
 // ─── Init ───
 loadTab('home');
+</script>
+
+<script>
+// ============================================
+// ===== 智能可视化回测 (Visual Backtest) =====
+// ============================================
+const BT_API = '/api/backtest';
+let btIndicators = [];
+let btConditions = [];
+let btCurrentTaskId = null;
+let btPollTimer = null;
+let btEquityChart = null;
+let btMonthlyChart = null;
+let btCurrentResult = null;
+
+function btGotoStep(step) {
+    for (let i = 1; i <= 3; i++) {
+        const p = document.getElementById('btPanel' + i);
+        if (p) p.classList.toggle('active', i === step);
+        const stepEl = document.getElementById('btStep' + i);
+        if (!stepEl) continue;
+        stepEl.classList.remove('active', 'done');
+        if (i < step) stepEl.classList.add('done');
+        if (i === step) stepEl.classList.add('active');
+    }
+    if (step === 3 && btCurrentResult) btRenderReport(btCurrentResult);
+    if (step !== 2 && btPollTimer) { clearInterval(btPollTimer); btPollTimer = null; }
+}
+
+async function loadBacktestTab(container) {
+    container.innerHTML = `
+        <div class="panel">
+            <div class="panel-header">
+                <h3>智能可视化回测</h3>
+                <span class="text-muted" style="font-size:12px">三步完成：选股条件 → 回测参数 → 绩效报告</span>
+                <button class="btn btn-sm" onclick="btLoadHistory()" style="margin-left:auto">📜 历史回测</button>
+            </div>
+            <div class="bt-steps">
+                <div class="bt-step active" id="btStep1"><div class="bt-step-num">1</div><div class="bt-step-label">策略设置</div></div>
+                <div class="bt-step-line"></div>
+                <div class="bt-step" id="btStep2"><div class="bt-step-num">2</div><div class="bt-step-label">回测运行</div></div>
+                <div class="bt-step-line"></div>
+                <div class="bt-step" id="btStep3"><div class="bt-step-num">3</div><div class="bt-step-label">回测报告</div></div>
+            </div>
+            <div id="btPanel1" class="bt-panel">
+                <div class="bt-grid-2">
+                    <div class="panel" style="margin-bottom:0">
+                        <div class="panel-header">
+                            <h3>🎯 选股条件（多条 AND 关系）</h3>
+                            <button class="btn btn-primary btn-sm" onclick="btAddCondition()">+ 添加条件</button>
+                        </div>
+                        <div id="btConditionList"></div>
+                        <div id="btConditionEmpty" class="empty-state" style="padding:20px;font-size:12px">点击右上角"+ 添加条件"开始构建选股策略</div>
+                    </div>
+                    <div class="panel" style="margin-bottom:0">
+                        <div class="panel-header"><h3>⚙️ 回测参数</h3></div>
+                        <div class="bt-form-grid">
+                            <div><label class="text-muted bt-label">起始日期</label><input type="date" id="btParamStart" class="bt-input"></div>
+                            <div><label class="text-muted bt-label">结束日期</label><input type="date" id="btParamEnd" class="bt-input"></div>
+                            <div><label class="text-muted bt-label">初始资金(元)</label><input type="number" id="btParamCash" class="bt-input" value="1000000" min="10000" step="10000"></div>
+                            <div><label class="text-muted bt-label">持仓上限(只)</label><input type="number" id="btParamMaxHold" class="bt-input" value="5" min="1" max="50"></div>
+                            <div><label class="text-muted bt-label">单日买入上限(只)</label><input type="number" id="btParamMaxBuy" class="bt-input" value="3" min="1" max="20"></div>
+                            <div><label class="text-muted bt-label">买入时机</label><select id="btParamTiming" class="bt-input"><option value="next_day_open" selected>次日开盘</option><option value="current_close">当日收盘</option></select></div>
+                            <div><label class="text-muted bt-label">止盈(% 留空不启用)</label><input type="number" id="btParamTp" class="bt-input" placeholder="例如 10"></div>
+                            <div><label class="text-muted bt-label">止损(% 留空不启用)</label><input type="number" id="btParamSl" class="bt-input" placeholder="例如 5"></div>
+                            <div><label class="text-muted bt-label">最大持股天数(留空不限)</label><input type="number" id="btParamMaxDays" class="bt-input" placeholder="例如 30"></div>
+                            <div><label class="text-muted bt-label">佣金(%)</label><input type="number" id="btParamComm" class="bt-input" value="0.03" step="0.001" min="0"></div>
+                            <div><label class="text-muted bt-label">印花税(%)</label><input type="number" id="btParamStamp" class="bt-input" value="0.1" step="0.01" min="0"></div>
+                            <div><label class="text-muted bt-label">滑点(%)</label><input type="number" id="btParamSlip" class="bt-input" value="0.1" step="0.01" min="0"></div>
+                        </div>
+                        <div class="bt-checks">
+                            <label class="bt-check"><input type="checkbox" id="btExcludeKcb" checked> 排除科创板(688)</label>
+                            <label class="bt-check"><input type="checkbox" id="btExcludeCyb"> 排除创业板(300/301)</label>
+                        </div>
+                        <div class="bt-actions">
+                            <button class="btn btn-sm" onclick="btResetForm()">重置</button>
+                            <button class="btn btn-primary" id="btBtnStart" onclick="btStart()">▶ 开始回测</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="btPanel2" class="bt-panel">
+                <div class="panel" style="margin-bottom:0">
+                    <div class="panel-header">
+                        <h3>🚀 回测运行中</h3>
+                        <button class="btn btn-sm" id="btBtnCancel" onclick="btCancel()">⏹ 取消</button>
+                    </div>
+                    <div class="bt-progress-wrap">
+                        <div class="bt-progress-bar"><div id="btProgressFill"></div></div>
+                        <div id="btProgressText" class="bt-progress-text">0%</div>
+                    </div>
+                    <div id="btProgressStage" class="text-muted" style="font-size:12px;margin-bottom:10px">准备中...</div>
+                    <div id="btProgressLog" class="bt-log"></div>
+                </div>
+            </div>
+            <div id="btPanel3" class="bt-panel">
+                <div class="panel" style="margin-bottom:14px">
+                    <div class="panel-header">
+                        <h3>📊 回测报告</h3>
+                        <div style="display:flex;gap:8px;margin-left:auto">
+                            <button class="btn btn-sm" onclick="btExport('csv')">⬇ CSV</button>
+                            <button class="btn btn-sm" onclick="btExport('json')">⬇ JSON</button>
+                            <button class="btn btn-primary btn-sm" onclick="btResetForm()">🔄 新建</button>
+                        </div>
+                    </div>
+                    <div id="btMetrics" class="bt-metrics"></div>
+                    <div class="grid-2col" style="margin-top:14px">
+                        <div class="panel" style="margin-bottom:0">
+                            <div class="panel-header"><h3>策略收益曲线</h3></div>
+                            <div id="btEquityChart" style="width:100%;height:340px"></div>
+                        </div>
+                        <div class="panel" style="margin-bottom:0">
+                            <div class="panel-header"><h3>月度收益率</h3></div>
+                            <div id="btMonthlyChart" style="width:100%;height:340px"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="panel" style="margin-bottom:0">
+                    <div class="bt-mini-tabs">
+                        <button class="bt-mini-tab active" id="btTabTrades" onclick="btSwitchReportTab('trades')">交易明细</button>
+                        <button class="bt-mini-tab" id="btTabPositions" onclick="btSwitchReportTab('positions')">持仓明细</button>
+                    </div>
+                    <div id="btReportTrades" class="bt-mini-panel active"><div id="btTradesTable" class="bt-table-wrap"></div></div>
+                    <div id="btReportPositions" class="bt-mini-panel"><div id="btPositionsTable" class="bt-table-wrap"></div></div>
+                </div>
+            </div>
+        </div>
+        <div id="btHistoryDrawer" class="bt-drawer">
+            <div class="bt-drawer-content">
+                <div class="bt-drawer-head">
+                    <h3>📜 历史回测</h3>
+                    <button class="btn btn-sm" onclick="btCloseHistory()">关闭</button>
+                </div>
+                <div id="btHistoryList"></div>
+            </div>
+        </div>
+    `;
+
+    const today = new Date();
+    const endStr = today.toISOString().slice(0, 10);
+    const start = new Date(today); start.setFullYear(start.getFullYear() - 1);
+    const startStr = start.toISOString().slice(0, 10);
+    const se = document.getElementById('btParamStart'); if (se) se.value = startStr;
+    const ee = document.getElementById('btParamEnd');   if (ee) ee.value = endStr;
+
+    try {
+        const resp = await fetch(API + '/backtest/conditions');
+        const data = await resp.json();
+        if (data.success) btIndicators = (data.data && data.data.indicators) || [];
+    } catch (e) { console.error('加载指标元数据失败', e); }
+
+    btRenderConditions();
+    btGotoStep(1);
+}
+
+function btAddCondition() {
+    if (!btIndicators.length) { showToast('指标数据尚未加载', 'warning'); return; }
+    const cat = btIndicators[0];
+    const item = cat.items[0];
+    const c = { category: cat.category, indicator: item.id, operator: item.operators[0].id, params: {} };
+    (item.params || []).forEach(p => { c.params[p.key] = p.default; });
+    btConditions.push(c);
+    btRenderConditions();
+}
+
+function btRemoveCondition(i) {
+    btConditions.splice(i, 1);
+    btRenderConditions();
+}
+
+function btRenderConditions() {
+    const list = document.getElementById('btConditionList');
+    const empty = document.getElementById('btConditionEmpty');
+    if (!list || !empty) return;
+    if (!btConditions.length) {
+        list.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+    }
+    empty.style.display = 'none';
+    list.innerHTML = btConditions.map((c, i) => {
+        const meta = btFindIndicator(c.indicator);
+        if (!meta) return '';
+        const opOpts = (meta.operators || []).map(o =>
+            `<option value="${o.id}" ${o.id === c.operator ? 'selected' : ''}>${o.name}</option>`
+        ).join('');
+        const paramInputs = (meta.params || []).map(p => `
+            <span class="text-muted bt-mini-label">${p.name}</span>
+            <input type="number" value="${c.params[p.key] != null ? c.params[p.key] : p.default}"
+                   step="${p.type === 'float' ? '0.01' : '1'}"
+                   min="${p.min != null ? p.min : ''}" max="${p.max != null ? p.max : ''}"
+                   onchange="btOnParamChange(${i}, '${p.key}', this.value)"
+                   class="bt-mini-input">
+        `).join('');
+        return `
+        <div class="bt-condition-item">
+            <div class="bt-condition-row">
+                <span class="text-muted bt-mini-label">类目</span>
+                <select onchange="btOnCategoryChange(${i}, this.value)" class="bt-mini-select">
+                    ${btIndicators.map(cat => `<option value="${cat.category}" ${cat.category === c.category ? 'selected' : ''}>${cat.label}</option>`).join('')}
+                </select>
+                <span class="text-muted bt-mini-label">指标</span>
+                <select onchange="btOnIndicatorChange(${i}, this.value)" class="bt-mini-select">
+                    ${btRenderIndicatorOpts(c.category, c.indicator)}
+                </select>
+                <span class="text-muted bt-mini-label">条件</span>
+                <select onchange="btOnOperatorChange(${i}, this.value)" class="bt-mini-select">${opOpts}</select>
+                <button class="btn btn-sm bt-del" onclick="btRemoveCondition(${i})">删除</button>
+            </div>
+            ${paramInputs ? `<div class="bt-condition-row">${paramInputs}</div>` : ''}
+        </div>`;
+    }).join('');
+}
+
+function btRenderIndicatorOpts(category, current) {
+    const cat = btIndicators.find(c => c.category === category) || btIndicators[0];
+    return cat.items.map(it => `<option value="${it.id}" ${it.id === current ? 'selected' : ''}>${it.name}</option>`).join('');
+}
+
+function btFindIndicator(id) {
+    for (const cat of btIndicators) {
+        for (const it of cat.items) {
+            if (it.id === id) return it;
+        }
+    }
+    return null;
+}
+
+function btOnCategoryChange(i, category) {
+    const cat = btIndicators.find(c => c.category === category);
+    if (!cat) return;
+    const item = cat.items[0];
+    btConditions[i].category = category;
+    btConditions[i].indicator = item.id;
+    btConditions[i].operator = item.operators[0].id;
+    btConditions[i].params = {};
+    (item.params || []).forEach(p => { btConditions[i].params[p.key] = p.default; });
+    btRenderConditions();
+}
+
+function btOnIndicatorChange(i, id) {
+    const meta = btFindIndicator(id);
+    if (!meta) return;
+    btConditions[i].indicator = id;
+    btConditions[i].operator = meta.operators[0].id;
+    btConditions[i].params = {};
+    (meta.params || []).forEach(p => { btConditions[i].params[p.key] = p.default; });
+    btRenderConditions();
+}
+
+function btOnOperatorChange(i, op) { btConditions[i].operator = op; }
+
+function btOnParamChange(i, key, value) {
+    const meta = btFindIndicator(btConditions[i].indicator);
+    if (!meta) return;
+    const p = (meta.params || []).find(x => x.key === key);
+    if (!p) return;
+    const n = p.type === 'float' ? parseFloat(value) : parseInt(value, 10);
+    btConditions[i].params[key] = isNaN(n) ? value : n;
+}
+
+function btCollectParams() {
+    return {
+        start_date: document.getElementById('btParamStart').value,
+        end_date: document.getElementById('btParamEnd').value,
+        initial_cash: parseFloat(document.getElementById('btParamCash').value) || 1_000_000,
+        max_holdings: parseInt(document.getElementById('btParamMaxHold').value) || 5,
+        max_buy_per_day: parseInt(document.getElementById('btParamMaxBuy').value) || 3,
+        buy_timing: document.getElementById('btParamTiming').value,
+        take_profit_pct: btParsePct(document.getElementById('btParamTp').value),
+        stop_loss_pct: btParsePct(document.getElementById('btParamSl').value, true),
+        max_hold_days: btParseInt(document.getElementById('btParamMaxDays').value),
+        commission_rate: (parseFloat(document.getElementById('btParamComm').value) || 0.03) / 100,
+        stamp_tax_rate: (parseFloat(document.getElementById('btParamStamp').value) || 0.1) / 100,
+        slippage_rate: (parseFloat(document.getElementById('btParamSlip').value) || 0.1) / 100,
+        exclude_kcb: document.getElementById('btExcludeKcb').checked,
+        exclude_cyb: document.getElementById('btExcludeCyb').checked,
+    };
+}
+
+function btParsePct(v, isLoss) {
+    if (v === '' || v == null) return null;
+    const n = parseFloat(v);
+    if (isNaN(n)) return null;
+    return isLoss ? -Math.abs(n) / 100 : n / 100;
+}
+function btParseInt(v) {
+    if (v === '' || v == null) return null;
+    const n = parseInt(v, 10);
+    return isNaN(n) ? null : n;
+}
+
+function btResetForm() {
+    btConditions = [];
+    btCurrentResult = null;
+    if (btEquityChart) { btEquityChart.dispose(); btEquityChart = null; }
+    if (btMonthlyChart) { btMonthlyChart.dispose(); btMonthlyChart = null; }
+    btGotoStep(1);
+    btRenderConditions();
+    document.getElementById('btParamCash').value = '1000000';
+    document.getElementById('btParamMaxHold').value = '5';
+    document.getElementById('btParamMaxBuy').value = '3';
+    document.getElementById('btParamTiming').value = 'next_day_open';
+    document.getElementById('btParamTp').value = '';
+    document.getElementById('btParamSl').value = '';
+    document.getElementById('btParamMaxDays').value = '';
+    document.getElementById('btParamComm').value = '0.03';
+    document.getElementById('btParamStamp').value = '0.1';
+    document.getElementById('btParamSlip').value = '0.1';
+    document.getElementById('btExcludeKcb').checked = true;
+    document.getElementById('btExcludeCyb').checked = false;
+}
+
+async function btStart() {
+    if (!btConditions.length) { showToast('请至少添加一条选股条件', 'warning'); return; }
+    const p = btCollectParams();
+    if (!p.start_date || !p.end_date) { showToast('请填写回测起止日期', 'warning'); return; }
+    if (new Date(p.start_date) >= new Date(p.end_date)) { showToast('起始日期必须早于结束日期', 'warning'); return; }
+
+    document.getElementById('btBtnStart').disabled = true;
+    try {
+        const resp = await fetch(API + '/backtest/run', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conditions: btConditions, params: p, rule_name: '可视化回测_' + new Date().toISOString().slice(0,10) })
+        });
+        const data = await resp.json();
+        if (!data.success) { showToast('提交失败：' + (data.error || '未知错误'), 'error'); document.getElementById('btBtnStart').disabled = false; return; }
+        btCurrentTaskId = data.data.task_id;
+        showToast('回测任务已创建', 'success');
+        btGotoStep(2);
+        document.getElementById('btProgressFill').style.width = '0%';
+        document.getElementById('btProgressText').textContent = '0%';
+        document.getElementById('btProgressStage').textContent = '任务已创建，等待执行...';
+        document.getElementById('btProgressLog').innerHTML = '';
+        btStartPolling();
+    } catch (e) {
+        showToast('提交失败：' + e.message, 'error');
+        document.getElementById('btBtnStart').disabled = false;
+    }
+}
+
+function btStartPolling() {
+    if (btPollTimer) clearInterval(btPollTimer);
+    btPollTimer = setInterval(btPoll, 1500);
+}
+
+async function btPoll() {
+    if (!btCurrentTaskId) return;
+    try {
+        const resp = await fetch(API + '/backtest/' + btCurrentTaskId + '/status');
+        const data = await resp.json();
+        if (!data.success) return;
+        const t = data.data;
+        const pct = t.progress || 0;
+        document.getElementById('btProgressFill').style.width = pct + '%';
+        document.getElementById('btProgressText').textContent = pct + '%';
+        document.getElementById('btProgressStage').textContent = '[' + (t.stage || '') + '] ' + (t.message || '');
+
+        const log = document.getElementById('btProgressLog');
+        const newLine = '[' + (t.stage || '') + '] ' + (t.message || '');
+        if (log.lastElementChild && log.lastElementChild.textContent === newLine) {
+            // 重复
+        } else {
+            const div = document.createElement('div');
+            div.textContent = newLine;
+            log.appendChild(div);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        if (t.status === 'done' || t.status === 'failed' || t.status === 'cancelled') {
+            clearInterval(btPollTimer); btPollTimer = null;
+            document.getElementById('btBtnStart').disabled = false;
+            if (t.status === 'done') {
+                await btLoadResult();
+            } else if (t.status === 'failed') {
+                showToast('回测失败：' + (t.error || '未知错误'), 'error');
+                btGotoStep(1);
+            } else {
+                showToast('回测已取消', 'warning');
+                btGotoStep(1);
+            }
+        }
+    } catch (e) { console.error('poll error', e); }
+}
+
+async function btCancel() {
+    if (!btCurrentTaskId) return;
+    if (!confirm('确认取消当前回测？')) return;
+    try { await fetch(API + '/backtest/' + btCurrentTaskId + '/cancel', { method: 'POST' }); } catch (e) {}
+    showToast('已请求取消', 'warning');
+}
+
+async function btLoadResult() {
+    try {
+        const resp = await fetch(API + '/backtest/' + btCurrentTaskId + '/result');
+        const data = await resp.json();
+        if (!data.success) { showToast('获取结果失败：' + (data.error || ''), 'error'); return; }
+        btCurrentResult = data.data;
+        const r = btCurrentResult;
+        showToast('回测完成：总收益 ' + btFmtPct(r.total_return) + '，胜率 ' + (r.win_rate * 100).toFixed(1) + '%', 'success');
+        btGotoStep(3);
+    } catch (e) {
+        showToast('获取结果失败：' + e.message, 'error');
+    }
+}
+
+function btRenderReport(r) {
+    btRenderMetrics(r);
+    btRenderEquityChart(r.equity_curve || []);
+    btRenderMonthlyChart(r.monthly_returns || []);
+    btRenderTradesTable(r.trades || []);
+    btRenderPositionsTable(r.positions || []);
+}
+
+function btRenderMetrics(r) {
+    const primary = [
+        { label: '总收益率',     value: btFmtPct(r.total_return),  cls: btClsBySign(r.total_return) },
+        { label: '年化收益率',   value: btFmtPct(r.annual_return), cls: btClsBySign(r.annual_return) },
+        { label: '最大回撤',     value: btFmtPct(r.max_drawdown),  cls: 'negative' },
+        { label: '夏普比率',     value: (r.sharpe_ratio ?? 0).toFixed(3), cls: 'neutral' },
+        { label: '交易胜率',     value: btFmtPct(r.win_rate),       cls: 'neutral' },
+        { label: '盈亏比',       value: (r.profit_factor ?? 0).toFixed(2), cls: 'neutral' },
+        { label: '总交易笔数',   value: r.total_trades ?? 0,        cls: 'neutral' },
+        { label: '平均持仓天数', value: (r.avg_hold_days ?? 0).toFixed(1), cls: 'neutral' },
+        { label: '最大连续盈利', value: r.max_consecutive_wins ?? 0, cls: 'positive' },
+        { label: '最大连续亏损', value: r.max_consecutive_losses ?? 0, cls: 'negative' },
+    ];
+    document.getElementById('btMetrics').innerHTML = primary.map(m => `
+        <div class="bt-metric">
+            <div class="bt-metric-label">${m.label}</div>
+            <div class="bt-metric-value ${m.cls}">${m.value}</div>
+        </div>
+    `).join('');
+}
+
+function btFmtPct(v) {
+    if (v == null || isNaN(v)) return '-';
+    const n = v * 100;
+    return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+function btClsBySign(v) {
+    if (v == null || isNaN(v)) return 'neutral';
+    if (v > 0) return 'positive';
+    if (v < 0) return 'negative';
+    return 'neutral';
+}
+
+function btRenderEquityChart(eq) {
+    if (btEquityChart) { btEquityChart.dispose(); btEquityChart = null; }
+    const el = document.getElementById('btEquityChart');
+    if (!eq || !eq.length) { el.innerHTML = '<div class="empty-state">暂无收益曲线</div>'; return; }
+    btEquityChart = echarts.init(el, 'dark');
+    const dates = eq.map(p => p.date);
+    const totals = eq.map(p => p.total);
+    const init = totals[0];
+    const base = dates.map(() => init);
+    btEquityChart.setOption({
+        backgroundColor: 'transparent',
+        animation: false,
+        tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+        grid: { left: '6%', right: '3%', top: '8%', bottom: '10%' },
+        xAxis: { type: 'category', data: dates, axisLabel: { color: '#8b9cc0', fontSize: 10, formatter: v => v.slice(5) } },
+        yAxis: { type: 'value', scale: true, axisLabel: { color: '#8b9cc0' }, splitLine: { lineStyle: { color: '#182240' } } },
+        series: [
+            { name: '策略净值', type: 'line', data: totals, smooth: true, symbol: 'none',
+              lineStyle: { width: 2, color: '#00d4f0' }, areaStyle: { color: 'rgba(0,212,240,0.15)' } },
+            { name: '初始资金', type: 'line', data: base, symbol: 'none',
+              lineStyle: { width: 1, color: '#4d5e82', type: 'dashed' } },
+        ],
+    });
+    window.addEventListener('resize', () => btEquityChart && btEquityChart.resize());
+}
+
+function btRenderMonthlyChart(monthly) {
+    if (btMonthlyChart) { btMonthlyChart.dispose(); btMonthlyChart = null; }
+    const el = document.getElementById('btMonthlyChart');
+    if (!monthly || !monthly.length) { el.innerHTML = '<div class="empty-state">暂无月度收益</div>'; return; }
+    btMonthlyChart = echarts.init(el, 'dark');
+    const months = monthly.map(m => m.month);
+    const rets = monthly.map(m => +(m.return * 100).toFixed(2));
+    btMonthlyChart.setOption({
+        backgroundColor: 'transparent',
+        animation: false,
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        grid: { left: '4%', right: '4%', top: '8%', bottom: '10%' },
+        xAxis: { type: 'category', data: months, axisLabel: { color: '#8b9cc0', fontSize: 10 } },
+        yAxis: { type: 'value', axisLabel: { color: '#8b9cc0', formatter: '{value}%' }, splitLine: { lineStyle: { color: '#182240' } } },
+        series: [{
+            name: '月度收益', type: 'bar', data: rets,
+            itemStyle: { color: function(p) { return p.value >= 0 ? '#ff5252' : '#00e676'; } },
+            label: { show: true, position: 'top', color: '#8b9cc0', fontSize: 10, formatter: '{c}%' },
+        }],
+    });
+    window.addEventListener('resize', () => btMonthlyChart && btMonthlyChart.resize());
+}
+
+function btRenderTradesTable(trades) {
+    if (!trades.length) { document.getElementById('btTradesTable').innerHTML = '<div class="empty-state">暂无交易</div>'; return; }
+    const rows = trades.map(t => {
+        const pnl = t.pnl || 0;
+        const pnlPct = t.pnl_pct || 0;
+        const cls = pnl >= 0 ? 'positive' : 'negative';
+        return `<tr>
+            <td><b style="font-family:var(--font-mono)">${t.code}</b><br><span class="text-muted" style="font-size:11px">${t.name || ''}</span></td>
+            <td>${t.buy_date || ''}</td>
+            <td style="font-family:var(--font-mono)">${(t.buy_price ?? 0).toFixed(3)}</td>
+            <td>${t.sell_date || ''}</td>
+            <td style="font-family:var(--font-mono)">${(t.sell_price ?? 0).toFixed(3)}</td>
+            <td style="font-family:var(--font-mono)">${t.shares || 0}</td>
+            <td class="${cls}" style="font-weight:700">${pnl.toFixed(2)}</td>
+            <td class="${cls}" style="font-weight:700">${(pnlPct * 100).toFixed(2)}%</td>
+            <td>${t.hold_days || 0}</td>
+            <td><span class="badge badge-info">${btExitLabel(t.exit_reason)}</span></td>
+        </tr>`;
+    }).join('');
+    document.getElementById('btTradesTable').innerHTML = `
+        <table class="rec-table">
+            <thead><tr>
+                <th>股票</th><th>买入日期</th><th>买入价</th><th>卖出日期</th>
+                <th>卖出价</th><th>数量</th><th>盈亏</th><th>收益率</th>
+                <th>持仓天数</th><th>卖出原因</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+}
+
+function btRenderPositionsTable(positions) {
+    if (!positions.length) { document.getElementById('btPositionsTable').innerHTML = '<div class="empty-state">无持仓</div>'; return; }
+    const rows = positions.map(p => {
+        const cls = (p.pnl || 0) >= 0 ? 'positive' : 'negative';
+        return `<tr>
+            <td><b style="font-family:var(--font-mono)">${p.code}</b><br><span class="text-muted" style="font-size:11px">${p.name || ''}</span></td>
+            <td style="font-family:var(--font-mono)">${p.shares || 0}</td>
+            <td style="font-family:var(--font-mono)">${(p.buy_price ?? 0).toFixed(3)}</td>
+            <td style="font-family:var(--font-mono)">${(p.current_price ?? 0).toFixed(3)}</td>
+            <td class="${cls}" style="font-weight:700">${(p.pnl || 0).toFixed(2)}</td>
+            <td class="${cls}" style="font-weight:700">${((p.pnl_pct || 0) * 100).toFixed(2)}%</td>
+        </tr>`;
+    }).join('');
+    document.getElementById('btPositionsTable').innerHTML = `
+        <table class="rec-table">
+            <thead><tr>
+                <th>股票</th><th>数量</th><th>买入价</th><th>当前价</th>
+                <th>浮动盈亏</th><th>盈亏比例</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+}
+
+function btExitLabel(r) {
+    const map = { stop_loss: '止损', take_profit: '止盈', max_hold_days: '到期', force_close: '期末强平' };
+    return map[r] || r || '-';
+}
+
+function btSwitchReportTab(name) {
+    document.getElementById('btTabTrades').classList.toggle('active', name === 'trades');
+    document.getElementById('btTabPositions').classList.toggle('active', name === 'positions');
+    document.getElementById('btReportTrades').classList.toggle('active', name === 'trades');
+    document.getElementById('btReportPositions').classList.toggle('active', name === 'positions');
+}
+
+function btExport(fmt) {
+    if (!btCurrentTaskId) return;
+    window.open(API + '/backtest/' + btCurrentTaskId + '/export?format=' + fmt, '_blank');
+}
+
+async function btLoadHistory() {
+    try {
+        const resp = await fetch(API + '/backtest/history?limit=20');
+        const data = await resp.json();
+        if (!data.success) { showToast('加载历史失败', 'error'); return; }
+        const items = (data.data && data.data.items) || [];
+        if (!items.length) {
+            document.getElementById('btHistoryList').innerHTML = '<div class="empty-state">暂无历史回测</div>';
+        } else {
+            document.getElementById('btHistoryList').innerHTML = items.map(h => {
+                const m = h.metrics || {};
+                const cls = btClsBySign(m.total_return);
+                return `<div class="bt-history-item" onclick="btLoadFromHistory('${h.id}')">
+                    <div class="bt-history-meta">
+                        <span style="font-family:var(--font-mono)">${h.id}</span>
+                        <span>${h.created_at || ''}</span>
+                    </div>
+                    <div class="bt-history-name">${h.name || ''} · ${h.start_date} ~ ${h.end_date}</div>
+                    <div class="bt-history-foot">
+                        <span class="text-muted" style="font-size:11px">交易 ${m.total_trades || 0} · 胜率 ${((m.win_rate || 0) * 100).toFixed(1)}%</span>
+                        <span class="${cls}" style="font-weight:700">${btFmtPct(m.total_return)}</span>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+        document.getElementById('btHistoryDrawer').classList.add('active');
+    } catch (e) { showToast('加载历史失败：' + e.message, 'error'); }
+}
+
+function btCloseHistory() {
+    document.getElementById('btHistoryDrawer').classList.remove('active');
+}
+
+function btLoadFromHistory(taskId) {
+    btCloseHistory();
+    showToast('历史回测已持久化到 backtest_results 表，详情请查询数据库', 'info');
+}
 </script>
 </body>
 </html>

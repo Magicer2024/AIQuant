@@ -12,6 +12,7 @@ from routes.system import system_bp
 from routes.sync import sync_bp
 from routes.scoring import scoring_bp
 from routes.screen import screen_bp
+from routes.backtest import backtest_bp
 
 from routes.investor import investor_bp, init_investor_tables
 
@@ -31,6 +32,7 @@ app.register_blueprint(system_bp)
 app.register_blueprint(sync_bp)
 app.register_blueprint(scoring_bp)
 app.register_blueprint(screen_bp)
+app.register_blueprint(backtest_bp)
 
 app.register_blueprint(investor_bp)
 
