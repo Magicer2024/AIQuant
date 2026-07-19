@@ -1,5 +1,7 @@
 # AIQuant 完整移植 TradingAgents 多智能体架构
 
+> **状态：已废弃（2026-07 决策）**。本计划（移植 TradingAgents 多智能体 LLM 架构）未执行，项目中无 agents/ 相关代码，决策维持现有规则策略体系。文档仅作历史参考保留。
+
 ## 改造目标
 
 将 AIQuant 从传统的因子挖掘+规则回测系统改造为基于 LLM 的多智能体交易框架，完整移植 TradingAgents 的核心架构。

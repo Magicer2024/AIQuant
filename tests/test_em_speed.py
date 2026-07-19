@@ -8,8 +8,14 @@ import time
 import sys
 import os
 
+import pytest
+
 # 把项目根加入 import 路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 手动基准测试：依赖东财实时网络接口，pytest 默认跳过；
+# 需要测速时直接运行 python tests/test_em_speed.py
+pytestmark = pytest.mark.skip(reason="手动基准测试，依赖实时网络，直接运行脚本执行")
 
 
 def test_realtime_all():

@@ -1,5 +1,7 @@
 # AIQuant 全栈升级实施计划
 
+> **状态：已废弃（2026-07 决策）**。本计划（FastAPI + PostgreSQL + Vue 3 迁移）未执行，项目决策维持 Flask + SQLite + 单文件 dashboard.html 现状做精。文档仅作历史参考保留。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use compose:subagent (recommended) or compose:execute to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 AIQuant 从 Flask + SQLite + 单文件前端升级为 FastAPI + PostgreSQL + Vue 3 + Docker Compose 的现代化全栈应用

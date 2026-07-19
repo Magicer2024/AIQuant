@@ -27,10 +27,10 @@ echo [2/5] Checking dependencies...
 python -c "import flask" >nul
 if %errorlevel% neq 0 (
     echo         Flask missing. Installing dependencies...
-    pip install -r requirements.txt flask flask-cors schedule
+    pip install -r requirements.txt
     if %errorlevel% neq 0 (
         echo [ERROR] Failed to install dependencies.
-        echo         Run manually: pip install -r requirements.txt flask flask-cors schedule
+        echo         Run manually: pip install -r requirements.txt
         pause
         exit /b 1
     )
@@ -69,8 +69,7 @@ echo [4/5] Starting Flask service...
 echo         Dashboard : http://localhost:5000/
 echo         API       : http://localhost:5000/api/health
 echo.
-echo [5/5] Opening browser...
-start http://localhost:5000/
+echo [5/5] Service starting, browser will open when ready...
 
 echo ========================================
 echo  Service starting... Do NOT close this window.
@@ -78,7 +77,11 @@ echo  AIQuant 个人股票评分系统
 echo ========================================
 echo.
 
-:: Start the service
+:: 后台等待端口 5000 就绪后再打开浏览器（最多等待 60 秒）
+:: 使用 TcpClient 探测本地 5000 端口，连通即说明 Flask 已启动
+start "" /b powershell -WindowStyle Hidden -Command "for($i=0;$i -lt 60;$i++){Start-Sleep -Seconds 1; try{$c=New-Object System.Net.Sockets.TcpClient('localhost',5000); $c.Close(); Start-Process 'http://localhost:5000/'; break}catch{}}"
+
+:: 前台启动 Flask 服务（关闭本窗口即停止服务）
 python app.py
 
 :: If service stops

@@ -1,5 +1,7 @@
 # 策略回测系统架构文档
 
+> **⚠️ 已过时（2026-07 标注）**：本文描述的是旧 Streamlit 时代的目录与模块（indicator_engine.py、condition_builder.py、backtest_ui.py 等均已不存在），当前真实架构（Flask + SQLite + repository 层）以根目录 `CLAUDE.md` 与 `README.md` 为准。本文仅作历史参考保留。
+
 > 版本：v0.0.2 | 更新：2026-04-18
 > 核心功能：A股量化选股 + 全市场回测 + 可视化条件构建
 

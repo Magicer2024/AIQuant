@@ -26,9 +26,13 @@ Thumbs.db
 
 # Project specific
 *.db
+*.bak
 data_cache/
 .sync_cache/
 reports/
+.cache/
+.uploads/
+.workbuddy/
 
 config/llm_config.yaml
 .qoder/

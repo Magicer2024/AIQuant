@@ -4,96 +4,69 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-AIQuant 是一套 A 股量化交易系统，涵盖数据同步、策略信号生成、全市场回测、风控审核和可视化仪表板。技术栈：**Python 3.11+、Flask、Streamlit、SQLite、Plotly、AkShare/baostock**。
+AIQuant 是一套 A 股量化选股与个人评分系统，涵盖数据同步、策略打分、条件选股、回测和可视化仪表板。技术栈：**Python 3.11+、Flask、SQLite、pandas、AkShare/baostock/东方财富接口、scikit-learn、可选 Qlib**。
 
 ## Development commands
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt flask flask-cors schedule requests pandas plotly
+pip install -r requirements.txt        # runtime
+pip install -r requirements-dev.txt    # + pytest, pytest-timeout
 
 # Run the system
 python app.py                     # Flask API + dashboard (port 5000)
+start.bat                         # Windows 一键启动（检查依赖/杀旧进程/起服务）
 
-# Test pipeline
-python test_pipeline.py           # Full agent pipeline test (requires DB)
-python test_pipeline.py --mock    # Mock-only, no DB dependency
-python test_pipeline.py --agent SignalAgent   # Test single agent
-
-# Backtest
-python -m pytest tests/ -v        # Run test suite (framework present, tests being added)
+# Tests
+python -m pytest tests/ -q        # 全部测试（网络基准类默认 skip）
+python tests/test_em_speed.py     # 手动跑东财接口测速
 ```
 
-## Architecture: "三省六部" (Three Provinces & Six Ministries)
+## Architecture
 
-The system uses an ancient-Chinese-governance metaphor to structure modules:
-
-### Decision pipeline (agents/)
-
-| Stage | Agent | Role | Governance role |
-|-------|-------|------|-----------------|
-| 1 | `DataAgent` | Fetch, validate, clean data | 太子院·数据官 |
-| 2 | `SignalAgent` | Generate strategy signals/scores | 中书省·策略官 |
-| 3 | `RiskAgent` | Risk audit, veto power (BLOCK) | 门下省·风控官 |
-| 3 | `BacktestAgent` | Backtest verification (parallel with Risk) | 尚书省·回测官 |
-| 4 | `ReportAgent` | Generate HTML/JSON reports | 尚书省·报表官 |
-
-Key constraints:
-- **RiskAgent has veto power**: if it returns BLOCK, the pipeline skips ReportAgent.
-- Stage 3 (RiskAgent + BacktestAgent) runs in parallel via `ThreadPoolExecutor`.
-- Agents communicate through a shared `AgentContext` (key-value store).
-- All agents extend `BaseAgent` and follow `run(ctx) -> AgentResult`.
-
-### Six ministries (ministries/)
-
-| Ministry | Dir | Responsibility |
-|----------|-----|----------------|
-| 吏部 (Personnel) | `personnel/` | Account management, user permissions |
-| 户部 (Revenue) | `revenue/` | Capital management, P&L tracking |
-| 礼部 (Rites) | `rites/` | Data source integration, data cleaning, market monitoring |
-| 兵部 (War) | `war/` | Trade execution, order management |
-| 刑部 (Justice) | `justice/` | Risk rules, audit logging, compliance |
-| 工部 (Works) | `works/` | Infrastructure, config, monitoring/alerting |
+单进程 Flask 应用，`app.py` 注册 6 个 Blueprint，前端是单文件 `dashboard.html`。
 
 ### Core modules
 
 | Dir | Purpose |
 |-----|---------|
-| `core/` | SQLite database (`db.py`), data sync (`sync.py`, `data_fetcher.py`), task queue |
-| `strategy/` | 5-strategy scoring (放量突破/均线粘合/量价背离/抄底/主力建仓), fusion score calculation |
-| `backtest/` | Multiple backtest engines — see note below on fragmentation |
-| `risk/` | Risk engine with rule-based checks (`engine.py`), config-driven rules (`rules.py`) |
-| `llm/` | LLM client (OpenAI-compatible API), strategy advisor with local fallback |
-| `ai/` | ML-based prediction (`predictor.py`) |
-| `live/` | Live trading monitor |
-| `deployment/` | Deployment manager for broker integration |
-| `routes/` | Flask Blueprint API routes (one file per domain, ~30 blueprints) |
-| `services/` | Business logic layer — one service per domain |
-| `config/` | `settings.py` (base config) + `strategy_params.py` + `thresholds.py` |
+| `core/` | SQLite 数据层：`db.py`（~12 表，get_conn 上下文管理器）、`sync.py`（行情同步主流程）、`data_fetcher.py`（baostock/AkShare 多源）、`data_cleaner.py`（L1-L6 脏数据过滤）、`em_realtime.py`/`em_kline.py`（东财接口）、`em_guard.py`（缓存+频控+配额三道防线）、`task_queue.py` |
+| `core/repository/` | 11 个领域 Repository（stock/price/signal/position/trade/sync/margin/north/futures/lhb/mgmt），db.py 中旧函数正逐步迁移至此 |
+| `strategy/` | `scorer.py`（每日打分引擎：加载活跃规则→因子→条件→写入 stock_score）、`factor_lib.py`、`indicators.py`、`rules_store.py`、`strategies.py`（5 策略评分）、`intent/parser.py`（自然语言选股） |
+| `backtest/` | `engine.py`（回测引擎）、`service.py`（回测服务封装）、`conditions.py`（条件构建） |
+| `routes/` | Flask Blueprint：`system` / `sync` / `scoring` / `screen` / `backtest` / `investor` |
+| `scheduler/` | `runner.py` 每日 07:00 自动同步，`state.py` 共享状态 |
+| `qlib_engine/` | 可选 Qlib 集成；`app.py` 启动时 try/except 初始化，失败自动降级不影响主流程 |
+| `ai/` | `features.py` 特征工程 + `predictor.py`（RandomForest，模型存 `ai/models/`） |
+| `config/` | `settings.py`（同步/回测/挖掘参数）、`strategy_params.py`、`thresholds.py`、`personal_config.py` |
+| `utils/` | `api.py`（ok/fail 响应封装）、`serialization.py`（NaN/枚举安全 JSON）、`cache.py`、`timing.py`、`finance_data.py` |
 
 ### Data flow
 
 ```
-baostock/AkShare → core/sync.py → SQLite (core/quant.db, ~12 tables)
-                                        ↓
-strategy/strategies.py → 5 strategy scores → stock_signal table
-                                        ↓
-agents pipeline: DataAgent → SignalAgent → [RiskAgent ∥ BacktestAgent] → ReportAgent
-                                        ↓
-Flask API (app.py, ~30 blueprints) → HTML dashboards (dashboard.html, etc.)
+东财/AkShare/baostock → core/sync.py（+em_guard 三道防线、data_cleaner 六级过滤）
+                      → SQLite core/quant.db（daily_price 111万+ 行，WAL 模式）
+                      → strategy/scorer.py 每日打分 → stock_score 表
+                      → routes/* Flask API → dashboard.html
 ```
 
 ## Key architectural notes
 
-- **Flask is the backend** (`app.py`), not Streamlit. The architecture doc refers to Streamlit but the current runtime is Flask on port 5000. The `backtest/` directory retains a Streamlit UI (`backtest_ui.py`) that may be invoked separately.
-- **db.py is large (~1900 lines)** — it manages ~12 SQLite tables in a single file. New tables follow the same `upsert_*/get_*/get_latest_*/_clean/_fmt` pattern. Use `get_conn()` context manager for all DB operations.
-- **Backtest engine fragmentation**: `backtest/` contains multiple engines with duplicated logic (fee, slippage, position management). The canonical core engines are `backtest.py` (single stock), `strategy_screen_backtest.py` (batch screening), and `custom_strategy_backtest.py` (custom functions). Others (`backtest_v3.py`, `backtest_bt.py`, `backtest_quant.py`) are experimental/historical.
-- **Config-driven risk**: risk rules in `risk/rules.py` can be toggled via `risk/config_loader.py`. Risk levels: PASS < WARNING < RESTRICT < BLOCK.
-- **LLM integration**: `llm/client.py` wraps OpenAI-compatible APIs (supports DeepSeek, Moonshot, Qwen). Falls back to local rule engine when unavailable.
-- **WebSocket**: `routes/market_ws.py` provides real-time market data push via Flask-Sock.
+- **db.py 函数迁移中**：`upsert_daily_price`/`get_daily_price` 等已标 deprecated，新代码优先用 `core/repository/` 对应模块；deprecated 函数仍可工作。
+- **写库路径**：行情写入统一走 `core/sync.py::_batch_write_daily_price`（含 data_cleaner 行级校验 + 成交量手→股换算），不要绕过。
+- **em_guard 三道防线**：所有东财接口调用必须经 `cached_fetch`（TTL 缓存 → 窗口频控 → 每日配额），超限返回 stale 数据而非失败。
+- **JSON 安全**：Flask jsonify 不序列化自定义枚举与 NaN，统一用 `utils/serialization.py` 与 `utils/api.py` 的 ok/fail；枚举显式 `.value`。
+- **测试约定**：`tests/` 内文件用 `sys.path.insert(0, dirname(dirname(__file__)))` 引入项目根；需要真实库的测试用 `pytest.mark.skipif` 按 quant.db 是否存在跳过；网络基准（test_em_speed）模块级 skip，仅手动运行。
+- **Windows 环境**：批处理脚本含中文时需注意 CMD 代码页；PowerShell 不支持 `&&`，用 `;`。
 
 ## File naming conventions
 
-- Chinese filenames (e.g., `仪表板.html`) exist for backward compatibility
-- Configuration YAML files (e.g., `config/llm_config.yaml`) are gitignored — use `.example` templates
-- `data_cache/`, `reports/`, `.sync_cache/` are gitignored runtime directories
+- 配置文件 `config/llm_config.yaml` 已 gitignore — 勿提交密钥
+- `data_cache/`、`reports/`、`.sync_cache/`、`.cache/`、`.uploads/` 为 gitignore 的运行时目录
+- `tests/_*.py` 下划线前缀为调试脚本，pytest 不收集
+
+## 已废弃（勿再引用）
+
+- `docs/ARCHITECTURE.md`：描述旧 Streamlit 架构，已过时，结构以本文档为准
+- `docs/compose/plans/2026-06-19-aiquant-fullstack-upgrade.md`：FastAPI+PG+Vue 升级计划，2026-07 决策废弃，维持 Flask+SQLite 现状
+- "三省六部" agents/ministries 架构：已随重构移除（原 risk/ 包为损坏残骸，已删除）
