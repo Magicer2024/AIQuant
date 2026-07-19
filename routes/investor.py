@@ -709,25 +709,60 @@ def get_watchlist():
 
 @investor_bp.route("/watchlist", methods=["POST"])
 def add_watchlist():
-    """加入自选"""
+    """加入自选
+    行为：
+      1) 写入 personal_watchlist
+      2) 异步触发该股历史数据补拉 + 策略分重算（避免阻塞 HTTP 响应）
+      3) 返回 task_id，前端可通过 /api/sync/status/<task_id> 轮询进度
+         或 3-5 秒后直接调 GET /api/investor/watchlist 看到 latest_close/latest_score
+    body: {"code": "600519", "note": "..."}
+    """
     body = request.get_json(silent=True) or {}
     code = (body.get("code") or "").strip()
     if not code:
         return fail("缺少 code", 400)
+    if not (code.isdigit() and len(code) == 6):
+        return fail("code 格式非法（需 6 位数字）", 400)
+
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO personal_watchlist(code, note, created_at) VALUES (?,?,?)",
             (code, body.get("note"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
-        return ok({"code": code})
+        inserted = cur.rowcount > 0
+
+    task_id = None
+    sync_status = "already_has_data"
+    try:
+        from core.db import has_watchlist_data
+        from core.task_queue import submit_task, is_any_running
+        # 已经在跑其它任务时，仍允许加自选（不阻塞）
+        if is_any_running() and not has_watchlist_data(code):
+            sync_status = "queued"
+        elif not has_watchlist_data(code):
+            from core.sync import sync_single_stock_to_watchlist
+            task_id = submit_task(lambda: sync_single_stock_to_watchlist(code, verbose=False))
+            sync_status = "syncing"
+        # else: sync_status = "already_has_data" —— 不用再拉
+    except Exception as e:
+        # 异步触发失败不阻塞 INSERT 已成功的响应
+        sync_status = f"sync_dispatch_failed: {e}"
+
+    return ok({"code": code, "task_id": task_id, "sync_status": sync_status,
+               "message": "已加入自选，历史数据补拉中" if sync_status == "syncing" else "已加入自选"})
 
 
 @investor_bp.route("/watchlist/<code>", methods=["DELETE"])
 def remove_watchlist(code: str):
-    """移出自选"""
+    """移出自选
+    行为：仅删除 personal_watchlist 记录，**不**清理 daily_price / stock_score 中的历史数据。
+    原因：回测 / 历史推荐 / 持仓分析都仍需这些数据。
+    """
+    if not (code.isdigit() and len(code) == 6):
+        return fail("code 格式非法", 400)
     with get_conn() as conn:
         conn.execute("DELETE FROM personal_watchlist WHERE code = ?", (code,))
-        return ok({"removed": code})
+        return ok({"removed": code, "message": "已移出自选，历史行情数据保留"})
 
 
 # ─────────────────────────────────────────────

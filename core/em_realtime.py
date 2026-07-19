@@ -65,7 +65,7 @@ _UT = "fa5fd1943c7b386f172d6893dbfba10b"
 _FS_ALL = "m:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81"
 
 # 单只行情字段：代码、名称、最新价、涨跌额、涨跌幅、今开、昨收、最高、最低、成交量、成交额、换手率、市盈率
-_FIELDS_REALTIME = "f12,f14,f2,f3,f4,f5,f6,f7,f15,f16,f17,f8"
+_FIELDS_REALTIME = "f12,f14,f2,f3,f4,f5,f6,f7,f15,f16,f17,f8,f18"
 
 
 # ─────────────────────────────────────────────
@@ -151,7 +151,7 @@ def _fetch_realtime_all_em(progress_cb=None) -> pd.DataFrame:
                 "invt": "2",
                 "fid": "f3",
                 "fs": fs,
-                "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17",
+                "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18",
                 "_": str(int(time.time() * 1000)),
             }
             resp = _SESSION.get(url, params=params, timeout=10)
@@ -162,19 +162,23 @@ def _fetch_realtime_all_em(progress_cb=None) -> pd.DataFrame:
             total = int(payload.get("total") or 0)
 
             for r in diff_list:
+                # 东财 push2 clist 字段含义（已实证验证）：
+                # f2=最新价 f3=涨跌幅% f4=涨跌额 f5=成交量(手) f6=成交额(元)
+                # f7=振幅% f8=换手率% f9=市盈率 f10=量比 f15=最高价
+                # f16=最低价 f17=今开 f18=昨收
                 all_rows.append({
                     "code":       r.get("f12", ""),
                     "name":       r.get("f14", ""),
                     "price":      _to_float(r.get("f2")),
                     "change":     _to_float(r.get("f4")),
                     "pct_change": _to_float(r.get("f3")),
-                    "open":       _to_float(r.get("f5")),
-                    "preclose":   _to_float(r.get("f6")),
-                    "high":       _to_float(r.get("f7")),
-                    "low":        _to_float(r.get("f8")),
-                    "volume":     _to_float(r.get("f15")),
-                    "amount":     _to_float(r.get("f16")),
-                    "turnover":   _to_float(r.get("f17")),
+                    "open":       _to_float(r.get("f17")),   # 今开
+                    "preclose":   _to_float(r.get("f18")),   # 昨收
+                    "high":       _to_float(r.get("f15")),   # 最高价
+                    "low":        _to_float(r.get("f16")),   # 最低价
+                    "volume":     _to_float(r.get("f5")),    # 成交量(手)
+                    "amount":     _to_float(r.get("f6")),    # 成交额(元)
+                    "turnover":   _to_float(r.get("f8")),    # 换手率%
                     "pe":         _to_float(r.get("f9")),
                 })
 
@@ -301,19 +305,22 @@ def _fetch_klines_by_date_em(trade_date: str, progress_cb=None) -> pd.DataFrame:
             total += int(payload.get("total") or 0)
 
             for r in diff_list:
+                # 东财 push2 clist 字段含义（已实证验证，与实时接口一致）：
+                # f2=最新价 f3=涨跌幅% f5=成交量(手) f6=成交额(元) f7=振幅%
+                # f8=换手率% f10=量比 f15=最高价 f16=最低价 f17=今开
                 all_rows.append({
                     "code":       r.get("f12", ""),
                     "name":       r.get("f14", ""),
                     "trade_date": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",
-                    "open":       _to_float(r.get("f5")),
+                    "open":       _to_float(r.get("f17")),   # 今开
                     "close":      _to_float(r.get("f2")),
-                    "high":       _to_float(r.get("f7")),
-                    "low":        _to_float(r.get("f8")),
-                    "volume":     _to_float(r.get("f15")),
-                    "amount":     _to_float(r.get("f16")),
+                    "high":       _to_float(r.get("f15")),   # 最高价
+                    "low":        _to_float(r.get("f16")),   # 最低价
+                    "volume":     _to_float(r.get("f5")),    # 成交量(手)
+                    "amount":     _to_float(r.get("f6")),    # 成交额(元)
                     "pct_change": _to_float(r.get("f3")),
                     "change":     _to_float(r.get("f4")),
-                    "turnover":   _to_float(r.get("f10")),
+                    "turnover":   _to_float(r.get("f8")),    # 换手率%（原误用 f10=量比）
                     "pe":         _to_float(r.get("f9")),
                 })
 

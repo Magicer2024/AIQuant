@@ -40,6 +40,34 @@ def sync_progress():
     return jsonify({"success": True, "data": dict(_sync_progress)})
 
 
+@sync_bp.route("/stock/<code>", methods=["POST"])
+def sync_single_stock(code: str):
+    """
+    单只股同步（自选场景）：补拉该股历史行情 + 重算策略分
+    同步阻塞，3-5 秒返回
+    body: {} 或 {"force": true} 强制重拉（即使已有数据也再拉一次）
+    """
+    from flask import request
+    from core.sync import sync_single_stock_to_watchlist
+
+    body = request.get_json(silent=True) or {}
+    force = bool(body.get("force", False))
+
+    if not (isinstance(code, str) and code.isdigit() and len(code) == 6):
+        return jsonify({"success": False, "error": "code 格式非法（需 6 位数字）"}), 400
+
+    # 强制重拉：先清空 daily_price 中该 code 的所有数据
+    if force:
+        from core.db import get_conn
+        with get_conn() as conn:
+            conn.execute("DELETE FROM daily_price WHERE code = ?", (code,))
+        # 重置 has_watchlist_data 缓存效果：sync_single_stock_to_watchlist 会重新拉取
+
+    result = sync_single_stock_to_watchlist(code, verbose=False)
+    status_code = 200 if result.get("ok") else 400
+    return jsonify({"success": result.get("ok", False), "data": result}), status_code
+
+
 @sync_bp.route("/auto-status", methods=["GET"])
 def auto_sync_status():
     """
@@ -73,18 +101,27 @@ def auto_sync_status():
 
 @sync_bp.route("", methods=["POST"])
 def start_sync():
-    """Trigger data sync (async background) with progress tracking"""
+    """Trigger data sync (async background) with progress tracking
+    body: {"target": "all" | "watchlist"}  默认 "all"（向后兼容）
+    """
+    from flask import request
+    body = request.get_json(silent=True) or {}
+    target = body.get("target", "all")
+    if target not in ("all", "watchlist"):
+        target = "all"
+
     if _sync_progress["running"]:
         return jsonify({"error": "同步正在进行中，请稍候"}), 409
     _sync_progress.update({"running": True, "current": 0, "total": 0,
-                            "success": 0, "failed": 0, "message": "", "last_error": None})
+                            "success": 0, "failed": 0, "message": "",
+                            "last_error": None, "target": target})
 
     def _run():
         try:
             from core.sync import daily_sync, _sync_stats
-            daily_sync(verbose=False, progress_callback=_progress_callback)
+            daily_sync(verbose=False, progress_callback=_progress_callback, target=target)
             _sync_progress["message"] = (
-                f"同步完成: 成功{_sync_stats['success']} 失败{_sync_stats['failed']} "
+                f"同步完成 [target={target}]: 成功{_sync_stats['success']} 失败{_sync_stats['failed']} "
                 f"跳过(ST:{_sync_stats['skipped_st']} 北交所:{_sync_stats['skipped_bse']})"
             )
         except Exception as e:
@@ -95,7 +132,7 @@ def start_sync():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return jsonify({"status": "started", "message": "数据同步已启动"})
+    return jsonify({"status": "started", "message": f"数据同步已启动（target={target}）", "target": target})
 
 
 @sync_bp.route("/fast", methods=["POST"])
@@ -103,6 +140,7 @@ def start_fast_sync():
     """
     按日批量同步（东财 push2his 直连，1 次 HTTP 拉全 A）
     推荐盘前/盘后场景使用：1 个交易日 ≈ 3 秒
+    body: {"target": "all" | "watchlist", "trade_dates": ["20260624"]}
     """
     from flask import request
     if _sync_progress["running"]:
@@ -111,16 +149,20 @@ def start_fast_sync():
     body = request.get_json(silent=True) or {}
     # 默认拉最近 1 个交易日；可指定 trade_dates: ["20260624", "20260625"]
     trade_dates = body.get("trade_dates")
+    target = body.get("target", "all")
+    if target not in ("all", "watchlist"):
+        target = "all"
 
     _sync_progress.update({"running": True, "current": 0, "total": 0,
-                            "success": 0, "failed": 0, "message": "", "last_error": None})
+                            "success": 0, "failed": 0, "message": "",
+                            "last_error": None, "target": target})
 
     def _run():
         try:
             from core.sync import daily_sync_by_date
-            result = daily_sync_by_date(trade_dates=trade_dates, verbose=False)
+            result = daily_sync_by_date(trade_dates=trade_dates, verbose=False, target=target)
             _sync_progress["message"] = (
-                f"按日批量同步完成: {result['rows']} 行, 耗时 {result['elapsed_s']}s"
+                f"按日批量同步完成 [target={target}]: {result['rows']} 行, 耗时 {result['elapsed_s']}s"
             )
         except Exception as e:
             _sync_progress["last_error"] = str(e)
@@ -130,7 +172,7 @@ def start_fast_sync():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return jsonify({"status": "started", "message": "按日批量同步已启动（东财直连）"})
+    return jsonify({"status": "started", "message": f"按日批量同步已启动（target={target}）", "target": target})
 
 
 @sync_bp.route("/pool", methods=["POST"])
@@ -220,19 +262,33 @@ def recalc_all_scores():
     """
     对数据库中所有股票的历史评分进行全量补算（同步版本，保留向后兼容），
     同时将每日融合分高于阈值的日期写入 stock_signal 表。
+    query: ?target=all|watchlist  默认 "all"
     """
-    result = run_recalc_all_scores()
+    from flask import request
+    target = request.args.get("target", "all")
+    if target not in ("all", "watchlist"):
+        target = "all"
+    result = run_recalc_all_scores(target=target)
     return jsonify(result)
 
 
 @sync_bp.route("/recalc", methods=["POST"])
 def start_recalc():
-    """重算全市场打分（异步）"""
+    """重算打分（异步）
+    body: {"target": "all" | "watchlist"}  默认 "all"
+    """
+    from flask import request
+    body = request.get_json(silent=True) or {}
+    target = body.get("target", "all")
+    if target not in ("all", "watchlist"):
+        target = "all"
+
     if is_any_running():
         return jsonify({"success": False, "error": "有任务正在进行中，请稍后再试"}), 409
 
-    task_id = submit_task(run_recalc_all_scores)
-    return jsonify({"success": True, "task_id": task_id, "message": "重算任务已启动"})
+    task_id = submit_task(lambda: run_recalc_all_scores(target=target))
+    return jsonify({"success": True, "task_id": task_id, "target": target,
+                    "message": f"重算任务已启动（target={target}）"})
 
 
 @sync_bp.route("/status/<task_id>", methods=["GET"])

@@ -334,6 +334,11 @@ async function loadHomeTab(container) {
                 </div>
             </div>
             <div class="data-status-actions">
+                <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.05em">同步范围</span>
+                <select id="syncTargetSel" style="padding:4px 8px;font-family:var(--font-mono);font-size:11px">
+                    <option value="watchlist" selected>仅自选股</option>
+                    <option value="all">全市场</option>
+                </select>
                 <button class="btn btn-primary btn-sm" id="btnHomeSync" onclick="homeSync()">立即同步行情</button>
                 <button class="btn btn-sm" id="btnHomeRecalc" onclick="homeRecalc()">立即重算打分</button>
                 <span class="inline-progress" id="homeInlineProgress"></span>
@@ -1122,6 +1127,11 @@ async function loadMyWatchlist() {
         box.innerHTML = items.map(w => {
             const pctCls = (w.latest_pct||0) >= 0 ? 'idx-up' : 'idx-down';
             const sign = (w.latest_pct||0) >= 0 ? '+' : '';
+            const noData = w.latest_close == null;
+            // 无数据时显示"立即拉取"小按钮
+            const syncBtn = noData
+                ? `<button class="btn btn-sm" style="margin-left:6px" onclick="resyncOneStock('${w.code}')" title="无行情数据，点击立即补拉">拉取</button>`
+                : '';
             return `
             <div class="watch-row">
                 <div class="wr-left" onclick="openKline('${w.code}')">
@@ -1136,7 +1146,10 @@ async function loadMyWatchlist() {
                     <div class="wr-score-num">${w.latest_score!=null?w.latest_score.toFixed(0):'--'}</div>
                     <div class="wr-score-lbl">打分</div>
                 </div>
-                <button class="btn btn-danger btn-sm" onclick="removeFromWatchlist('${w.code}')">×</button>
+                <div style="display:flex;align-items:center;gap:4px">
+                    ${syncBtn}
+                    <button class="btn btn-danger btn-sm" onclick="removeFromWatchlist('${w.code}')">×</button>
+                </div>
             </div>`;
         }).join('');
     } catch(e) {
@@ -1332,15 +1345,46 @@ async function submitAddWatch() {
     const note = document.getElementById('addWatchNote').value.trim();
     if (!code) { showToast('请填写代码', 'warning'); return; }
     try {
-        await RequestManager.fetch('add-watch', API + '/api/investor/watchlist', {
+        const resp = await RequestManager.fetch('add-watch', API + '/api/investor/watchlist', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({code, note}),
         });
-        showToast('已加入自选', 'success');
+        const data = (resp && resp.data) || {};
+        if (data.sync_status === 'syncing') {
+            showToast(`已加入自选，历史数据补拉中…`, 'success');
+        } else if (data.sync_status === 'already_has_data') {
+            showToast('已加入自选', 'success');
+        } else if (data.sync_status === 'queued') {
+            showToast('已加入自选（其它任务进行中，将稍后拉取）', 'info');
+        } else {
+            showToast('已加入自选', 'success');
+        }
         closeModal();
         loadMyWatchlist();
-    } catch(e) { showToast('操作失败', 'error'); }
+        // 3.5 秒后自动刷新一次（让用户看到"刚补拉的数据已可见"）
+        setTimeout(loadMyWatchlist, 3500);
+    } catch(e) { showToast('操作失败：' + (e.message||e), 'error'); }
+}
+
+// 单只股立即补拉（用于自选列表里"latest_close 为空"的卡片的快速修复按钮）
+async function resyncOneStock(code) {
+    showToast(`开始补拉 ${code}…`, 'info');
+    try {
+        const resp = await RequestManager.fetch('resync-' + code,
+            API + '/api/sync/stock/' + encodeURIComponent(code),
+            { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) }
+        );
+        const data = (resp && resp.data) || {};
+        if (data.ok) {
+            showToast(`${code} 补拉完成：${data.rows_added||0} 行（${data.elapsed_s}s）`, 'success');
+        } else {
+            showToast(`${code} 补拉失败：${data.message||'未知错误'}`, 'error');
+        }
+        loadMyWatchlist();
+    } catch (e) {
+        showToast(`${code} 补拉失败：${e.message||e}`, 'error');
+    }
 }
 
 async function removeFromWatchlist(code) {
@@ -1852,11 +1896,17 @@ function setInlineProgress(stage, current, total, message) {
 async function homeSync() {
     const btn = document.getElementById('btnHomeSync');
     const btn2 = document.getElementById('btnHomeRecalc');
+    const targetSel = document.getElementById('syncTargetSel');
+    const target = (targetSel && targetSel.value) || 'watchlist';
     if (btn) { btn.disabled = true; btn.textContent = '同步中...'; }
     if (btn2) btn2.disabled = true;
-    setInlineProgress('sync', 0, 0, '启动中...');
+    setInlineProgress('sync', 0, 0, `启动中 (${target === 'watchlist' ? '仅自选' : '全市场'})...`);
     try {
-        const resp = await RequestManager.fetch('sync-trigger', API + '/sync', { method: 'POST' });
+        const resp = await RequestManager.fetch('sync-trigger', API + '/sync', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target: target}),
+        });
         if (resp && resp.error) {
             showToast('同步启动失败: ' + resp.error, 'error');
             if (btn) { btn.disabled = false; btn.textContent = '立即同步行情'; }

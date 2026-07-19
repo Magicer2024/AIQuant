@@ -18,14 +18,29 @@ from core.data_fetcher import get_market_index
 from core.db import (
     init_db, upsert_stock_list, update_strategy_scores_batch,
     get_all_stocks, get_latest_date, get_latest_date_all, get_stock_count_in_db,
-    log_sync, db_stats, get_conn, get_daily_price, upsert_index_daily, get_index_daily
+    log_sync, db_stats, get_conn, get_daily_price, upsert_index_daily, get_index_daily,
+    # 自选股相关
+    get_watchlist_codes, get_watchlist_with_names, count_watchlist,
+    has_watchlist_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
 )
 from qlib_engine.data_bridge import append_daily_data, batch_append_daily, append_calendar_dates
 from qlib_engine import init_qlib as _init_qlib
 
 
-def _write_daily_price(code: str, df: pd.DataFrame) -> int:
-    """写入 daily_price 表（与 Qlib 二进制并行写入，供仪表板/打分读取）"""
+def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") -> int:
+    """写入 daily_price 表（与 Qlib 二进制并行写入，供仪表板/打分读取）
+
+    单位统一约定（入库后）：
+        volume     = 股
+        amount     = 元
+        pct_change = 百分比数值（如 1.23 表示 1.23%）
+        turnover   = 百分比数值
+
+    各数据源原始单位与换算：
+        baostock : volume=股,   amount=元    → 无需换算
+        akshare  : volume=手,   amount=元    → volume ×100 转股
+        tencent  : 无volume,    amount=万元  → amount ×10000 转元；volume 用 amount/close 估算(股)
+    """
     if df.empty:
         return 0
 
@@ -45,15 +60,33 @@ def _write_daily_price(code: str, df: pd.DataFrame) -> int:
                 print(f"  [WARN] {code} close={first_close:.1f} is {ratio:.0f}x prev close={prev['close']:.2f}, likely bad data — skipped")
                 return 0
 
+    # —— 1. 按数据源统一单位（在 df 上 vectorized 操作）——
+    df = df.copy()
+    if source == "akshare" and "volume" in df.columns:
+        # akshare stock_zh_a_hist: volume 单位是"手"(1手=100股)，转成股
+        df["volume"] = df["volume"].fillna(0) * 100
+    elif source == "tencent":
+        # 腾讯 stock_zh_a_hist_tx: amount 单位是"万元"，转成元
+        if "amount" in df.columns:
+            df["amount"] = df["amount"].fillna(0) * 10000
+        # 腾讯不返回 volume，用 成交额(元)/收盘价 估算成交量(股)
+        if all(col in df.columns for col in ("volume", "amount", "close")):
+            mask = (df["volume"].fillna(0) == 0) & (df["amount"] > 0) & (df["close"] > 0)
+            df.loc[mask, "volume"] = df.loc[mask, "amount"] / df.loc[mask, "close"]
+
+    # —— 2. 写入前清洗：拦截负价格/OHLC错位/负成交量等脏值 ——
+    try:
+        from core.data_cleaner import clean_dataframe
+        df, _clean_stats = clean_dataframe(code, df, verbose=False, new_stock_skip=False)
+    except Exception:
+        pass  # 清洗失败不阻塞写入（兜底保护，避免清洗器异常导致数据无法同步）
+    if df is None or df.empty:
+        return 0
+
+    # —— 3. 构建记录并批量写入 ——
     records = []
     for dt, row in df.iterrows():
         close = float(row.get("close", 0) or 0)
-        amount = float(row.get("amount", 0) or 0)
-        volume = float(row.get("volume", 0) or 0)
-        # 修复：腾讯数据源返回的成交额单位是"万元"，不是"元"
-        # 用 amount*10000/close 估算成交量（股）
-        if volume == 0 and amount > 0 and close > 0:
-            volume = amount * 10000 / close
         records.append({
             "code":       code,
             "trade_date": str(dt.date()) if hasattr(dt, "date") else str(dt)[:10],
@@ -61,8 +94,8 @@ def _write_daily_price(code: str, df: pd.DataFrame) -> int:
             "high":       float(row.get("high", 0) or 0),
             "low":        float(row.get("low", 0) or 0),
             "close":      close,
-            "volume":     volume,
-            "amount":     amount * 10000 if volume > 0 and amount < 1000000 else amount,  # 统一为元
+            "volume":     float(row.get("volume", 0) or 0),
+            "amount":     float(row.get("amount", 0) or 0),
             "pct_change": float(row.get("pct_change", 0) or 0),
             "turnover":   float(row.get("turnover", 0) or 0),
         })
@@ -389,7 +422,7 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
                 df.set_index('date', inplace=True)
                 df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
                 append_daily_data(code, df_qlib)
-                n = _write_daily_price(code, df)
+                n = _write_daily_price(code, df, source="baostock")
                 if verbose:
                     print(f"  [{code}] baostock OK (+{n} 行)")
                 return True
@@ -456,7 +489,7 @@ def _sync_one_stock_akshare(code: str, start_date: str, end_date: str, verbose: 
         df.set_index('date', inplace=True)
         df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
         append_daily_data(code, df_qlib)
-        n = _write_daily_price(code, df)
+        n = _write_daily_price(code, df, source="akshare")
         if verbose:
             print(f"  [{code}] akshare OK (+{n} 行)")
         return True
@@ -509,23 +542,37 @@ def _sync_one_stock_tencent(code: str, start_date: str, end_date: str, verbose: 
 # ─────────────────────────────────────────────
 # 批量初始化：拉取所有历史数据
 # ─────────────────────────────────────────────
-def initial_sync(limit: int = None, verbose: bool = True) -> dict:
+def initial_sync(limit: int = None, verbose: bool = True, target: str = "all") -> dict:
     """
     首次初始化：拉取所有股票历史数据
     baostock 无频率限制，速度极快
     支持断点续传（已有数据的股票自动跳过）
+
+    target="all"（全市场，默认）/"watchlist"（仅自选股）
     """
+    target = target if target in ("all", "watchlist") else "all"
+
     init_db()
     _init_qlib()  # Ensure Qlib is initialized before data operations
-    stocks_df = get_all_stocks()
 
-    if stocks_df.empty:
-        print("[WARN] 股票列表为空，先自动拉取列表...")
-        update_stock_list()
+    if target == "watchlist":
+        if count_watchlist() == 0:
+            print("[WARN] 自选列表为空，initial_sync(target='watchlist') 跳过")
+            return {"total": 0, "success": 0, "failed": 0, "target": "watchlist",
+                    "skipped": "empty_watchlist"}
+        stocks_df = get_watchlist_with_names()[["code", "name"]]
+        if stocks_df.empty:
+            print("[WARN] 自选股 stock_info 未匹配，请先 update_stock_list() 再试")
+            return {"total": 0, "success": 0, "failed": 0, "target": "watchlist"}
+    else:
         stocks_df = get_all_stocks()
         if stocks_df.empty:
-            print("[ERROR] 股票列表为空，请检查网络")
-            return {"total": 0, "success": 0, "failed": 0}
+            print("[WARN] 股票列表为空，先自动拉取列表...")
+            update_stock_list()
+            stocks_df = get_all_stocks()
+            if stocks_df.empty:
+                print("[ERROR] 股票列表为空，请检查网络")
+                return {"total": 0, "success": 0, "failed": 0, "target": "all"}
 
     stocks = list(zip(stocks_df["code"], stocks_df["name"]))
     if limit:
@@ -654,7 +701,7 @@ def _clear_sync_cache(start_date: str, end_date: str):
 
 
 def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 1,
-               min_coverage: float = 0.9) -> dict:
+               min_coverage: float = 0.9, target: str = "all") -> dict:
     """
     每天运行一次：增量拉取当日行情（单线程版本，baostock 不支持多线程）
 
@@ -663,27 +710,43 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         progress_callback: 进度回调函数，接收(current, total, success, failed)参数
         max_workers: 已废弃，保持单线程
         min_coverage: 覆盖率阈值，默认0.9（90%），数据源不完整时可降低
+        target: "all"（全市场，默认）/ "watchlist"（仅自选股）
     """
     import baostock as bs
 
+    target = target if target in ("all", "watchlist") else "all"
+
     init_db()
     _init_qlib()  # Ensure Qlib is initialized before data operations
-    stocks_df = get_all_stocks()
+
+    # 1) 选取股票池（all = stock_info；watchlist = personal_watchlist ∩ stock_info）
+    if target == "watchlist":
+        wl_df = get_watchlist_with_names()
+        if wl_df.empty or count_watchlist() == 0:
+            print("[WARN] 自选列表为空，daily_sync(target='watchlist') 跳过")
+            _sync_stats.update({"total": 0, "success": 0, "failed": 0,
+                                "skipped_bse": 0, "skipped_st": 0, "target": "watchlist"})
+            return {"total": 0, "success": 0, "failed": 0, "skipped": "empty_watchlist", "target": "watchlist"}
+        stocks_df = wl_df[["code", "name"]].copy()
+    else:
+        # target == "all" —— 同步前先确保 stock_info 完整
+        update_stock_list()
+        stocks_df = get_all_stocks()
 
     if stocks_df.empty:
         print("[WARN] 股票列表为空，先自动更新...")
         update_stock_list()
-        stocks_df = get_all_stocks()
+        stocks_df = get_all_stocks() if target == "all" else get_watchlist_with_names()[["code", "name"]]
 
     stocks = list(zip(stocks_df["code"], stocks_df["name"]))
 
     # 重置跳过统计
     _sync_stats.update({"total": len(stocks), "success": 0, "failed": 0,
-                        "skipped_bse": 0, "skipped_st": 0})
+                        "skipped_bse": 0, "skipped_st": 0, "target": target})
 
     # 确定增量日期范围
     today = date.today()
-    latest = get_latest_date_all()
+    latest = get_latest_date_all() if target == "all" else get_latest_date_for_codes([c for c, _ in stocks])
 
     if not latest:
         start_date = (today - timedelta(days=5)).strftime("%Y-%m-%d")
@@ -695,7 +758,10 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         five_days_ago = today - timedelta(days=5)
         while candidate >= five_days_ago:
             cand_str = candidate.strftime("%Y-%m-%d")
-            total_in_db = get_stock_count_in_db()
+            if target == "all":
+                total_in_db = get_stock_count_in_db()
+            else:
+                total_in_db = get_stock_count_in_db_for_codes([c for c, _ in stocks]) or len(stocks)
             with get_conn() as conn:
                 covered = conn.execute(
                     "SELECT COUNT(DISTINCT code) FROM daily_price WHERE trade_date = ?",
@@ -711,7 +777,7 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
                 print(f"[WARN] 近5日任一日期覆盖均不足{int(min_coverage*100)}%，执行全量补齐")
         else:
             start_date = (candidate + timedelta(days=1)).strftime("%Y-%m-%d")
-        
+
         # 确定结束日期：如果今天是周末/节假日，则取最近一个交易日
         end_date = today
         for _ in range(7):  # 往前找最多7天
@@ -835,7 +901,7 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
                             df.set_index('date', inplace=True)
                             df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
                             append_daily_data(code, df_qlib)
-                            _write_daily_price(code, df)
+                            _write_daily_price(code, df, source="baostock")
                             synced_ok = True
                 except Exception:
                     pass
@@ -892,6 +958,86 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
 # ─────────────────────────────────────────────
 # 策略分计算并写入数据库
 # ─────────────────────────────────────────────
+
+def sync_single_stock_to_watchlist(code: str, verbose: bool = False) -> dict:
+    """
+    「加入自选」后即时补拉单只股的历史 + 打分。
+    用于：用户加自选后无需等 07:00 调度，立即能在 watchlist 卡片看到数据。
+
+    返回结构（永远不抛异常）：
+      {
+        "ok": True/False,
+        "code": "000001",
+        "rows_added": int,        # 新写入 daily_price 的行数（已存在时为 0）
+        "score_computed": bool,   # 是否成功重算 stock_score
+        "elapsed_s": float,
+        "message": str,
+      }
+    """
+    import time as _time
+    started = _time.time()
+    code = (code or "").strip()
+    if not (isinstance(code, str) and code.isdigit() and len(code) == 6):
+        return {"ok": False, "code": code, "rows_added": 0, "score_computed": False,
+                "elapsed_s": 0.0, "message": "code 格式非法（需 6 位数字）"}
+
+    try:
+        # 1) 先确保 stock_info 有该 code（新上市股可能未入库）
+        from core.db import get_conn
+        with get_conn() as conn:
+            row = conn.execute("SELECT 1 FROM stock_info WHERE code=? LIMIT 1", (code,)).fetchone()
+        if row is None:
+            # 尝试 update_stock_list()（拉全 A 列表，约 5~10 秒）
+            try:
+                update_stock_list()
+            except Exception as e:
+                if verbose:
+                    print(f"[watchlist] {code} update_stock_list 失败: {e}")
+            with get_conn() as conn:
+                row = conn.execute("SELECT 1 FROM stock_info WHERE code=? LIMIT 1", (code,)).fetchone()
+            if row is None:
+                return {"ok": False, "code": code, "rows_added": 0, "score_computed": False,
+                        "elapsed_s": round(_time.time() - started, 2),
+                        "message": f"code={code} 不在 stock_info 中，请确认股票代码正确"}
+
+        # 2) 判断是否需要补拉历史
+        need_pull = not has_watchlist_data(code)
+        rows_added = 0
+        if need_pull:
+            ok = sync_one_stock(code, HISTORY_START, end_date=None, verbose=False)
+            if ok:
+                # 统计本次新增行数（粗略：用 last row count 差值，这里以"全量=已存在"为基准）
+                from core.db import get_conn
+                with get_conn() as conn:
+                    cnt = conn.execute("SELECT COUNT(*) FROM daily_price WHERE code=?", (code,)).fetchone()[0]
+                rows_added = int(cnt or 0)
+            else:
+                return {"ok": False, "code": code, "rows_added": 0, "score_computed": False,
+                        "elapsed_s": round(_time.time() - started, 2),
+                        "message": f"code={code} 历史拉取失败"}
+
+        # 3) 重算单股策略分（无数据时直接跳过）
+        score_ok = False
+        try:
+            score_ok = bool(sync_strategy_score(code, verbose=False))
+        except Exception as e:
+            if verbose:
+                print(f"[watchlist] {code} sync_strategy_score 异常: {e}")
+            score_ok = False
+
+        return {
+            "ok": True,
+            "code": code,
+            "rows_added": rows_added,
+            "score_computed": score_ok,
+            "elapsed_s": round(_time.time() - started, 2),
+            "message": "完成" if score_ok else "行情已写入，策略分计算被跳过（数据不足）",
+        }
+    except Exception as e:
+        return {"ok": False, "code": code, "rows_added": 0, "score_computed": False,
+                "elapsed_s": round(_time.time() - started, 2),
+                "message": f"异常: {e}"}
+
 
 def sync_strategy_score(code: str, verbose: bool = False) -> bool:
     """
@@ -952,15 +1098,19 @@ def sync_market_cap(codes: list = None, progress_cb=None) -> int:
 # ─────────────────────────────────────────────
 # 全市场重算打分（异步友好版本）
 # ─────────────────────────────────────────────
-def recalc_all_scores(progress_callback=None):
+def recalc_all_scores(progress_callback=None, target: str = "all"):
     """
     对数据库中所有股票的历史评分进行全量补算，
     同时将每日融合分高于阈值的日期写入 stock_signal 表。
 
     :param progress_callback: 进度回调 fn(current, total, success, failed), 可选
-    :return: dict with total, success, failed, signals, elapsed_s
+    :param target: "all"（全市场，默认）/ "watchlist"（仅自选股）
+                   watchlist 模式下，stock_signal 也只写自选股命中
+    :return: dict with total, success, failed, signals, elapsed_s, target
     """
     import json as _json
+
+    target = target if target in ("all", "watchlist") else "all"
 
     STOP_LOSS_SC = -0.06
     TAKE_PROFIT_SC = 0.20
@@ -968,9 +1118,17 @@ def recalc_all_scores(progress_callback=None):
     POSITION_PER_SC = 0.5
     SIG_THRESHOLD = 15.0
 
-    stocks_df = get_all_stocks()
+    if target == "watchlist":
+        if count_watchlist() == 0:
+            print("[WARN] 自选列表为空，recalc_all_scores(target='watchlist') 跳过")
+            return {"success": 0, "failed": 0, "days": 0, "signals": 0, "elapsed_s": 0,
+                    "target": "watchlist", "skipped": "empty_watchlist"}
+        stocks_df = get_watchlist_with_names()[["code", "name"]]
+    else:
+        stocks_df = get_all_stocks()
+
     if stocks_df.empty:
-        return {"success": 0, "failed": 0, "days": 0, "signals": 0, "elapsed_s": 0}
+        return {"success": 0, "failed": 0, "days": 0, "signals": 0, "elapsed_s": 0, "target": target}
 
     stocks = list(zip(stocks_df["code"], stocks_df["name"]))
     success = 0
@@ -1083,6 +1241,7 @@ def recalc_all_scores(progress_callback=None):
         "days": total_days,
         "signals": len(sig_records),
         "elapsed_s": round(elapsed, 1),
+        "target": target,
     }
 
 
@@ -1091,18 +1250,31 @@ def recalc_all_scores(progress_callback=None):
 # ─────────────────────────────────────────────
 def daily_sync_by_date(trade_dates: list[str] | None = None,
                         verbose: bool = True,
-                        progress_callback=None) -> dict:
+                        progress_callback=None,
+                        target: str = "all") -> dict:
     """
     盘后/盘前推荐主入口：按交易日批量同步，一次 HTTP 拉全 A
 
     :param trade_dates: 交易日期列表 ['20260624', '20260625']，None 则取最近 1 个交易日
     :param verbose: 打印详细日志
     :param progress_callback: 进度回调 fn(stage, current, total)
-    :return: {"dates": [...], "rows": N, "elapsed_s": x.x}
+    :param target: "all"（全市场，默认）/ "watchlist"（仅自选股）
+                  拉取仍是全 A（东财接口粒度），仅在写入层按 target 过滤；
+                  策略分重算范围也按 target 过滤。
+    :return: {"dates": [...], "rows": N, "elapsed_s": x.x, "target": ...}
     """
+    target = target if target in ("all", "watchlist") else "all"
+
     init_db()
     _init_qlib()
     from core.em_realtime import fetch_klines_by_date
+
+    # 自选空校验（target=watchlist 才有意义）
+    if target == "watchlist" and count_watchlist() == 0:
+        if verbose:
+            print("[WARN] 自选列表为空，daily_sync_by_date(target='watchlist') 跳过")
+        return {"dates": [], "rows": 0, "elapsed_s": 0.0,
+                "skipped": "empty_watchlist", "target": "watchlist"}
 
     if trade_dates is None:
         # 默认拉最近 1 个交易日
@@ -1117,9 +1289,14 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
     total_rows = 0
     results = {}
 
+    # 提前计算 watchlist codes 集合（O(1) 查找）
+    wl_set = None
+    if target == "watchlist":
+        wl_set = set(get_watchlist_codes())
+
     for trade_date in trade_dates:
         if verbose:
-            print(f"\n>>> 批量同步 {trade_date}（东财 push2his，一次 HTTP）")
+            print(f"\n>>> 批量同步 {trade_date}（东财 push2his，一次 HTTP，target={target}）")
 
         try:
             df = fetch_klines_by_date(
@@ -1140,6 +1317,13 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
             results[trade_date] = {"rows": 0}
             continue
 
+        # 写入层过滤：watchlist 模式只保留自选股
+        if wl_set is not None and "code" in df.columns:
+            before = len(df)
+            df = df[df["code"].astype(str).isin(wl_set)].copy()
+            if verbose and before != len(df):
+                print(f"  watchlist 过滤: {before} -> {len(df)} 行")
+
         # 写数据库
         try:
             n = _batch_write_daily_price(df)
@@ -1155,19 +1339,22 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         if progress_callback:
             progress_callback("date_done", trade_dates.index(trade_date) + 1, len(trade_dates))
 
-    # 触发策略分数重算
+    # 触发策略分数重算（按 target 过滤）
     if total_rows > 0:
         try:
-            _recompute_strategy_scores_for_updated(trade_dates, verbose=verbose)
+            _recompute_strategy_scores_for_updated(
+                trade_dates, verbose=verbose, target=target
+            )
         except Exception as e:
             if verbose:
                 print(f"  [WARN] 策略分数重算失败: {e}")
 
     elapsed = time.time() - t0
     if verbose:
-        print(f"\n>>> 批量同步完成  耗时: {elapsed:.1f}s  共 {total_rows} 行")
+        print(f"\n>>> 批量同步完成  耗时: {elapsed:.1f}s  共 {total_rows} 行  target={target}")
 
-    return {"dates": trade_dates, "rows": total_rows, "elapsed_s": round(elapsed, 1), "detail": results}
+    return {"dates": trade_dates, "rows": total_rows, "elapsed_s": round(elapsed, 1),
+            "detail": results, "target": target}
 
 
 def _batch_write_daily_price(df: pd.DataFrame) -> int:
@@ -1178,20 +1365,31 @@ def _batch_write_daily_price(df: pd.DataFrame) -> int:
     if df.empty:
         return 0
 
+    from core.data_cleaner import validate_record
+
     records = []
     for _, row in df.iterrows():
-        # 过滤无效数据
         close = float(row.get("close", 0) or 0)
-        if close <= 0 or close > 3000:
+        o = float(row.get("open", 0) or 0)
+        h = float(row.get("high", 0) or 0)
+        l = float(row.get("low", 0) or 0)
+        # 东财 push2 的 volume 单位是"手"(1手=100股)，统一转成股
+        vol = float(row.get("volume", 0) or 0) * 100
+
+        # 行级校验：价格上限 + OHLC关系 + 负成交量（拦截字段错位等脏值）
+        if close > 3000:
             continue
+        if not validate_record(o, h, l, close, vol):
+            continue
+
         records.append({
             "code":       str(row["code"]),
             "trade_date": str(row["trade_date"]),
-            "open":       float(row.get("open", 0) or 0),
-            "high":       float(row.get("high", 0) or 0),
-            "low":        float(row.get("low", 0) or 0),
+            "open":       o,
+            "high":       h,
+            "low":        l,
             "close":      close,
-            "volume":     float(row.get("volume", 0) or 0),
+            "volume":     vol,
             "amount":     float(row.get("amount", 0) or 0),
             "pct_change": float(row.get("pct_change", 0) or 0),
             "turnover":   float(row.get("turnover", 0) or 0),
@@ -1229,8 +1427,14 @@ def _batch_write_daily_price(df: pd.DataFrame) -> int:
     return len(records)
 
 
-def _recompute_strategy_scores_for_updated(trade_dates: list[str], verbose: bool = True) -> None:
-    """对受影响股票重新计算策略分数（仅重算最近有更新的，不全量重算）"""
+def _recompute_strategy_scores_for_updated(trade_dates: list[str], verbose: bool = True,
+                                          target: str = "all") -> None:
+    """对受影响股票重新计算策略分数（仅重算最近有更新的，不全量重算）
+
+    target="watchlist" 时，仅对受影响 ∩ 自选股子集重算。
+    """
+    target = target if target in ("all", "watchlist") else "all"
+
     try:
         from qlib_engine.data_bridge import init_qlib as _qinit
         _qinit()
@@ -1248,8 +1452,15 @@ def _recompute_strategy_scores_for_updated(trade_dates: list[str], verbose: bool
     if not codes:
         return
 
+    # 自选视角：缩小到自选股子集
+    if target == "watchlist":
+        wl_set = set(get_watchlist_codes())
+        codes = [c for c in codes if c in wl_set]
+        if not codes:
+            return
+
     if verbose:
-        print(f"  重算策略分数: {len(codes)} 只")
+        print(f"  重算策略分数: {len(codes)} 只 (target={target})")
 
     # 复用原有的逐只打分逻辑（已经是串行，但只重算受影响股票）
     for i, code in enumerate(codes):
