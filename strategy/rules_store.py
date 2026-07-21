@@ -5,12 +5,25 @@ from typing import List, Optional, Dict
 from core.db import get_conn
 
 
+def derive_horizon(holding_max) -> str:
+    """按持仓期推导周期标签：<=10 短期，<=60 中期，否则长期"""
+    try:
+        hm = int(holding_max or 20)
+    except (TypeError, ValueError):
+        hm = 20
+    if hm <= 10:
+        return "short"
+    if hm <= 60:
+        return "mid"
+    return "long"
+
+
 def list_rules(active_only: bool = False) -> List[dict]:
     """获取所有策略规则列表"""
     with get_conn() as conn:
         sql = """
             SELECT id, rule_name, rule_type, encoding, conditions, sell_conditions,
-                   holding_min, holding_max, source, generation, fitness,
+                   holding_min, holding_max, horizon, source, generation, fitness,
                    annual_return, win_rate, sharpe_ratio, max_drawdown, total_trades,
                    signal_overlap, is_active, created_at, updated_at
             FROM strategy_rules
@@ -52,6 +65,7 @@ def save_rule(rule: dict) -> int:
         return val.item() if hasattr(val, "item") else val
 
     with get_conn() as conn:
+        horizon = rule.get("horizon") or derive_horizon(rule.get("holding_max", 20))
         existing = conn.execute(
             "SELECT id FROM strategy_rules WHERE rule_name = ?", (rule["rule_name"],)
         ).fetchone()
@@ -61,14 +75,14 @@ def save_rule(rule: dict) -> int:
             conn.execute("""
                 UPDATE strategy_rules SET
                     rule_type=?, encoding=?, conditions=?, sell_conditions=?,
-                    holding_min=?, holding_max=?, fitness=?,
+                    holding_min=?, holding_max=?, horizon=?, fitness=?,
                     annual_return=?, win_rate=?, sharpe_ratio=?, max_drawdown=?,
                     total_trades=?, signal_overlap=?, updated_at=datetime('now','localtime')
                 WHERE id=?
             """, (
                 rule["rule_type"], rule["encoding"], rule.get("conditions", ""),
                 rule.get("sell_conditions", ""), _py(rule.get("holding_min", 3)),
-                _py(rule.get("holding_max", 20)), _py(rule.get("fitness", 0)),
+                _py(rule.get("holding_max", 20)), horizon, _py(rule.get("fitness", 0)),
                 _py(rule.get("annual_return", 0)), _py(rule.get("win_rate", 0)),
                 _py(rule.get("sharpe_ratio", 0)), _py(rule.get("max_drawdown", 0)),
                 _py(rule.get("total_trades", 0)), _py(rule.get("signal_overlap", 0)),
@@ -79,14 +93,14 @@ def save_rule(rule: dict) -> int:
             cur = conn.execute("""
                 INSERT INTO strategy_rules
                     (rule_name, rule_type, encoding, conditions, sell_conditions,
-                     holding_min, holding_max, source, generation, fitness,
+                     holding_min, holding_max, horizon, source, generation, fitness,
                      annual_return, win_rate, sharpe_ratio, max_drawdown,
                      total_trades, signal_overlap, is_active)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 rule["rule_name"], rule["rule_type"], rule["encoding"],
                 rule.get("conditions", ""), rule.get("sell_conditions", ""),
-                _py(rule.get("holding_min", 3)), _py(rule.get("holding_max", 20)),
+                _py(rule.get("holding_min", 3)), _py(rule.get("holding_max", 20)), horizon,
                 rule.get("source", "template"), _py(rule.get("generation", 1)),
                 _py(rule.get("fitness", 0)), _py(rule.get("annual_return", 0)),
                 _py(rule.get("win_rate", 0)), _py(rule.get("sharpe_ratio", 0)),

@@ -18,6 +18,7 @@ from flask import Blueprint, request, jsonify
 from core.db import get_conn, _safe_add_column, init_db
 from utils.api import ok, fail
 from utils.serialization import sanitize_numeric as _sanitize
+from config.personal_config import POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -151,13 +152,18 @@ def _ensure_personal_tables():
 # ─────────────────────────────────────────────
 @investor_bp.route("/today", methods=["GET"])
 def today_recommendations():
-    """今日推荐（action plan）
+    """今日推荐（action plan）—— 按 short/mid/long 三周期分组
+
     来源：stock_signal 表（融合分高 + 已有明确买入价/止损/止盈）
-    排序：fusion_score DESC，取前 N 条
-    支持 ?date=2026-06-18 查看指定日期的推荐
+    分组：每组按 fusion_score DESC 各取 limit 条（默认每组 8）
+    支持 ?date=2026-06-18 查看指定日期；?horizon=short 只看单组
+    返回 {date, market_regime, count, groups:{short,mid,long}, items(=short 组别名，兼容旧前端)}
     """
-    limit = request.args.get("limit", default=10, type=int)
+    limit = request.args.get("limit", default=8, type=int)
     limit = max(1, min(limit, 30))
+    horizon_filter = (request.args.get("horizon") or "").strip().lower() or None
+    if horizon_filter not in (None, "short", "mid", "long"):
+        return fail("horizon 仅支持 short / mid / long")
     target_date = request.args.get("date")
 
     with get_conn() as conn:
@@ -169,34 +175,58 @@ def today_recommendations():
             scan_date = row["d"] if row else None
 
         if not scan_date:
-            return ok({"date": None, "count": 0, "items": []})
+            return ok({
+                "date": None, "count": 0, "items": [],
+                "groups": {"short": [], "mid": [], "long": []},
+                "market_regime": "unknown",
+            })
 
-        rows = conn.execute(
-            """
-            SELECT
-                s.code, s.name, s.price AS signal_price,
-                s.buy_price, s.stop_loss, s.take_profit,
-                s.fusion_score, s.vol_score, s.ma_score,
-                s.diverge_score, s.bottom_score, s.whale_score,
-                s.trigger_list, s.scan_date, s.trade_date,
-                dp.close  AS latest_close,
-                dp.pct_change AS latest_pct,
-                dp.high   AS latest_high,
-                dp.low    AS latest_low,
-                i.industry
-            FROM stock_signal s
-            LEFT JOIN daily_price dp
-                ON dp.code = s.code AND dp.trade_date = (
-                    SELECT MAX(trade_date) FROM daily_price WHERE code = s.code
-                )
-            LEFT JOIN stock_info i ON i.code = s.code
-            WHERE s.scan_date = ?
-              AND (s.buy_price IS NOT NULL OR s.fusion_score IS NOT NULL)
-            ORDER BY COALESCE(s.fusion_score, 0) DESC
-            LIMIT ?
-            """,
-            (scan_date, limit),
-        ).fetchall()
+        # stock_info.pe_ttm 可能不存在（老库）—— 降级：有才启用长线估值过滤
+        has_pe_ttm = False
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(stock_info)").fetchall()}
+            has_pe_ttm = "pe_ttm" in cols
+        except Exception:
+            has_pe_ttm = False
+
+        horizons = [horizon_filter] if horizon_filter else ["short", "mid", "long"]
+        rows_by_horizon: dict = {}
+        for hz in horizons:
+            pe_filter = ""
+            if hz == "long" and has_pe_ttm:
+                # 长线降级财务过滤：pe_ttm 有值时剔除亏损股（<=0）与明显高估股（>100）
+                pe_filter = " AND (i.pe_ttm IS NULL OR (i.pe_ttm > 0 AND i.pe_ttm <= 100))"
+            rows_by_horizon[hz] = conn.execute(
+                f"""
+                SELECT
+                    s.code, s.name, s.price AS signal_price,
+                    s.buy_price, s.stop_loss, s.take_profit,
+                    s.fusion_score, s.vol_score, s.ma_score,
+                    s.diverge_score, s.bottom_score, s.whale_score,
+                    s.trigger_list, s.scan_date, s.trade_date,
+                    COALESCE(s.horizon, 'short') AS horizon,
+                    s.strategy,
+                    dp.close  AS latest_close,
+                    dp.pct_change AS latest_pct,
+                    dp.high   AS latest_high,
+                    dp.low    AS latest_low,
+                    i.industry
+                FROM stock_signal s
+                LEFT JOIN daily_price dp
+                    ON dp.code = s.code AND dp.trade_date = (
+                        SELECT MAX(trade_date) FROM daily_price WHERE code = s.code
+                    )
+                LEFT JOIN stock_info i ON i.code = s.code
+                WHERE s.scan_date = ?
+                  AND COALESCE(s.horizon, 'short') = ?
+                  AND (s.buy_price IS NOT NULL OR s.fusion_score IS NOT NULL)
+                  {pe_filter}
+                ORDER BY COALESCE(s.fusion_score, 0) DESC
+                LIMIT ?
+                """,
+                (scan_date, hz, limit),
+            ).fetchall()
+        all_rows = [r for hz in horizons for r in rows_by_horizon[hz]]
 
         # ── 联动查询 1：当前大盘冷热（影响信号灯） ──
         regime_row = conn.execute(
@@ -226,7 +256,7 @@ def today_recommendations():
         ).fetchall()}
 
         # ── 联动查询 3：每只推荐票近 5 个交易日的打分（趋势判断） ──
-        code_list = [r["code"] for r in rows]
+        code_list = [r["code"] for r in all_rows]
         score_trend: dict = {}
         if code_list:
             placeholders = ",".join("?" * len(code_list))
@@ -242,9 +272,8 @@ def today_recommendations():
             for tr in trend_rows:
                 score_trend.setdefault(tr["code"], []).append(tr["score"] or 0)
 
-        items = []
-        for r in rows:
-            d = dict(r)
+        def _build_item(d: dict) -> dict:
+            """把一行 stock_signal 记录加工成散户可执行的推荐卡片"""
             # 散户视角的"建议价位"
             entry = d.get("buy_price") or d.get("signal_price") or d.get("latest_close") or 0
             stop = d.get("stop_loss") or 0
@@ -317,11 +346,11 @@ def today_recommendations():
                     "recommend_hint": recommend_hint,
                 }
 
-            # ── 新增 2：建仓分批建议（按 1.5 万账户 20% 仓位 = 3000 元上限） ──
+            # ── 建仓分批建议（账户规模/占比见 config.personal_config） ──
             position_plan = None
             if entry > 0:
-                # 总金额上限：1.5 万 × 20% = 3000 元（A 股最小 1 手 = 100 股，按 100 整手）
-                max_amount = 3000
+                # 总金额上限：账户 × 仓位占比（A 股最小 1 手 = 100 股，按 100 整手）
+                max_amount = int(POSITION_PLAN_ACCOUNT * POSITION_PLAN_MAX_PCT)
                 # 用激进价估算总股数（向下取整到 100 股一手）
                 total_shares_100 = int(max_amount / max(aggressive if entry_strategy else entry, 0.01) // 100) * 100
                 if total_shares_100 < 100:
@@ -334,8 +363,8 @@ def today_recommendations():
                     p_s = entry_strategy["stable"]
                     p_c = entry_strategy["conservative"]
                     position_plan = {
-                        "account_size": 15000,
-                        "max_position_pct": 20,
+                        "account_size": POSITION_PLAN_ACCOUNT,
+                        "max_position_pct": int(POSITION_PLAN_MAX_PCT * 100),
                         "max_amount": max_amount,
                         "total_shares": total_shares_100,
                         "total_cost_est": round(total_shares_100 * p_s, 0),  # 用稳健价估算
@@ -383,10 +412,12 @@ def today_recommendations():
                 trend_up=trend_up,
             )
 
-            items.append({
+            return {
                 "code": d.get("code"),
                 "name": d.get("name"),
                 "industry": d.get("industry"),
+                "horizon": d.get("horizon") or "short",
+                "strategy": d.get("strategy"),
                 "fusion_score": round(d.get("fusion_score") or 0, 1),
                 "latest_close": d.get("latest_close"),
                 "latest_pct": d.get("latest_pct"),
@@ -406,12 +437,18 @@ def today_recommendations():
                 "triggers": triggers,
                 "scan_date": d.get("scan_date"),
                 "trade_date": d.get("trade_date"),
-            })
+            }
+
+        groups = {hz: [_build_item(dict(r)) for r in rows_by_horizon[hz]] for hz in horizons}
+        for hz in ("short", "mid", "long"):
+            groups.setdefault(hz, [])
+        short_items = groups.get("short", [])
         return ok({
-            "date": items[0]["scan_date"] if items else None,
-            "count": len(items),
-            "items": _sanitize(items),
-            "market_regime": market_regime,  # 新增：让前端知道当前大盘冷热
+            "date": scan_date,
+            "count": sum(len(v) for v in groups.values()),
+            "groups": _sanitize(groups),
+            "items": _sanitize(short_items),   # 兼容旧前端：items = short 组
+            "market_regime": market_regime,  # 让前端知道当前大盘冷热
         })
 
 

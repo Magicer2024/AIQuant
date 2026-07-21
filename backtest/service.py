@@ -69,10 +69,40 @@ def _build_params(payload: Dict[str, Any]) -> BacktestParams:
         exclude_st=bool(p.get("exclude_st", True)),
         exclude_kcb=bool(p.get("exclude_kcb", True)),
         exclude_cyb=bool(p.get("exclude_cyb", False)),
+        risk_free_rate=float(p.get("risk_free_rate", 0.02)),
     )
 
 
 # ──────────── 持久化 ────────────
+
+def _writeback_rule_fitness(rule_id: int, result: Dict[str, Any]):
+    """回测完成后把绩效回写到 strategy_rules（推荐-回测闭环）。
+
+    fitness 复合分（公式可调）：年化×1.5 + 胜率 + min(Sharpe,3)×0.5 - |最大回撤|
+    （均用小数形式计算，如年化 30% 计 0.30；下限 0）
+    """
+    try:
+        annual = float(result.get("annual_return", 0) or 0)
+        win = float(result.get("win_rate", 0) or 0)
+        sharpe = float(result.get("sharpe_ratio", 0) or 0)
+        mdd = float(result.get("max_drawdown", 0) or 0)
+        trades = int(result.get("total_trades", 0) or 0)
+        fitness = round(max(0.0, annual * 1.5 + win + min(sharpe, 3.0) * 0.5 - abs(mdd)), 4)
+        with get_conn() as conn:
+            conn.execute("""
+                UPDATE strategy_rules SET
+                    annual_return = ?, win_rate = ?, sharpe_ratio = ?,
+                    max_drawdown = ?, total_trades = ?, fitness = ?,
+                    updated_at = datetime('now','localtime')
+                WHERE id = ?
+            """, (
+                round(annual * 100, 2), round(win * 100, 2), round(sharpe, 3),
+                round(mdd * 100, 2), trades, fitness, rule_id,
+            ))
+        print(f"[Backtest] 规则 {rule_id} 绩效已回写: fitness={fitness}")
+    except Exception:
+        traceback.print_exc()
+
 
 def _save_result(result: Dict[str, Any], rule_name: str) -> Optional[int]:
     """写入 backtest_results 与 backtest_trades，返回 result_id"""
@@ -305,12 +335,28 @@ def _run_task(task_id: str, params: BacktestParams, rule_name: str):
                 t["progress"] = int(info["progress"])
 
     try:
-        engine = VisualBacktestEngine(
-            params=params,
-            progress_cb=progress_cb,
-            cancel_flag=cancel_flag,
-        )
-        result = engine.run(conditions=_get_task_conditions(task_id))
+        rule_id = None
+        with _LOCK:
+            t0 = _TASKS.get(task_id)
+            if t0:
+                rule_id = (t0.get("params") or {}).get("rule_id")
+
+        if rule_id:
+            # 策略规则一键回测路径（因子规则 → 全市场组合模拟）
+            from strategy.rules_store import get_rule
+            from backtest.rule_engine import run_rule_backtest
+            rule = get_rule(int(rule_id))
+            if not rule:
+                raise ValueError(f"策略规则不存在: {rule_id}")
+            result = run_rule_backtest(
+                rule, params, progress_cb=progress_cb, cancel_flag=cancel_flag)
+        else:
+            engine = VisualBacktestEngine(
+                params=params,
+                progress_cb=progress_cb,
+                cancel_flag=cancel_flag,
+            )
+            result = engine.run(conditions=_get_task_conditions(task_id))
         result["task_id"] = task_id
 
         with _LOCK:
@@ -327,6 +373,9 @@ def _run_task(task_id: str, params: BacktestParams, rule_name: str):
                 t["status"] = "done"
                 # 持久化
                 t["result_id"] = _save_result(result, rule_name)
+                # 推荐-回测闭环：规则绩效回写
+                if rule_id:
+                    _writeback_rule_fitness(int(rule_id), result)
             t["progress"] = 100
             t["message"] = (
                 "回测完成" if t["status"] == "done" else

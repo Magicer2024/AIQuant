@@ -36,6 +36,10 @@ SIGNAL_RANK_BY = "fusion_score"  # 排序字段: fusion_score | confidence | sco
 DEDUP_BY_RULE = True            # 同一规则对同一只股票不重复买入
 COOLDOWN_DAYS = 3               # 同一股票卖出后冷却期（天）
 
+# ── 推荐建仓计划（/api/investor/today position_plan）──────────────
+POSITION_PLAN_ACCOUNT = 15000    # 建仓计划参考账户规模（元）
+POSITION_PLAN_MAX_PCT = 0.20     # 单股最大仓位占比（max_amount = 账户×占比）
+
 
 def get_personal_config() -> dict:
     """返回个人配置字典"""
@@ -62,4 +66,6 @@ def get_personal_config() -> dict:
         "signal_rank_by": SIGNAL_RANK_BY,
         "dedup_by_rule": DEDUP_BY_RULE,
         "cooldown_days": COOLDOWN_DAYS,
+        "position_plan_account": POSITION_PLAN_ACCOUNT,
+        "position_plan_max_pct": POSITION_PLAN_MAX_PCT,
     }

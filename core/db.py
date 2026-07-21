@@ -533,15 +533,34 @@ CREATE INDEX IF NOT EXISTS idx_bt_trades_code ON backtest_trades(code);
         _safe_add_column(conn, "stock_info", "total_shares",  "REAL")   # 总股本
         _safe_add_column(conn, "stock_info", "circ_shares",   "REAL")   # 流通股本
 
-        # ── 4. 迁移：修正 stock_signal 唯一索引（去掉 trade_date）────────
+        # ── 4. 迁移：三周期（horizon）维度 ────────────────────
+        # strategy_rules 加 horizon；stock_signal 加 horizon/strategy
+        _safe_add_column(conn, "strategy_rules", "horizon", "TEXT")
+        _safe_add_column(conn, "stock_signal", "horizon", "TEXT DEFAULT 'short'")
+        _safe_add_column(conn, "stock_signal", "strategy", "TEXT")
+        # 一次性回填 strategy_rules.horizon（按持仓期推导：<=10 短期，<=60 中期，否则长期）
+        try:
+            conn.execute("""
+                UPDATE strategy_rules SET horizon = CASE
+                    WHEN COALESCE(holding_max, 20) <= 10 THEN 'short'
+                    WHEN COALESCE(holding_max, 20) <= 60 THEN 'mid'
+                    ELSE 'long'
+                END
+                WHERE horizon IS NULL OR horizon = ''
+            """)
+        except Exception:
+            pass
+
+        # ── 5. 迁移：stock_signal 唯一索引升级为 (scan_date, code, horizon)，
+        #    允许同一交易日同一股票同时存在短/中/长三条信号 ────────
         try:
             conn.execute("DROP INDEX IF EXISTS idx_sig_scan_trade_code")
         except Exception:
             pass
         try:
             conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sig_scan_trade_code "
-                "ON stock_signal(scan_date, code)")
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sig_scan_code_horizon "
+                "ON stock_signal(scan_date, code, horizon)")
         except Exception:
             pass
 

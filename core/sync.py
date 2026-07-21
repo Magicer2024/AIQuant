@@ -116,6 +116,7 @@ from strategy.strategies import (
     strategy_price_volume_divergence, strategy_bottom_fishing,
     strategy_whale_accumulation, fuse_signals, DEFAULT_WEIGHTS
 )
+from strategy.mid_long import scan_mid_term, scan_long_term
 
 # ─────────────────────────────────────────────
 # 配置
@@ -1203,6 +1204,37 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                     "buy_money": buy_money,
                     "sent_wechat": 0,
                     "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "horizon": "short",
+                    "strategy": "短线融合",
+                })
+
+            # ── 中/长线信号：只评估最新交易日，命中各写一条 ──
+            for _scan in (scan_mid_term, scan_long_term):
+                sig = _scan(df)
+                if not sig:
+                    continue
+                sig_records.append({
+                    "scan_date": sig["trade_date"],
+                    "trade_date": sig["trade_date"],
+                    "code": code,
+                    "name": name or code,
+                    "price": sig["buy_price"],
+                    "fusion_score": sig["fusion_score"],
+                    "vol_score": 0,
+                    "ma_score": 0,
+                    "diverge_score": 0,
+                    "bottom_score": 0,
+                    "whale_score": 0,
+                    "trigger_list": _json.dumps(sig["triggers"], ensure_ascii=False),
+                    "buy_price": sig["buy_price"],
+                    "stop_loss": sig["stop_loss"],
+                    "take_profit": sig["take_profit"],
+                    "buy_volume": 0,
+                    "buy_money": 0,
+                    "sent_wechat": 0,
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "horizon": sig["horizon"],
+                    "strategy": sig["strategy"],
                 })
         except Exception as e:
             print(f"  [{code}] stock_signal 写入失败: {e}")
@@ -1219,12 +1251,14 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                   (scan_date, trade_date, code, name, price, fusion_score,
                    vol_score, ma_score, diverge_score, bottom_score, whale_score,
                    trigger_list, buy_price, stop_loss, take_profit,
-                   buy_volume, buy_money, sent_wechat, created_at)
+                   buy_volume, buy_money, sent_wechat, created_at,
+                   horizon, strategy)
                 VALUES
                   (:scan_date, :trade_date, :code, :name, :price, :fusion_score,
                    :vol_score, :ma_score, :diverge_score, :bottom_score, :whale_score,
                    :trigger_list, :buy_price, :stop_loss, :take_profit,
-                   :buy_volume, :buy_money, :sent_wechat, :created_at)
+                   :buy_volume, :buy_money, :sent_wechat, :created_at,
+                   :horizon, :strategy)
             """, sig_records)
             conn.commit()
         print(f"  stock_signal 写入完成: {len(sig_records)} 条记录")

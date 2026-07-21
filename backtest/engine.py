@@ -256,6 +256,7 @@ class BacktestParams:
     exclude_kcb: bool = True
     exclude_cyb: bool = False
     logic: str = "AND"  # 预留 OR 扩展
+    risk_free_rate: float = 0.02  # Sharpe 无风险年化利率（默认 2%）
 
 
 # ─────────────── 数据提供器（默认从 core.db.daily_price 读取）───────────────
@@ -731,8 +732,9 @@ class VisualBacktestEngine:
 
         daily_ret = eq["total"].pct_change().fillna(0)
         std = daily_ret.std()
+        rf = float(getattr(self.params, "risk_free_rate", 0.02) or 0.0)
         if std and std > 0:
-            sharpe = float((daily_ret.mean() - 0.03 / 252) / std * math.sqrt(252))
+            sharpe = float((daily_ret.mean() - rf / 252) / std * math.sqrt(252))
         else:
             sharpe = 0.0
 

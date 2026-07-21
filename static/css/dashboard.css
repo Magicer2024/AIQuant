@@ -689,6 +689,39 @@ tr:hover td {
     grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
     gap: 12px;
 }
+
+/* ── 三周期分组推荐（short/mid/long） ── */
+#todayPicks.action-plan-grid { display: flex; flex-direction: column; gap: 18px; }
+.pick-group .action-plan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 12px;
+}
+.pick-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.pick-group-count { font-size: 12px; color: var(--text-muted); }
+.horizon-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.03em; vertical-align: middle;
+}
+.hz-short { color: #00d4f0; background: rgba(0,212,240,0.10); border: 1px solid rgba(0,212,240,0.25); }
+.hz-mid   { color: #ffb340; background: rgba(255,171,64,0.10); border: 1px solid rgba(255,171,64,0.25); }
+.hz-long  { color: #b388ff; background: rgba(179,136,255,0.10); border: 1px solid rgba(179,136,255,0.25); }
+.strategy-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px; vertical-align: middle;
+    font-size: 10px; color: var(--text-secondary);
+    background: rgba(139,156,192,0.10); border: 1px solid rgba(139,156,192,0.20);
+}
+
+/* ── 回测：规则导入行 / 基准对比行 ── */
+.bt-rule-import { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.bt-benchmark {
+    display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+    margin-top: 12px; padding: 10px 14px;
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; color: var(--text-secondary);
+}
+.bt-bm-title { font-weight: 600; color: var(--text-primary); }
+.bt-bm-item b { font-family: var(--font-mono); font-weight: 700; }
 .action-card {
     padding: 14px 16px;
     background: var(--bg-panel);
