@@ -32,14 +32,14 @@ python tests/test_em_speed.py     # 手动跑东财接口测速
 |-----|---------|
 | `core/` | SQLite 数据层：`db.py`（~12 表，get_conn 上下文管理器）、`sync.py`（行情同步主流程）、`data_fetcher.py`（baostock/AkShare 多源）、`data_cleaner.py`（L1-L6 脏数据过滤）、`em_realtime.py`/`em_kline.py`（东财接口）、`em_guard.py`（缓存+频控+配额三道防线）、`task_queue.py` |
 | `core/repository/` | 11 个领域 Repository（stock/price/signal/position/trade/sync/margin/north/futures/lhb/mgmt），db.py 中旧函数正逐步迁移至此 |
-| `strategy/` | `scorer.py`（每日打分引擎：加载活跃规则→因子→条件→写入 stock_score）、`factor_lib.py`、`indicators.py`、`rules_store.py`、`strategies.py`（5 策略评分）、`intent/parser.py`（自然语言选股） |
-| `backtest/` | `engine.py`（回测引擎）、`service.py`（回测服务封装）、`conditions.py`（条件构建） |
+| `strategy/` | `scorer.py`（每日打分引擎：加载活跃规则→因子→条件→写入 stock_score）、`factor_lib.py`、`indicators.py`、`rules_store.py`（含 derive_horizon）、`strategies.py`（短线 5 信号融合）、`mid_long.py`（中线综合/长线趋势扫描）、`strategy.py`（中线综合评分库，被 mid_long 调用）、`intent/parser.py`（自然语言选股） |
+| `backtest/` | `engine.py`（可视化回测引擎，BacktestParams 含 risk_free_rate）、`rule_engine.py`（策略规则一键回测+沪深300基准）、`service.py`（任务封装，rule_id 分发 + fitness 回写）、`conditions.py`（条件构建）、`nl_parser.py`（自然语言策略→条件+参数，LLM 主路径+本地正则兑底） |
 | `routes/` | Flask Blueprint：`system` / `sync` / `scoring` / `screen` / `backtest` / `investor` |
 | `scheduler/` | `runner.py` 每日 07:00 自动同步，`state.py` 共享状态 |
 | `qlib_engine/` | 可选 Qlib 集成；`app.py` 启动时 try/except 初始化，失败自动降级不影响主流程 |
 | `ai/` | `features.py` 特征工程 + `predictor.py`（RandomForest，模型存 `ai/models/`） |
 | `config/` | `settings.py`（同步/回测/挖掘参数）、`strategy_params.py`、`thresholds.py`、`personal_config.py` |
-| `utils/` | `api.py`（ok/fail 响应封装）、`serialization.py`（NaN/枚举安全 JSON）、`cache.py`、`timing.py`、`finance_data.py` |
+| `utils/` | `api.py`（ok/fail 响应封装）、`serialization.py`（NaN/枚举安全 JSON）、`llm_client.py`（OpenAI 兼容 LLM 调用，env 覆盖 yaml）、`cache.py`、`timing.py`、`finance_data.py` |
 
 ### Data flow
 
@@ -49,6 +49,22 @@ python tests/test_em_speed.py     # 手动跑东财接口测速
                       → strategy/scorer.py 每日打分 → stock_score 表
                       → routes/* Flask API → dashboard.html
 ```
+
+### 三周期（horizon）推荐与回测闭环
+
+全系统统一的周期维度（`stock_signal.horizon` / `strategy_rules.horizon` 列，init_db 幂等迁移+回填）：
+
+| horizon | 持仓期 | 策略来源 |
+|---|---|---|
+| short 短期 | 1~10 交易日 | `strategies.py` 5 信号融合（recalc_all_scores 逐日写库） |
+| mid 中期 | 10~60 交易日 | `mid_long.scan_mid_term` → `strategy.py` 综合评分≥65 且当日 BUY_SIGNAL（ATR 止损止盈） |
+| long 长期 | 60+ 交易日 | `mid_long.scan_long_term`：MA60/MA120 趋势 + 低波 + 回撤打分（≥2/3 命中） |
+
+- 中/长线只评最新交易日写一条信号；`stock_signal` 唯一索引为 `(scan_date, code, horizon)`。
+- `/api/investor/today` 返回 `{groups: {short, mid, long}}`（每组 fusion_score DESC 取 N，`items`=short 组别名兼容旧前端，`?horizon=` 单组过滤）；long 组在 `stock_info.pe_ttm` 存在时剔除 ≤0 或 >100；建仓计划金额读 `config/personal_config.py` 的 `POSITION_PLAN_ACCOUNT/MAX_PCT`。
+- 规则一键回测：`POST /api/backtest/run {rule_id}` → `rule_engine.run_rule_backtest`（factor_lib 向量化条件评估 → 次日开盘买入 → holding_max/止损/止盈出场 → 基准对比）→ 完成后 `service._writeback_rule_fitness` 回写 strategy_rules（库存百分数，fitness 用小数公式 `annual*1.5+win+min(sharpe,3)*0.5-|mdd|`）。
+- `GET /api/backtest/rules` 返回 is_active=1 规则供前端下拉；回测报告含沪深300 基准对比行。
+- 自然语言回测：`POST /api/backtest/parse_intent {text}` → `nl_parser.parse_backtest_intent`（LLM 按 conditions catalog 输出 JSON → 白名单校验/补默认；无 `LLM_API_KEY` 或调用失败时降级本地正则提取止损/止盈/持股/区间/资金），前端一键填充条件与参数表单。
 
 ## Key architectural notes
 

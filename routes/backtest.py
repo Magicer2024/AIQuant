@@ -10,6 +10,8 @@ routes/backtest.py —— 智能可视化回测 API 路由
   POST /api/backtest/<id>/cancel         取消任务
   GET  /api/backtest/history             历史回测列表
   GET  /api/backtest/<id>/export         导出 CSV/JSON
+  GET  /api/backtest/rules               可回测的策略规则列表（供前端下拉）
+  POST /api/backtest/parse_intent        自然语言策略 → 条件+参数（LLM/本地降级）
 """
 from __future__ import annotations
 
@@ -39,11 +41,61 @@ def run_backtest():
     params = payload.get("params") or {}
     if not params.get("start_date") or not params.get("end_date"):
         return fail("请填写回测起止日期")
-    if not payload.get("conditions"):
-        return fail("请至少添加一条选股条件")
+    # rule_id（策略规则一键回测）与 conditions（可视化条件回测）至少其一
+    rule_id = payload.get("rule_id") or params.get("rule_id")
+    if not rule_id and not payload.get("conditions"):
+        return fail("请至少添加一条选股条件或选择策略规则")
+    if rule_id:
+        try:
+            params["rule_id"] = int(rule_id)
+            payload["params"] = params
+        except (TypeError, ValueError):
+            return fail("rule_id 非法")
     try:
         task_id = bt_service.create_task(payload)
         return ok({"task_id": task_id})
+    except Exception as e:
+        traceback.print_exc()
+        return fail(str(e), http=500)
+
+
+# ──────────── 可回测的策略规则列表 ────────────
+@backtest_bp.route("/rules", methods=["GET"])
+def list_backtest_rules():
+    """返回 is_active=1 的策略规则，供前端"从策略规则导入"下拉"""
+    from strategy.rules_store import list_rules
+    items = [
+        {
+            "id": r["id"],
+            "rule_name": r["rule_name"],
+            "horizon": r.get("horizon") or "short",
+            "fitness": r.get("fitness"),
+            "win_rate": r.get("win_rate"),
+            "annual_return": r.get("annual_return"),
+            "holding_min": r.get("holding_min"),
+            "holding_max": r.get("holding_max"),
+        }
+        for r in list_rules(active_only=True)
+    ]
+    return ok({"items": items})
+
+
+# ──────────── 自然语言策略解析 ────────────
+@backtest_bp.route("/parse_intent", methods=["POST"])
+def parse_intent():
+    """自然语言策略 → 选股条件 + 回测参数
+
+    Body: {"text": "换手率1%~20%，MA5上穿MA20，回测近一年，止损5%止盈15%"}
+    主路径走 LLM（config/llm_config.yaml + 环境变量 LLM_API_KEY）；
+    未配置密钥时降级为本地正则参数提取，不会硬失败。
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return fail("请输入策略描述")
+    try:
+        from backtest.nl_parser import parse_backtest_intent
+        return ok(parse_backtest_intent(text))
     except Exception as e:
         traceback.print_exc()
         return fail(str(e), http=500)

@@ -918,23 +918,53 @@ async function loadMarketOverview() {
     }
 }
 
+// 三周期分组定义（与后端 horizon 一致）
+const HORIZON_GROUPS = [
+    { key: 'short', label: '短线', desc: '1~10 交易日' },
+    { key: 'mid',   label: '中线', desc: '10~60 交易日' },
+    { key: 'long',  label: '长线', desc: '60+ 交易日' },
+];
+const HORIZON_LABEL = { short: '短线', mid: '中线', long: '长线' };
+
 async function loadTodayPicks() {
     const box = document.getElementById('todayPicks');
     const dateEl = document.getElementById('pickDate');
     const dateParam = dateEl && dateEl.value ? '&date=' + dateEl.value : '';
     try {
         const resp = await RequestManager.fetch('today', API + '/investor/today?limit=8' + dateParam);
-        const items = (resp.data && resp.data.items) || [];
-        const serverDate = resp.data && resp.data.date;
+        const data = (resp && resp.data) || {};
+        const serverDate = data.date;
         // 自动回填日期（首次加载时）
         if (dateEl && !dateEl.value && serverDate) {
             dateEl.value = serverDate;
         }
-        if (items.length === 0) {
+        // 三周期分组（兼容旧结构：无 groups 时 items 视为短线组）
+        const groups = data.groups || { short: data.items || [], mid: [], long: [] };
+        const total = HORIZON_GROUPS.reduce((sum, g) => sum + ((groups[g.key] || []).length), 0);
+        if (total === 0) {
             box.innerHTML = '<div class="empty-state">暂无推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「高级筛选」跑一遍打分</span></div>';
             return;
         }
-        box.innerHTML = items.map(it => {
+        box.innerHTML = HORIZON_GROUPS.map(g => {
+            const list = groups[g.key] || [];
+            const cards = list.length
+                ? list.map(it => renderPickCard(it)).join('')
+                : '<div class="empty-state" style="padding:20px;font-size:12px">该周期暂无推荐，请先在同步页运行全量重算</div>';
+            return `<div class="pick-group">
+                <div class="pick-group-head">
+                    <span class="horizon-tag hz-${g.key}">${g.label} · ${g.desc}</span>
+                    <span class="pick-group-count">${list.length} 只</span>
+                </div>
+                <div class="action-plan-grid">${cards}</div>
+            </div>`;
+        }).join('');
+    } catch(e) {
+        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+// 单只推荐卡片渲染（短/中/长三周期共用）
+function renderPickCard(it) {
             const ap = it.action_plan || {};
             const es = it.entry_strategy || {};
             const pp = it.position_plan || {};
@@ -1019,11 +1049,12 @@ async function loadTodayPicks() {
                 </div>`;
             }
 
+            const hzKey = it.horizon || 'short';
             return `
                 <div class="action-card" onclick="openKline('${it.code}')">
                     <div class="action-head">
                         <div>
-                            <div class="action-name">${it.name || it.code}</div>
+                            <div class="action-name">${it.name || it.code} <span class="horizon-tag hz-${hzKey}">${HORIZON_LABEL[hzKey] || '短线'}</span>${it.strategy ? ` <span class="strategy-badge">${it.strategy}</span>` : ''}</div>
                             <div class="action-code">${it.code}${it.industry?` · ${it.industry}`:''}</div>
                         </div>
                         <div class="action-score">
@@ -1059,10 +1090,6 @@ async function loadTodayPicks() {
                         ${rrHtml}
                     </div>
                 </div>`;
-        }).join('');
-    } catch(e) {
-        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
-    }
 }
 
 async function loadMyPositions() {
@@ -1435,7 +1462,19 @@ async function loadScoresTab(container) {
         pendingScoreDate = null;
     }
     checkSyncStatus();
+    loadRulesHorizonMap();
     loadScoresPage(1);
+}
+
+// 规则 id → horizon 映射缓存（供打分表规则名旁显示周期标签）
+function loadRulesHorizonMap() {
+    if (window._rulesHorizonMap) return;
+    fetch('/api/backtest/rules').then(function(r) { return r.json(); }).then(function(d) {
+        if (!d.success) return;
+        var m = {};
+        ((d.data && d.data.items) || []).forEach(function(r) { m[r.id] = r.horizon || 'short'; });
+        window._rulesHorizonMap = m;
+    }).catch(function() {});
 }
 
 function refreshScores() {
@@ -1603,7 +1642,11 @@ function rowToScoreHTML(row, idx) {
     var ruleId = row.rule_id || '';
     var ruleDisplay = ruleId ? '#' + ruleId + ' ' + (row.rule_name || '-') : (row.rule_name || '-');
     var ruleTitle = ruleDisplay.replace(/"/g, '&quot;');
-    var ruleCell = '<span style="color:var(--text-muted)">' + (row.rule_name || '-') + '</span>';
+    var hzTag = '';
+    var hzMap = window._rulesHorizonMap || {};
+    var hz = row.rule_id ? hzMap[row.rule_id] : null;
+    if (hz) hzTag = ' <span class="horizon-tag hz-' + hz + '" style="font-size:10px">' + (HORIZON_LABEL[hz] || hz) + '</span>';
+    var ruleCell = '<span style="color:var(--text-muted)">' + (row.rule_name || '-') + '</span>' + hzTag;
     var marketCap = row.market_cap ? row.market_cap.toFixed(1) : '--';
     return '<tr>' +
         '<td style="color:var(--text-muted);width:40px">' + (idx != null ? idx : '') + '</td>' +
@@ -2631,6 +2674,21 @@ async function loadBacktestTab(container) {
                 <div class="bt-step" id="btStep3"><div class="bt-step-num">3</div><div class="bt-step-label">回测报告</div></div>
             </div>
             <div id="btPanel1" class="bt-panel">
+                <div class="bt-rule-import">
+                    <span style="font-size:13px;color:var(--text-secondary)">📥 从策略规则导入：</span>
+                    <select id="btRuleImport" class="bt-input" style="max-width:460px" onchange="btImportRule(this.value)">
+                        <option value="">手动配置（不使用规则）</option>
+                    </select>
+                    <span id="btRuleHint" class="text-muted" style="font-size:12px"></span>
+                </div>
+                <div class="bt-rule-import">
+                    <span style="font-size:13px;color:var(--text-secondary)">🗣️ 自然语言策略：</span>
+                    <input id="btNlInput" class="bt-input" style="flex:1;min-width:280px;max-width:640px"
+                           placeholder="例：换手率1%~20%，MA5上穿MA20，RSI低于30，回测近一年，止损5%止盈15%，最多持20天"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();btParseIntent();}">
+                    <button class="btn btn-primary btn-sm" id="btBtnParse" onclick="btParseIntent()">AI 解析</button>
+                </div>
+                <div id="btNlNote" class="text-muted" style="font-size:12px;margin:-8px 0 12px"></div>
                 <div class="bt-grid-2">
                     <div class="panel" style="margin-bottom:0">
                         <div class="panel-header">
@@ -2692,6 +2750,7 @@ async function loadBacktestTab(container) {
                         </div>
                     </div>
                     <div id="btMetrics" class="bt-metrics"></div>
+                    <div id="btBenchmarkRow"></div>
                     <div class="grid-2col" style="margin-top:14px">
                         <div class="panel" style="margin-bottom:0">
                             <div class="panel-header"><h3>策略收益曲线</h3></div>
@@ -2739,6 +2798,88 @@ async function loadBacktestTab(container) {
 
     btRenderConditions();
     btGotoStep(1);
+    btLoadRules();
+}
+
+// ── 策略规则一键回测：下拉加载 / 选中导入 ──
+let btSelectedRuleId = null;
+let btRulesCache = [];
+
+async function btLoadRules() {
+    try {
+        const resp = await fetch(BT_API + '/rules');
+        const data = await resp.json();
+        if (!data.success) return;
+        btRulesCache = (data.data && data.data.items) || [];
+        const sel = document.getElementById('btRuleImport');
+        if (!sel) return;
+        sel.innerHTML = '<option value="">手动配置（不使用规则）</option>' + btRulesCache.map(r => {
+            const hz = HORIZON_LABEL[r.horizon] || '短线';
+            const fit = r.fitness != null ? r.fitness : '-';
+            return `<option value="${r.id}">#${r.id} ${r.rule_name}（${hz} · fitness ${fit}）</option>`;
+        }).join('');
+    } catch (e) { console.error('加载策略规则失败', e); }
+}
+
+function btImportRule(id) {
+    const hint = document.getElementById('btRuleHint');
+    btSelectedRuleId = id ? parseInt(id, 10) : null;
+    if (!btSelectedRuleId) { if (hint) hint.textContent = ''; return; }
+    const rule = btRulesCache.find(r => r.id === btSelectedRuleId);
+    if (!rule) return;
+    // 自动填充：max_hold_days = 规则 holding_max；回测窗口按周期给默认（短 180 天 / 中 1 年 / 长 2 年）
+    if (rule.holding_max) document.getElementById('btParamMaxDays').value = rule.holding_max;
+    const days = rule.horizon === 'long' ? 730 : (rule.horizon === 'mid' ? 365 : 180);
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 86400000);
+    document.getElementById('btParamStart').value = start.toISOString().slice(0, 10);
+    document.getElementById('btParamEnd').value = end.toISOString().slice(0, 10);
+    if (hint) hint.textContent = `已选规则 #${rule.id}「${rule.rule_name}」（${HORIZON_LABEL[rule.horizon] || '短线'} · 持仓≤${rule.holding_max || '-'}天），提交后按规则条件回测并回写 fitness`;
+}
+
+async function btParseIntent() {
+    const input = document.getElementById('btNlInput');
+    const note = document.getElementById('btNlNote');
+    const text = (input.value || '').trim();
+    if (!text) { showToast('请先输入策略描述', 'warning'); return; }
+    const btn = document.getElementById('btBtnParse');
+    btn.disabled = true; btn.textContent = '解析中...';
+    try {
+        const resp = await fetch(BT_API + '/parse_intent', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text })
+        });
+        const data = await resp.json();
+        if (!data.success) { showToast('解析失败：' + (data.error || '未知错误'), 'error'); return; }
+        const r = data.data || {};
+        // 填充选股条件（后端已按 catalog 校验/补默认）
+        if (r.conditions && r.conditions.length) {
+            btConditions = r.conditions;
+            btRenderConditions();
+        }
+        // 填充回测参数（止盈/止损后端为小数，前端输入为百分数）
+        const p = r.params || {};
+        const setV = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+        setV('btParamStart', p.start_date);
+        setV('btParamEnd', p.end_date);
+        setV('btParamCash', p.initial_cash);
+        setV('btParamMaxHold', p.max_holdings);
+        setV('btParamMaxBuy', p.max_buy_per_day);
+        if (p.take_profit_pct != null) setV('btParamTp', Math.round(p.take_profit_pct * 10000) / 100);
+        if (p.stop_loss_pct != null) setV('btParamSl', Math.round(Math.abs(p.stop_loss_pct) * 10000) / 100);
+        setV('btParamMaxDays', p.max_hold_days);
+        if (p.exclude_kcb != null) document.getElementById('btExcludeKcb').checked = !!p.exclude_kcb;
+        if (p.exclude_cyb != null) document.getElementById('btExcludeCyb').checked = !!p.exclude_cyb;
+        const warnText = (r.warnings || []).length ? '；' + r.warnings.join('，') : '';
+        note.textContent = (r.source === 'llm' ? '🤖 ' : '⚠️ ') +
+            (r.explanation || (r.conditions || []).length ? (r.explanation || `已解析出 ${r.conditions.length} 条选股条件`) : '') +
+            (r.note ? r.note : '') + warnText;
+        showToast('解析完成，请确认后点击开始回测', 'success');
+    } catch (e) {
+        showToast('解析请求失败：' + e.message, 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = 'AI 解析';
+    }
 }
 
 function btAddCondition() {
@@ -2881,6 +3022,9 @@ function btParseInt(v) {
 function btResetForm() {
     btConditions = [];
     btCurrentResult = null;
+    btSelectedRuleId = null;
+    const _rs = document.getElementById('btRuleImport'); if (_rs) _rs.value = '';
+    const _rh = document.getElementById('btRuleHint'); if (_rh) _rh.textContent = '';
     if (btEquityChart) { btEquityChart.dispose(); btEquityChart = null; }
     if (btMonthlyChart) { btMonthlyChart.dispose(); btMonthlyChart = null; }
     btGotoStep(1);
@@ -2900,16 +3044,21 @@ function btResetForm() {
 }
 
 async function btStart() {
-    if (!btConditions.length) { showToast('请至少添加一条选股条件', 'warning'); return; }
+    if (!btSelectedRuleId && !btConditions.length) { showToast('请至少添加一条选股条件或选择策略规则', 'warning'); return; }
     const p = btCollectParams();
     if (!p.start_date || !p.end_date) { showToast('请填写回测起止日期', 'warning'); return; }
     if (new Date(p.start_date) >= new Date(p.end_date)) { showToast('起始日期必须早于结束日期', 'warning'); return; }
 
     document.getElementById('btBtnStart').disabled = true;
     try {
+        const payload = { conditions: btConditions, params: p, rule_name: '可视化回测_' + new Date().toISOString().slice(0,10) };
+        if (btSelectedRuleId) {
+            payload.rule_id = btSelectedRuleId;
+            payload.rule_name = '规则回测_' + btSelectedRuleId + '_' + new Date().toISOString().slice(0,10);
+        }
         const resp = await fetch(API + '/backtest/run', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ conditions: btConditions, params: p, rule_name: '可视化回测_' + new Date().toISOString().slice(0,10) })
+            body: JSON.stringify(payload)
         });
         const data = await resp.json();
         if (!data.success) { showToast('提交失败：' + (data.error || '未知错误'), 'error'); document.getElementById('btBtnStart').disabled = false; return; }
@@ -2994,6 +3143,7 @@ async function btLoadResult() {
 
 function btRenderReport(r) {
     btRenderMetrics(r);
+    btRenderBenchmark(r);
     btRenderEquityChart(r.equity_curve || []);
     btRenderMonthlyChart(r.monthly_returns || []);
     btRenderTradesTable(r.trades || []);
@@ -3019,6 +3169,23 @@ function btRenderMetrics(r) {
             <div class="bt-metric-value ${m.cls}">${m.value}</div>
         </div>
     `).join('');
+}
+
+// ── 基准对比行（策略 vs 沪深300 同期，红涨绿跌） ──
+function btRenderBenchmark(r) {
+    const el = document.getElementById('btBenchmarkRow');
+    if (!el) return;
+    const bm = r.benchmark;
+    if (!bm || bm.total_return == null) { el.innerHTML = ''; return; }
+    const strat = r.total_return || 0;
+    const excess = strat - bm.total_return;
+    el.innerHTML = `
+        <div class="bt-benchmark">
+            <span class="bt-bm-title">📈 基准对比 · ${bm.name || '沪深300'}</span>
+            <span class="bt-bm-item">策略累计 <b class="${btClsBySign(strat)}">${btFmtPct(strat)}</b></span>
+            <span class="bt-bm-item">${bm.name || '沪深300'}同期 <b class="${btClsBySign(bm.total_return)}">${btFmtPct(bm.total_return)}</b></span>
+            <span class="bt-bm-item">超额收益 <b class="${btClsBySign(excess)}">${btFmtPct(excess)}</b></span>
+        </div>`;
 }
 
 function btFmtPct(v) {
