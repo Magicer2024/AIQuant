@@ -220,6 +220,8 @@ def today_recommendations():
                 WHERE s.scan_date = ?
                   AND COALESCE(s.horizon, 'short') = ?
                   AND (s.buy_price IS NOT NULL OR s.fusion_score IS NOT NULL)
+                  AND s.name NOT LIKE '%ST%'
+                  AND s.name NOT LIKE '%退%'
                   {pe_filter}
                 ORDER BY COALESCE(s.fusion_score, 0) DESC
                 LIMIT ?
@@ -262,7 +264,7 @@ def today_recommendations():
             placeholders = ",".join("?" * len(code_list))
             trend_rows = conn.execute(
                 f"""
-                SELECT code, trade_date, score FROM stock_score
+                SELECT code, trade_date, fusion_score AS score FROM daily_price
                 WHERE code IN ({placeholders})
                   AND trade_date >= date('now', '-7 days')
                 ORDER BY code, trade_date DESC
@@ -731,13 +733,11 @@ def get_watchlist():
                    i.name, i.industry,
                    dp.close  AS latest_close,
                    dp.pct_change AS latest_pct,
-                   ss.score AS latest_score
+                   dp.fusion_score AS latest_score
             FROM personal_watchlist w
             LEFT JOIN stock_info i      ON i.code = w.code
             LEFT JOIN daily_price dp    ON dp.code = w.code
                 AND dp.trade_date = (SELECT MAX(trade_date) FROM daily_price WHERE code = w.code)
-            LEFT JOIN stock_score ss    ON ss.code = w.code
-                AND ss.trade_date = (SELECT MAX(trade_date) FROM stock_score WHERE code = w.code)
             ORDER BY w.created_at DESC
             """
         ).fetchall()
@@ -792,7 +792,7 @@ def add_watchlist():
 @investor_bp.route("/watchlist/<code>", methods=["DELETE"])
 def remove_watchlist(code: str):
     """移出自选
-    行为：仅删除 personal_watchlist 记录，**不**清理 daily_price / stock_score 中的历史数据。
+    行为：仅删除 personal_watchlist 记录，**不**清理 daily_price 中的历史数据。
     原因：回测 / 历史推荐 / 持仓分析都仍需这些数据。
     """
     if not (code.isdigit() and len(code) == 6):
@@ -1029,35 +1029,36 @@ def _score_drop_alerts(conn):
         # 最近两次打分
         scores = conn.execute(
             """
-            SELECT trade_date, score FROM stock_score
+            SELECT trade_date, fusion_score AS score FROM daily_price
             WHERE code = ?
             ORDER BY trade_date DESC LIMIT 2
             """,
             (code,),
         ).fetchall()
 
+        # 注：融合分 fusion_score 为 0~50 量纲，阈值较原 0~100 打分折半
         if len(scores) >= 2:
             latest_score = scores[0]["score"] or 0
             prev_score = scores[1]["score"] or 0
             drop = prev_score - latest_score
-            if drop >= 10:
+            if drop >= 5:
                 alerts.append({
                     "level": "warning",
                     "code": code,
                     "name": name,
-                    "msg": f"打分下降 {drop:.0f} 分（{prev_score:.0f}→{latest_score:.0f}），注意风险",
+                    "msg": f"融合分下降 {drop:.0f} 分（{prev_score:.0f}→{latest_score:.0f}），注意风险",
                 })
-            elif drop >= 5:
+            elif drop >= 3:
                 alerts.append({
                     "level": "info",
                     "code": code,
                     "name": name,
-                    "msg": f"打分小幅回落 {drop:.0f} 分（{prev_score:.0f}→{latest_score:.0f}）",
+                    "msg": f"融合分小幅回落 {drop:.0f} 分（{prev_score:.0f}→{latest_score:.0f}）",
                 })
         elif len(scores) == 1:
-            # 只有一次打分，检查是否低于阈值
+            # 只有一次评分，检查是否低于阈值（0~50 量纲）
             s = scores[0]["score"] or 0
-            if s < 30:
+            if s < 15:
                 alerts.append({
                     "level": "warning",
                     "code": code,
@@ -1142,6 +1143,86 @@ def explain(metric: str):
 def explain_all():
     """列出所有可解释的指标"""
     return ok({"metrics": list(EXPLAINERS.keys()), "items": EXPLAINERS})
+
+
+@investor_bp.route("/factor_trend", methods=["GET"])
+def factor_trend():
+    """融合分归因 + 趋势（纯读 daily_price）
+
+    GET /api/investor/factor_trend?codes=600519,000001&days=30
+    - codes: 逗号分隔 6 位代码，最多 50 个
+    - days:  取最近 N 个交易日，默认 30，clamp 到 [2, 90]
+    返回 { code: [ {trade_date, fusion_score, vol_score, ma_score,
+                    diverge_score, bottom_score, whale_score}, ... ] }（按日期升序）
+    同时服务：sparkline（days=7 取 fusion_score 序列）与详情弹窗（days=30 含 5 分项）。
+    """
+    raw = (request.args.get("codes") or "").strip()
+    codes = [c.strip() for c in raw.split(",") if c.strip().isdigit() and len(c.strip()) == 6]
+    codes = codes[:50]
+    if not codes:
+        return fail("缺少合法 codes（6 位数字，逗号分隔）", 400)
+
+    try:
+        days = int(request.args.get("days", 30))
+    except (TypeError, ValueError):
+        days = 30
+    days = max(2, min(90, days))
+
+    result = {}
+    with get_conn() as conn:
+        for code in codes:
+            rows = conn.execute(
+                """
+                SELECT trade_date, fusion_score, vol_score, ma_score,
+                       diverge_score, bottom_score, whale_score
+                FROM daily_price WHERE code = ?
+                ORDER BY trade_date DESC LIMIT ?
+                """,
+                (code, days),
+            ).fetchall()
+            result[code] = [dict(r) for r in reversed(rows)]
+    return ok(_sanitize(result))
+
+
+@investor_bp.route("/rule_signals", methods=["GET"])
+def rule_signals():
+    """常驻策略规则命中（选股→回测→推荐闭环的推荐端）
+
+    GET /api/investor/rule_signals?date=YYYY-MM-DD&limit=100
+    - date 缺省取 strategy_signals 最新 trade_date
+    - limit 缺省 100，上限 500（命中数可能很大，保护前端）
+    返回该日命中列表，JOIN 股名与最新收盘价，按 confidence 降序。
+    """
+    date = (request.args.get("date") or "").strip()
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 500))
+    with get_conn() as conn:
+        if not date:
+            row = conn.execute("SELECT MAX(trade_date) AS d FROM strategy_signals").fetchone()
+            date = row["d"] if row and row["d"] else None
+        if not date:
+            return ok(_sanitize({"date": None, "total": 0, "items": []}))
+        total = conn.execute(
+            "SELECT COUNT(*) AS c FROM strategy_signals WHERE trade_date = ?", (date,)
+        ).fetchone()["c"]
+        rows = conn.execute(
+            """
+            SELECT s.code, si.name AS name, s.rule_id, s.rule_name, s.confidence,
+                   dp.close AS latest_close
+            FROM strategy_signals s
+            LEFT JOIN stock_info si ON si.code = s.code
+            LEFT JOIN daily_price dp ON dp.code = s.code AND dp.trade_date = s.trade_date
+            WHERE s.trade_date = ?
+            ORDER BY s.confidence DESC
+            LIMIT ?
+            """,
+            (date, limit),
+        ).fetchall()
+    items = [dict(r) for r in rows]
+    return ok(_sanitize({"date": date, "total": total, "items": items}))
 
 
 # ─────────────────────────────────────────────

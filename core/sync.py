@@ -114,9 +114,12 @@ def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") ->
 from strategy.strategies import (
     strategy_volume_breakout, strategy_ma_convergence,
     strategy_price_volume_divergence, strategy_bottom_fishing,
-    strategy_whale_accumulation, fuse_signals, DEFAULT_WEIGHTS
+    strategy_whale_accumulation, strategy_oversold_rebound,
+    fuse_signals, DEFAULT_WEIGHTS
 )
 from strategy.mid_long import scan_mid_term, scan_long_term
+from strategy.rec_filters import trend_gate_series, quality_series, passes_quality
+from config.strategy_params import SHORT_ENGINE
 
 # ─────────────────────────────────────────────
 # 配置
@@ -970,7 +973,7 @@ def sync_single_stock_to_watchlist(code: str, verbose: bool = False) -> dict:
         "ok": True/False,
         "code": "000001",
         "rows_added": int,        # 新写入 daily_price 的行数（已存在时为 0）
-        "score_computed": bool,   # 是否成功重算 stock_score
+        "score_computed": bool,   # 是否成功重算 daily_price 融合分
         "elapsed_s": float,
         "message": str,
       }
@@ -1139,6 +1142,13 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     start = time.time()
     total = len(stocks)
 
+    # 质量过滤所需的总股本映射（缺失的股票自动跳过市值项）
+    from core.db import get_market_cap_map
+    try:
+        _mktcap_map = get_market_cap_map()
+    except Exception:
+        _mktcap_map = {}
+
     for i, (code, name) in enumerate(stocks):
         if (i + 1) % 200 == 0:
             print(f"  补算进度: {i+1}/{total}  成功:{success}  失败:{failed}")
@@ -1157,61 +1167,117 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
             df = get_daily_price(code)
             if df is None or len(df) < 30:
                 continue
-            s1 = strategy_volume_breakout(df)
-            s2 = strategy_ma_convergence(df)
-            s3 = strategy_price_volume_divergence(df)
-            s4 = strategy_bottom_fishing(df)
-            s5 = strategy_whale_accumulation(df)
-            fused = fuse_signals([s1, s2, s3, s4, s5], weights=DEFAULT_WEIGHTS)
-            for _, row in fused.iterrows():
-                fs = float(row.get("FUSION_SCORE", 0) or 0)
-                if fs < SIG_THRESHOLD:
-                    continue
-                trade_date = str(row.name.date()) if hasattr(row.name, "date") else str(row.name)[:10]
-                price = round(float(row["close"]), 2)
-                buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
-                buy_volume = int(buy_money // (price * 100) * 100)
-                stop_loss = round(price * (1 + STOP_LOSS_SC), 2)
-                take_profit = round(price * (1 + TAKE_PROFIT_SC), 2)
-                trigger_list = []
-                if float(row.get("VOL_SCORE", 0) or 0) >= 2.0:
-                    trigger_list.append("放量突破")
-                if float(row.get("MA_SCORE", 0) or 0) >= 2.0:
-                    trigger_list.append("均线粘合")
-                if float(row.get("DIVERGE_SCORE", 0) or 0) >= 2.0:
-                    trigger_list.append("量价背离")
-                if float(row.get("BOTTOM_SCORE", 0) or 0) >= 2.0:
-                    trigger_list.append("抄底")
-                if float(row.get("WHALE_SCORE", 0) or 0) >= 2.0:
-                    trigger_list.append("主力建仓")
-                sig_records.append({
-                    "scan_date": trade_date,
-                    "trade_date": trade_date,
-                    "code": code,
-                    "name": name or code,
-                    "price": price,
-                    "fusion_score": round(fs, 2),
-                    "vol_score": round(float(row.get("VOL_SCORE", 0) or 0), 1),
-                    "ma_score": round(float(row.get("MA_SCORE", 0) or 0), 1),
-                    "diverge_score": round(float(row.get("DIVERGE_SCORE", 0) or 0), 1),
-                    "bottom_score": round(float(row.get("BOTTOM_SCORE", 0) or 0), 1),
-                    "whale_score": round(float(row.get("WHALE_SCORE", 0) or 0), 1),
-                    "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
-                    "buy_price": price,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "buy_volume": buy_volume,
-                    "buy_money": buy_money,
-                    "sent_wechat": 0,
-                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "horizon": "short",
-                    "strategy": "短线融合",
-                })
+            _ts = (_mktcap_map.get(code) or {}).get("total_shares")
+            if SHORT_ENGINE == "oversold_rebound":
+                # ── 短线：超跌反弹v3 + 趋势闸门 + 质量过滤 ──
+                reb = strategy_oversold_rebound(df)
+                gate = trend_gate_series(df).reindex(reb.index).fillna(False)
+                qual = quality_series(name, df, _ts).reindex(reb.index).fillna(False)
+                for dt, r in reb.iterrows():
+                    if not bool(r.get("BUY_SIGNAL", False)):
+                        continue
+                    if not bool(gate.get(dt, False)) or not bool(qual.get(dt, False)):
+                        continue
+                    score4 = float(r.get("BUY_SCORE", 0) or 0)
+                    fs = round(score4 / 4.0 * 50.0, 2)  # 0~4 → 0~50 量纲对齐
+                    trade_date = str(dt.date()) if hasattr(dt, "date") else str(dt)[:10]
+                    price = round(float(r["close"]), 2)
+                    buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
+                    buy_volume = int(buy_money // (price * 100) * 100)
+                    stop_loss = round(price * (1 + STOP_LOSS_SC), 2)
+                    take_profit = round(price * (1 + TAKE_PROFIT_SC), 2)
+                    trigger_list = [
+                        f"超跌反弹v3 评分 {score4:.1f}/4",
+                        "站上MA20且均线向上",
+                        "非ST/流动性达标",
+                    ]
+                    sig_records.append({
+                        "scan_date": trade_date,
+                        "trade_date": trade_date,
+                        "code": code,
+                        "name": name or code,
+                        "price": price,
+                        "fusion_score": fs,
+                        "vol_score": 0,
+                        "ma_score": 0,
+                        "diverge_score": 0,
+                        "bottom_score": round(score4, 1),
+                        "whale_score": 0,
+                        "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
+                        "buy_price": price,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "buy_volume": buy_volume,
+                        "buy_money": buy_money,
+                        "sent_wechat": 0,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "horizon": "short",
+                        "strategy": "超跌反弹v3",
+                    })
+            else:
+                # ── 短线：纯抄底融合分（SHORT_ENGINE="pure_bottom" 一键回退）──
+                s1 = strategy_volume_breakout(df)
+                s2 = strategy_ma_convergence(df)
+                s3 = strategy_price_volume_divergence(df)
+                s4 = strategy_bottom_fishing(df)
+                s5 = strategy_whale_accumulation(df)
+                fused = fuse_signals([s1, s2, s3, s4, s5], weights=DEFAULT_WEIGHTS)
+                qual = quality_series(name, df, _ts).reindex(fused.index).fillna(False)
+                for _, row in fused.iterrows():
+                    fs = float(row.get("FUSION_SCORE", 0) or 0)
+                    if fs < SIG_THRESHOLD:
+                        continue
+                    # 质量过滤（ST/流动性/市值），清理 picks，逻辑本身不改
+                    if not bool(qual.get(row.name, False)):
+                        continue
+                    trade_date = str(row.name.date()) if hasattr(row.name, "date") else str(row.name)[:10]
+                    price = round(float(row["close"]), 2)
+                    buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
+                    buy_volume = int(buy_money // (price * 100) * 100)
+                    stop_loss = round(price * (1 + STOP_LOSS_SC), 2)
+                    take_profit = round(price * (1 + TAKE_PROFIT_SC), 2)
+                    trigger_list = []
+                    if float(row.get("VOL_SCORE", 0) or 0) >= 2.0:
+                        trigger_list.append("放量突破")
+                    if float(row.get("MA_SCORE", 0) or 0) >= 2.0:
+                        trigger_list.append("均线粘合")
+                    if float(row.get("DIVERGE_SCORE", 0) or 0) >= 2.0:
+                        trigger_list.append("量价背离")
+                    if float(row.get("BOTTOM_SCORE", 0) or 0) >= 2.0:
+                        trigger_list.append("抄底")
+                    if float(row.get("WHALE_SCORE", 0) or 0) >= 2.0:
+                        trigger_list.append("主力建仓")
+                    sig_records.append({
+                        "scan_date": trade_date,
+                        "trade_date": trade_date,
+                        "code": code,
+                        "name": name or code,
+                        "price": price,
+                        "fusion_score": round(fs, 2),
+                        "vol_score": round(float(row.get("VOL_SCORE", 0) or 0), 1),
+                        "ma_score": round(float(row.get("MA_SCORE", 0) or 0), 1),
+                        "diverge_score": round(float(row.get("DIVERGE_SCORE", 0) or 0), 1),
+                        "bottom_score": round(float(row.get("BOTTOM_SCORE", 0) or 0), 1),
+                        "whale_score": round(float(row.get("WHALE_SCORE", 0) or 0), 1),
+                        "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
+                        "buy_price": price,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "buy_volume": buy_volume,
+                        "buy_money": buy_money,
+                        "sent_wechat": 0,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "horizon": "short",
+                        "strategy": "短线融合",
+                    })
 
             # ── 中/长线信号：只评估最新交易日，命中各写一条 ──
             for _scan in (scan_mid_term, scan_long_term):
                 sig = _scan(df)
                 if not sig:
+                    continue
+                # 质量过滤（ST/流动性/市值），逻辑本身不改
+                if not passes_quality(name, df, _ts):
                     continue
                 sig_records.append({
                     "scan_date": sig["trade_date"],
@@ -1269,11 +1335,22 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     if progress_callback:
         progress_callback(total, "重算完成: " + str(len(sig_records)) + " 条信号")
 
+    # ── 并入常驻规则扫描（选股→回测→推荐闭环，best-effort）──
+    rule_hits = 0
+    try:
+        from strategy.rule_scanner import scan_active_rules
+        rule_result = scan_active_rules()
+        rule_hits = rule_result.get("hits", 0)
+        print(f"  常驻规则扫描完成: {rule_result.get('rules', 0)} 条规则 / {rule_hits} 条命中写入 strategy_signals")
+    except Exception as e:
+        print(f"  [WARN] 常驻规则扫描失败（不影响主流程）: {e}")
+
     return {
         "success": success,
         "failed": failed,
         "days": total_days,
         "signals": len(sig_records),
+        "rule_hits": rule_hits,
         "elapsed_s": round(elapsed, 1),
         "target": target,
     }

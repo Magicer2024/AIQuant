@@ -62,6 +62,30 @@ V4_PARAM_GRID = [
 ]
 
 
+# ── 短线推荐引擎开关 ───────────────────────────
+# "pure_bottom"      = 纯抄底融合分（默认；回测三口径均优于 v3 入场）
+# "oversold_rebound" = 超跌反弹v3（趋势闸门+质量过滤，实验）
+# 回测结论(2026-07 全池近1年)：v3 入场信号胜率≈持平但 PF/年化明显更差，
+# 真正压低回撤的是 v3 出场纪律而非入场信号，故默认保持纯抄底入场。
+SHORT_ENGINE = "pure_bottom"
+
+# 短线趋势闸门：过滤下跌途中的假反弹（要求站上均线且均线向上）
+SHORT_TREND_GATE = {
+    "enabled": True,
+    "ma": 20,              # 均线周期
+    "slope_lookback": 5,   # 均线斜率回看天数（今日 MA >= N 日前 MA 视为向上）
+}
+
+# 推荐质量硬过滤：ST 剔除 + 流动性 + 市值区间（缺 total_shares 自动跳过市值项）
+QUALITY_FILTER = {
+    "enabled": True,
+    "exclude_st": True,
+    "min_amt20": 80_000_000,       # 近20日日均成交额下限（元）
+    "min_mktcap": 3_000_000_000,   # 总市值下限（元，剔除微盘）
+    "max_mktcap": 80_000_000_000,  # 总市值上限（元，剔除超大盘）
+}
+
+
 # ── Phase 1: 模板穷举配置 ──
 PHASE1_CONFIG = {
     "ic_min_abs": 0.02,           # IC 过滤阈值
