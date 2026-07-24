@@ -218,6 +218,15 @@ def get_task_result(task_id: str) -> Optional[Dict[str, Any]]:
         return task.get("result")
 
 
+def get_task_payload(task_id: str) -> Optional[Dict[str, Any]]:
+    """返回任务的原始请求 payload（含 conditions 与 params），供“存为规则”读取。"""
+    with _LOCK:
+        task = _TASKS.get(task_id)
+        if not task:
+            return None
+        return task.get("params")
+
+
 def get_task_trades(task_id: str, page: int = 1, page_size: int = 50) -> Optional[Dict[str, Any]]:
     with _LOCK:
         task = _TASKS.get(task_id)

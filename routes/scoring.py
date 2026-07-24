@@ -1,111 +1,18 @@
 """
-routes/scoring.py —— 打分排名 API
+routes/scoring.py —— 行情 K 线 + 辅助查询 API
+
+原「每日打分」相关端点（/daily、/run、/stock、/stock/history）已随打分功能下线。
+本模块仅保留仍被前端复用的部分：
+  - /kline/<code>  K 线数据（openKline 复用，读 daily_price）
+  - /latest_date   最新行情日期（screen 页取日期用）
+url_prefix 保持 /api/scoring 不变，避免改动前端既有 URL。
 """
-import json
 from datetime import date
 from utils.serialization import sanitize_numeric as _sanitize
 from flask import Blueprint, request, jsonify
-from utils.api import ok, fail
-from strategy.scorer import score_stocks, get_daily_scores, get_daily_scores_count, get_latest_score_date
 from core.db import get_conn
 
 scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
-
-
-@scoring_bp.route("/daily", methods=["GET"])
-def daily_scores():
-    """获取某日打分排名（支持分页）GET /api/scoring/daily?date=2025-01-15&page=1&per_page=50"""
-    trade_date = request.args.get("date") or get_latest_score_date()
-    if not trade_date:
-        trade_date = _get_latest_trade_date()
-    if not trade_date:
-        return jsonify({"success": True, "data": [], "date": None, "error": "No trade date available"})
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    per_page = min(per_page, 10000)
-
-    results = get_daily_scores(trade_date, page=page, per_page=per_page)
-    total = get_daily_scores_count(trade_date)
-
-    return ok(
-        _sanitize(results),
-        pagination={
-            "page": page,
-            "per_page": per_page,
-            "total": total,
-            "pages": max(1, (total + per_page - 1) // per_page)
-        },
-        date=trade_date,
-        error=None
-    )
-
-
-@scoring_bp.route("/run", methods=["POST"])
-def run_scoring():
-    """触发打分 POST /api/scoring/run
-    支持 sync_first=true 参数，先同步行情再打分
-    """
-    body = request.get_json(silent=True) or {}
-    trade_date = body.get("date") or _get_latest_trade_date()
-    if not trade_date:
-        return jsonify({"success": False, "data": None, "error": "No trade_date provided"}), 400
-
-    sync_first = body.get("sync_first", False)
-    sync_msg = None
-    if sync_first:
-        try:
-            from core.sync import daily_sync, is_trading_day
-            from datetime import date
-            today_str = date.today().strftime("%Y-%m-%d")
-            if is_trading_day(today_str):
-                daily_sync(verbose=False)
-                sync_msg = "已同步最新行情"
-            else:
-                sync_msg = "非交易日，跳过同步"
-        except Exception as e:
-            sync_msg = f"同步失败: {e}"
-
-    try:
-        results = score_stocks(trade_date, save=True)
-        return jsonify({"success": True, "data": {"count": len(results), "date": trade_date, "sync": sync_msg}, "error": None})
-    except Exception as e:
-        return jsonify({"success": False, "data": None, "error": str(e)}), 500
-
-
-@scoring_bp.route("/stock/<code>", methods=["GET"])
-def stock_factors(code: str):
-    """获取单股因子明细 GET /api/scoring/stock/000001?date=2025-01-15"""
-    trade_date = request.args.get("date")
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM stock_score WHERE code = ? AND trade_date = ?",
-            (code, trade_date)
-        ).fetchone()
-        if not row:
-            return jsonify({"success": True, "data": None, "error": "Not found"})
-        data = dict(row)
-        try:
-            data["factors"] = json.loads(data.get("factors_json", "{}"))
-        except json.JSONDecodeError:
-            data["factors"] = {}
-        return jsonify({"success": True, "data": _sanitize(data), "error": None})
-
-
-@scoring_bp.route("/stock/<code>/history", methods=["GET"])
-def stock_score_history(code: str):
-    """获取单股打分历史 GET /api/scoring/stock/000001/history?days=30"""
-    days = request.args.get("days", "30")
-    if days not in ("7", "30", "60", "90"):
-        days = "30"
-
-    with get_conn() as conn:
-        rows = conn.execute("""
-            SELECT trade_date, score, rule_name
-            FROM stock_score
-            WHERE code = ? AND trade_date >= date('now', ?)
-            ORDER BY trade_date ASC
-        """, (code, f"-{days} days")).fetchall()
-        return jsonify({"success": True, "data": [dict(r) for r in rows], "error": None})
 
 
 @scoring_bp.route("/kline/<code>", methods=["GET"])
@@ -137,6 +44,12 @@ def kline_data(code: str):
         marks = []
 
         return jsonify({"success": True, "data": {"kline": kline, "marks": marks}, "error": None})
+
+
+@scoring_bp.route("/latest_date", methods=["GET"])
+def latest_date():
+    """获取最新行情日期 GET /api/scoring/latest_date"""
+    return jsonify({"success": True, "data": None, "date": _get_latest_trade_date(), "error": None})
 
 
 def _get_latest_trade_date() -> str:

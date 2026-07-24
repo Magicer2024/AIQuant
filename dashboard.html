@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260719b">
 </head>
 <body>
 <div class="scanline"></div>
@@ -28,7 +28,6 @@
 <nav class="nav-bar">
     <button class="nav-item active" onclick="switchTab('home')">首页</button>
     <button class="nav-item" onclick="switchTab('screen')">指标筛选</button>
-    <button class="nav-item" onclick="switchTab('scores')">每日打分</button>
     <button class="nav-item" onclick="switchTab('backtest')">智能回测</button>
 
 </nav>
@@ -63,7 +62,6 @@
 <script>
 const API = '/api';
 let currentTab = 'home';
-var pendingScoreDate = null;
 
 // ─── Toast notification system ───
 var Toast = {
@@ -247,13 +245,6 @@ function switchTab(tab) {
 
     // 保存当前 tab 状态（包括 scores tab 的日期选择）
     if (currentTab) {
-        // 在缓存 scores tab 前，记住当前选择的日期
-        if (currentTab === 'scores') {
-            var scoreDateEl = document.getElementById('scoreDate');
-            if (scoreDateEl && scoreDateEl.value) {
-                pendingScoreDate = scoreDateEl.value;
-            }
-        }
         TabState.save(currentTab);
     }
 
@@ -271,11 +262,6 @@ function switchTab(tab) {
         document.getElementById('content').innerHTML = cached.html;
         var scrollEl = document.querySelector('.content');
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
-        // 如果切回 scores tab，需要重新加载数据（确保日期选择和数据一致）
-        if (tab === 'scores') {
-            scoreClusterize = null;
-            loadScoresPage(1);
-        }
         return;
     }
 
@@ -288,7 +274,6 @@ async function loadTab(tab) {
     try {
         if (tab === 'home') await loadHomeTab(c);
         else if (tab === 'screen') await loadScreenTab(c);
-        else if (tab === 'scores') await loadScoresTab(c);
         else if (tab === 'backtest') await loadBacktestTab(c);
 
         c.firstElementChild?.classList.add('tab-content');
@@ -358,10 +343,27 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
-                <input type="date" id="pickDate" value="" onchange="loadTodayPicks()" style="font-size:12px;padding:2px 6px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+                <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:12px;padding:2px 6px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
                 <span class="text-muted" style="font-size:12px">基于量价 + 主力 + 趋势综合评估，点击查看 K 线</span>
             </div>
             <div id="todayPicks" class="action-plan-grid">加载中…</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>策略规则命中 · 常驻规则今日筛出</h3>
+                <div class="rule-scan-ctl">
+                    <label title="只扫 fitness 最高的前 N 条启用规则">Top-N
+                        <input type="number" id="ruleScanMaxRules" value="50" min="1" max="999" step="1">
+                    </label>
+                    <label title="因子计算保留的最近行数（需 &gt; 252）">回溯
+                        <input type="number" id="ruleScanLookback" value="300" min="253" max="5000" step="10">
+                    </label>
+                    <button class="btn btn-sm" id="ruleScanBtn" onclick="scanRulesNow()">立即扫描</button>
+                    <span class="text-muted" id="ruleSigDate" style="font-size:12px"></span>
+                </div>
+            </div>
+            <div id="ruleSignals">加载中…</div>
         </div>
 
         <div class="grid-2col">
@@ -404,6 +406,7 @@ async function loadHomeTab(container) {
     await Promise.all([
         loadMarketOverview(),
         loadTodayPicks(),
+        loadRuleSignals(),
         loadMyPositions(),
         loadMyWatchlist(),
         loadAlertsBanner(),
@@ -428,7 +431,7 @@ async function loadScreenTab(container) {
     try {
         var resp = await fetch(API + '/screen', {method: 'OPTIONS'});
         // 用一个简单的请求获取日期
-        var dateResp = await RequestManager.fetch('screen-date', API + '/scoring/daily?per_page=1');
+        var dateResp = await RequestManager.fetch('screen-date', API + '/scoring/latest_date');
         if (dateResp && dateResp.date) latestDate = dateResp.date;
     } catch(e) {}
     
@@ -926,7 +929,109 @@ const HORIZON_GROUPS = [
 ];
 const HORIZON_LABEL = { short: '短线', mid: '中线', long: '长线' };
 
-async function loadTodayPicks() {
+// ─── 融合分归因：5 因子标签（各 0-10）+ sparkline + 详情弹窗 ───
+const FACTOR_LABELS = [
+    ['vol_score', '量能'],
+    ['ma_score', '均线'],
+    ['diverge_score', '量价背离'],
+    ['bottom_score', '超跌反弹'],
+    ['whale_score', '主力筹码'],
+];
+
+// 输入数值数组，返回内联 SVG 迷你走势图（约 64x20）。A股配色：末>首红涨、末<首绿跌。
+function renderSparkline(values) {
+    var vals = (values || []).filter(function(v) { return v != null && !isNaN(v); });
+    var W = 64, H = 20, pad = 2;
+    if (vals.length < 2) {
+        return '<svg class="spark-svg" width="' + W + '" height="' + H + '">' +
+            '<line x1="' + pad + '" y1="' + (H/2) + '" x2="' + (W-pad) + '" y2="' + (H/2) +
+            '" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="2,2"/></svg>';
+    }
+    var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+    var span = (max - min) || 1;
+    var n = vals.length;
+    var pts = vals.map(function(v, i) {
+        var x = pad + (W - 2*pad) * (i / (n - 1));
+        var y = pad + (H - 2*pad) * (1 - (v - min) / span);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var last = vals[n-1], first = vals[0];
+    var color = last > first ? 'var(--danger)' : (last < first ? 'var(--success)' : 'var(--text-muted)');
+    return '<svg class="spark-svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">' +
+        '<polyline fill="none" stroke="' + color + '" stroke-width="1.5" points="' + pts + '"/></svg>';
+}
+
+// 批量拉取多只股票的近 days 日融合分序列，填充对应 sparkline 占位。
+async function fillSparklines(codes, days, idPrefix) {
+    var list = (codes || []).filter(Boolean);
+    if (!list.length) return;
+    try {
+        var resp = await RequestManager.fetch('spark-' + idPrefix, API +
+            '/investor/factor_trend?codes=' + encodeURIComponent(list.join(',')) + '&days=' + (days || 7));
+        var data = resp.data || {};
+        list.forEach(function(code) {
+            var el = document.getElementById(idPrefix + code);
+            if (!el) return;
+            var rows = data[code] || [];
+            el.innerHTML = renderSparkline(rows.map(function(r) { return r.fusion_score; }));
+        });
+    } catch(e) {}
+}
+
+// 点击分数/名称 → 融合分详情弹窗：5 因子读数条 + 30 日 fusion_score 折线
+async function showFactorDetail(code, name) {
+    var rows = [];
+    try {
+        var resp = await RequestManager.fetch('factor-detail-' + code, API +
+            '/investor/factor_trend?codes=' + encodeURIComponent(code) + '&days=30');
+        rows = (resp.data || {})[code] || [];
+    } catch(e) {}
+
+    if (!rows.length) {
+        showModal((name || code) + ' 融合分详情',
+            '<div class="empty-state">暂无融合分数据</div>');
+        return;
+    }
+
+    var last = rows[rows.length - 1];
+    var bars = FACTOR_LABELS.map(function(pair) {
+        var key = pair[0], lbl = pair[1];
+        var v = last[key] != null ? last[key] : 0;
+        var pct = Math.max(0, Math.min(100, (v / 10) * 100));
+        return '<div class="factor-bar-row">' +
+            '<span class="factor-bar-lbl">' + lbl + '</span>' +
+            '<span class="factor-bar-track"><span class="factor-bar-fill" style="width:' + pct.toFixed(0) + '%"></span></span>' +
+            '<span class="factor-bar-val">' + (v != null ? v.toFixed(1) : '--') + '</span>' +
+            '</div>';
+    }).join('');
+
+    var body = '<div class="factor-detail">' +
+        '<div class="factor-detail-head">最新融合分 <b>' + (last.fusion_score != null ? last.fusion_score.toFixed(1) : '--') + '</b> / 50</div>' +
+        '<div class="factor-bars">' + bars + '</div>' +
+        '<div id="factorTrendChart" style="width:100%;height:280px;margin-top:12px;"></div>' +
+        '</div>';
+    showModal((name || code) + ' 融合分详情', body);
+
+    var dates = rows.map(function(r) { return r.trade_date; });
+    var series = rows.map(function(r) { return r.fusion_score; });
+    var inst = ChartManager.get('factorTrend', document.getElementById('factorTrendChart'));
+    inst.setOption({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 40, right: 20, top: 20, bottom: 50 },
+        xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
+        yAxis: { type: 'value', name: '融合分', min: 0, max: 50 },
+        series: [{ name: '融合分', type: 'line', smooth: true, data: series, areaStyle: {} }],
+    });
+    if (!window._factorTrendResizeBound) {
+        window._factorTrendResizeBound = true;
+        window.addEventListener('resize', function() {
+            var i = ChartManager.instances['factorTrend'];
+            if (i) i.resize();
+        });
+    }
+}
+
+async function loadTodayPicks(isFallback) {
     const box = document.getElementById('todayPicks');
     const dateEl = document.getElementById('pickDate');
     const dateParam = dateEl && dateEl.value ? '&date=' + dateEl.value : '';
@@ -942,6 +1047,13 @@ async function loadTodayPicks() {
         const groups = data.groups || { short: data.items || [], mid: [], long: [] };
         const total = HORIZON_GROUPS.reduce((sum, g) => sum + ((groups[g.key] || []).length), 0);
         if (total === 0) {
+            // 选中日期无推荐但可能存在更早的可用数据 → 回退到最新数据日重试一次
+            if (dateEl && dateEl.value && !isFallback) {
+                const picked = dateEl.value;
+                dateEl.value = '';  // 清空后再查将返回最新数据日
+                showToast('所选日期 ' + picked + ' 无推荐，已切换到最新数据日', 'info', 3000);
+                return loadTodayPicks(true);
+            }
             box.innerHTML = '<div class="empty-state">暂无推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「高级筛选」跑一遍打分</span></div>';
             return;
         }
@@ -949,7 +1061,7 @@ async function loadTodayPicks() {
             const list = groups[g.key] || [];
             const cards = list.length
                 ? list.map(it => renderPickCard(it)).join('')
-                : '<div class="empty-state" style="padding:20px;font-size:12px">该周期暂无推荐，请先在同步页运行全量重算</div>';
+                : '<div class="empty-state" style="padding:20px;font-size:12px">该周期暂无推荐，请先在首页点「立即重算打分」</div>';
             return `<div class="pick-group">
                 <div class="pick-group-head">
                     <span class="horizon-tag hz-${g.key}">${g.label} · ${g.desc}</span>
@@ -960,6 +1072,71 @@ async function loadTodayPicks() {
         }).join('');
     } catch(e) {
         if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+// 策略规则命中（常驻规则今日筛出，独立于融合分信号）
+async function loadRuleSignals() {
+    const box = document.getElementById('ruleSignals');
+    const dateEl = document.getElementById('ruleSigDate');
+    if (!box) return;
+    try {
+        const resp = await RequestManager.fetch('ruleSignals', API + '/investor/rule_signals');
+        const data = (resp && resp.data) || {};
+        const items = data.items || [];
+        const total = data.total != null ? data.total : items.length;
+        if (dateEl) dateEl.textContent = data.date ? ('数据日期 ' + data.date + (total > items.length ? ('（命中 ' + total + '，显示前 ' + items.length + '）') : '')) : '';
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-state">暂无规则命中<br><span style="color:var(--text-muted);font-size:12px">先在「回测」将策略存为常驻规则，同步时自动扫描</span></div>';
+            return;
+        }
+        box.innerHTML = '<div class="rule-sig-list">' + items.map(it => {
+            const price = it.latest_close != null ? Number(it.latest_close).toFixed(2) : '--';
+            const conf = it.confidence != null ? Number(it.confidence).toFixed(2) : '--';
+            return `<div class="rule-sig-row" onclick="openKline('${it.code}')">
+                <div class="rule-sig-main">
+                    <span class="rule-sig-code">${it.code}</span>
+                    <span class="rule-sig-name">${it.name || '--'}</span>
+                </div>
+                <span class="rule-sig-rule" title="${it.rule_name || ''}">${it.rule_name || ('#' + it.rule_id)}</span>
+                <span class="rule-sig-price">¥${price}</span>
+                <span class="rule-sig-conf">强度 ${conf}</span>
+            </div>`;
+        }).join('') + '</div>';
+    } catch(e) {
+        box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+// 手动触发常驻规则全市场扫描（同步阻塞，全市场约数分钟）
+async function scanRulesNow() {
+    const btn = document.getElementById('ruleScanBtn');
+    const box = document.getElementById('ruleSignals');
+    const maxRules = parseInt(document.getElementById('ruleScanMaxRules').value, 10) || 50;
+    const lookback = parseInt(document.getElementById('ruleScanLookback').value, 10) || 300;
+    if (lookback <= 252) { showToast('回溯行数需大于 252', 'error'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '扫描中…'; }
+    if (box) box.innerHTML = '<div class="empty-state">全市场扫描中，预计需数分钟…</div>';
+    try {
+        const resp = await fetch(API + '/sync/scan_rules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ max_rules: maxRules, lookback_rows: lookback })
+        });
+        const j = await resp.json();
+        if (j && j.success) {
+            const d = j.data || {};
+            showToast('扫描完成：' + (d.rules || 0) + ' 条规则 / ' + (d.hits || 0) + ' 条命中，耗时 ' + (d.elapsed_s || 0) + 's', 'success');
+            await loadRuleSignals();
+        } else {
+            showToast('扫描失败：' + ((j && j.error) || '未知错误'), 'error');
+            await loadRuleSignals();
+        }
+    } catch(e) {
+        showToast('扫描请求失败', 'error');
+        await loadRuleSignals();
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '立即扫描'; }
     }
 }
 
@@ -1057,7 +1234,7 @@ function renderPickCard(it) {
                             <div class="action-name">${it.name || it.code} <span class="horizon-tag hz-${hzKey}">${HORIZON_LABEL[hzKey] || '短线'}</span>${it.strategy ? ` <span class="strategy-badge">${it.strategy}</span>` : ''}</div>
                             <div class="action-code">${it.code}${it.industry?` · ${it.industry}`:''}</div>
                         </div>
-                        <div class="action-score">
+                        <div class="action-score" style="cursor:pointer" onclick="event.stopPropagation(); showFactorDetail('${it.code}','${(it.name||it.code).replace(/'/g, "\\'")}')" title="查看融合分详情">
                             <div class="score-num">${it.fusion_score||'--'}</div>
                             <div class="score-lbl">综合分</div>
                         </div>
@@ -1118,6 +1295,7 @@ async function loadMyPositions() {
             const pnlCls2 = p.pnl >= 0 ? 'idx-up' : 'idx-down';
             const sign2 = p.pnl >= 0 ? '+' : '';
             const warnHtml = p.warning ? `<div class="position-warn">⚠ ${p.warning}</div>` : '';
+            const pname = (p.name||p.code).replace(/'/g, "\\'");
             return `
             <div class="position-row">
                 <div class="pr-left" onclick="openKline('${p.code}')">
@@ -1128,6 +1306,9 @@ async function loadMyPositions() {
                     <div class="pr-price">${p.latest_close?p.latest_close.toFixed(2):'--'}</div>
                     <div class="pr-pct ${pnlCls2}">${p.latest_pct!=null?(p.latest_pct>=0?'+':'')+p.latest_pct.toFixed(2)+'%':''}</div>
                 </div>
+                <div class="pr-score" style="cursor:pointer" onclick="showFactorDetail('${p.code}','${pname}')" title="查看融合分详情">
+                    <span class="spark" id="spark-p-${p.code}"></span>
+                </div>
                 <div class="pr-right">
                     <div class="pr-pnl ${pnlCls2}">${sign2}¥${p.pnl.toLocaleString()}</div>
                     <div class="pr-pct-sm ${pnlCls2}">${sign2}${p.pnl_pct}%</div>
@@ -1137,6 +1318,7 @@ async function loadMyPositions() {
         }).join('');
 
         box.innerHTML = html;
+        fillSparklines(positions.map(p => p.code), 7, 'spark-p-');
     } catch(e) {
         if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
     }
@@ -1159,6 +1341,7 @@ async function loadMyWatchlist() {
             const syncBtn = noData
                 ? `<button class="btn btn-sm" style="margin-left:6px" onclick="resyncOneStock('${w.code}')" title="无行情数据，点击立即补拉">拉取</button>`
                 : '';
+            const wname = (w.name||w.code).replace(/'/g, "\\'");
             return `
             <div class="watch-row">
                 <div class="wr-left" onclick="openKline('${w.code}')">
@@ -1169,9 +1352,9 @@ async function loadMyWatchlist() {
                     <div class="wr-price">${w.latest_close?w.latest_close.toFixed(2):'--'}</div>
                     <div class="wr-pct ${pctCls}">${w.latest_pct!=null?sign+w.latest_pct.toFixed(2)+'%':''}</div>
                 </div>
-                <div class="wr-score">
+                <div class="wr-score" style="cursor:pointer" onclick="showFactorDetail('${w.code}','${wname}')" title="查看融合分详情">
                     <div class="wr-score-num">${w.latest_score!=null?w.latest_score.toFixed(0):'--'}</div>
-                    <div class="wr-score-lbl">打分</div>
+                    <span class="spark" id="spark-w-${w.code}"></span>
                 </div>
                 <div style="display:flex;align-items:center;gap:4px">
                     ${syncBtn}
@@ -1179,6 +1362,7 @@ async function loadMyWatchlist() {
                 </div>
             </div>`;
         }).join('');
+        fillSparklines(items.map(w => w.code), 7, 'spark-w-');
     } catch(e) {
         if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
     }
@@ -1227,7 +1411,7 @@ async function loadRecHistory() {
         if (updEl) updEl.textContent = '统计区间：近 ' + (d.days || 30) + ' 天';
 
         if (!items || items.length === 0) {
-            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无历史推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「每日打分」生成推荐</span></div>';
+            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无历史推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到首页点「立即重算打分」生成推荐</span></div>';
             return;
         }
 
@@ -1419,322 +1603,6 @@ async function removeFromWatchlist(code) {
     try {
         await RequestManager.fetch('rm-watch-' + code, API + '/api/investor/watchlist/' + code, {method:'DELETE'});
         loadMyWatchlist();
-    } catch(e) {}
-}
-
-// ─── Tab 1: Scoring ───
-async function loadScoresTab(container) {
-    scoreClusterize = null;  // reset — DOM elements are being recreated
-    var html = `<div class="panel">
-        <div class="input-row">
-            <span>日期</span>
-            <input type="date" id="scoreDate" value="" onchange="refreshScores()">
-            <span>搜索</span>
-            <input type="text" id="stockSearch" placeholder="代码或名称" oninput="debounceFilter()" style="width:120px">
-            <span>最低分</span>
-            <input type="number" id="minScore" value="0" step="1" min="0" onchange="filterScores()" style="width:70px">
-            <label style="cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px">
-                <input type="checkbox" id="filterKCB" onchange="filterScores()" style="accent-color:var(--accent)"> 科创板
-            </label>
-            <label style="cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px">
-                <input type="checkbox" id="filterCYB" onchange="filterScores()" style="accent-color:var(--accent)"> 创业板
-            </label>
-            <span>市值≤</span>
-            <input type="number" id="minMarketCap" value="100" step="10" min="0" onchange="filterScores()" style="width:65px" title="单位：亿元，0表示不筛选">
-            <span style="font-size:12px;color:var(--text-muted)">亿</span>
-
-            <button class="btn btn-primary" onclick="syncAndScore()">同步并刷新</button>
-            <button class="btn" onclick="runSyncOnly()" id="btnSyncOnly">仅同步数据</button>
-            <span id="syncStatus"></span>
-            <span class="text-muted" style="margin-left:auto" id="scoreCount">-- 只股票</span>
-        </div>
-        <div id="scoresMetrics"></div>
-        <div id="scoreTableContainer"><div class="empty-state">加载中...</div></div>
-        <div id="scorePagination" style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;">
-            <button class="btn btn-sm" id="scorePrevPage" onclick="goScorePage(currentScorePage-1)" disabled>上一页</button>
-            <span id="scorePageInfo" style="font-size:13px;color:var(--text-secondary);">第 1 / 1 页</span>
-            <button class="btn btn-sm" id="scoreNextPage" onclick="goScorePage(currentScorePage+1)" disabled>下一页</button>
-        </div>
-    </div>`;
-    container.innerHTML = html;
-    if (pendingScoreDate) {
-        document.getElementById('scoreDate').value = pendingScoreDate;
-        pendingScoreDate = null;
-    }
-    checkSyncStatus();
-    loadRulesHorizonMap();
-    loadScoresPage(1);
-}
-
-// 规则 id → horizon 映射缓存（供打分表规则名旁显示周期标签）
-function loadRulesHorizonMap() {
-    if (window._rulesHorizonMap) return;
-    fetch('/api/backtest/rules').then(function(r) { return r.json(); }).then(function(d) {
-        if (!d.success) return;
-        var m = {};
-        ((d.data && d.data.items) || []).forEach(function(r) { m[r.id] = r.horizon || 'short'; });
-        window._rulesHorizonMap = m;
-    }).catch(function() {});
-}
-
-function refreshScores() {
-    currentScorePage = 1;
-    // 重置 Clusterize 实例，确保表格完全重新渲染（避免 update 分支的潜在问题）
-    scoreClusterize = null;
-    loadScoresPage(1);
-}
-
-async function loadScoresPage(page) {
-    page = page || 1;
-    var container = document.getElementById('scoreTableContainer');
-    if (container) showSkeleton(container, 10);
-
-    try {
-        var scoreDateEl = document.getElementById('scoreDate');
-        var selectedDate = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
-        var dateParam = selectedDate ? '&date=' + encodeURIComponent(selectedDate) : '';
-        
-        // 调用新的API获取每日打分记录（一次性加载全部数据，前端筛选）
-        var resp = await RequestManager.fetch('scores',
-            API + '/scoring/daily?page=1&per_page=5000' + dateParam);
-        
-        _scoreData = resp.data || [];
-        currentScorePage = 1;
-        scoreTotalPages = 1;
-
-        // 获取返回的日期（如果没有选择日期，使用API返回的日期）
-        var returnedDate = resp.date || '';
-        
-        // 如果用户没有选择日期，用返回的日期更新输入框
-        if (scoreDateEl && returnedDate && !selectedDate) {
-            scoreDateEl.value = returnedDate;
-        }
-        
-        // 使用实际查看的日期显示在头部
-        var displayDate = selectedDate || returnedDate;
-        document.getElementById('last-update').textContent = displayDate ? '最新打分 · ' + displayDate : '暂无数据';
-        document.getElementById('scoreCount').textContent = resp.pagination.total + ' 只股票';
-
-        // Update metrics
-        var metricsEl = document.getElementById('scoresMetrics');
-        if (metricsEl && resp.pagination.total > 0) {
-            // 统计板块分布
-            var kcbCount = 0, cybCount = 0, smallCapCount = 0;
-            for (var i = 0; i < _scoreData.length; i++) {
-                var code = (_scoreData[i].code || '').substring(0, 3);
-                if (code === '688') kcbCount++;
-                if (code === '300' || code === '301') cybCount++;
-                if ((_scoreData[i].market_cap || 0) > 0 && (_scoreData[i].market_cap || 0) <= 100) smallCapCount++;
-            }
-            metricsEl.innerHTML = '<div class="metrics-row">' +
-                '<div class="metric-card"><div class="val">' + _scoreData[0].score + '</div><div class="lbl">最高分 · ' + _scoreData[0].code + '</div></div>' +
-                '<div class="metric-card"><div class="val">' + resp.pagination.total + '</div><div class="lbl">总计股票数</div></div>' +
-                '<div class="metric-card"><div class="val">' + kcbCount + '</div><div class="lbl">科创板</div></div>' +
-                '<div class="metric-card"><div class="val">' + cybCount + '</div><div class="lbl">创业板</div></div>' +
-                '<div class="metric-card"><div class="val">' + smallCapCount + '</div><div class="lbl">≤100亿小票</div></div>' +
-                '</div>';
-        } else if (metricsEl) {
-            // 如果没有记录，显示提示信息
-            var message = resp.message || '暂无打分数据';
-            var showSyncBtn = resp.has_records === false;
-            var html = '<div class="empty-state">' + message;
-            if (showSyncBtn) {
-                html += '<br><button class="btn btn-primary" onclick="calculateScoresForDate()" style="margin-top:12px;">计算该日期打分</button>';
-            }
-            html += '</div>';
-            metricsEl.innerHTML = html;
-        }
-
-        renderScoreTable(_scoreData);
-        updatePaginationUI();
-    } catch(e) {
-        if (e.name !== 'AbortError') {
-            showToast('加载失败: ' + (e.message || '未知错误'), 'error');
-        }
-    }
-}
-
-// 计算指定日期的打分
-async function calculateScoresForDate() {
-    var scoreDateEl = document.getElementById('scoreDate');
-    var date = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
-    
-    if (!date) {
-        showToast('请先选择日期', 'warning');
-        return;
-    }
-    
-    var btn = event.target;
-    btn.disabled = true;
-    btn.textContent = '计算中...';
-    
-    try {
-        var resp = await RequestManager.fetch('calculate-scores',
-            API + '/scoring/run', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({date: date, force: true})
-            });
-        
-        if (resp.success) {
-            showToast(resp.message, 'success');
-            // 重新加载数据
-            loadScoresPage(1);
-        } else {
-            showToast(resp.error || '计算失败', 'error');
-            btn.disabled = false;
-            btn.textContent = '计算该日期打分';
-        }
-    } catch(e) {
-        showToast('计算失败: ' + e.message, 'error');
-        btn.disabled = false;
-        btn.textContent = '计算该日期打分';
-    }
-}
-
-function goScorePage(page) {
-    if (page < 1 || page > scoreTotalPages) return;
-    loadScoresPage(page);
-}
-
-function updatePaginationUI() {
-    var prevBtn = document.getElementById('scorePrevPage');
-    var nextBtn = document.getElementById('scoreNextPage');
-    var infoEl = document.getElementById('scorePageInfo');
-    if (prevBtn) prevBtn.disabled = currentScorePage <= 1;
-    if (nextBtn) nextBtn.disabled = currentScorePage >= scoreTotalPages;
-    if (infoEl) infoEl.textContent = '第 ' + currentScorePage + ' / ' + scoreTotalPages + ' 页';
-}
-
-var scoreClusterize = null;
-
-function renderScoreTable(scores) {
-    var container = document.getElementById('scoreTableContainer');
-    if (!container) return;
-
-    if (scoreClusterize) {
-        scoreClusterize.update(scores.map(function(row, i) { return rowToScoreHTML(row, i + 1); }));
-        return;
-    }
-
-    container.innerHTML =
-        '<div id="scoreScrollArea" class="clusterize-scroll" style="max-height:62vh;overflow-y:auto;">' +
-        '  <table id="scoreTable">' +
-        '    <thead><tr>' +
-        '      <th>#</th><th>代码</th><th>名称</th><th>得分</th><th>市值(亿)</th><th>命中策略</th>' +
-        '    </tr></thead>' +
-        '    <tbody id="scoreContentArea" class="clusterize-content"></tbody>' +
-        '  </table>' +
-        '</div>';
-
-    scoreClusterize = new Clusterize({
-        rows: scores.map(function(row, i) { return rowToScoreHTML(row, i + 1); }),
-        scrollElem: document.getElementById('scoreScrollArea'),
-        contentElem: document.getElementById('scoreContentArea'),
-        rows_in_block: 50,
-        blocks_in_cluster: 4,
-    });
-}
-
-function rowToScoreHTML(row, idx) {
-    var scoreClass = row.score >= 80 ? 'score-high' : row.score >= 50 ? 'score-mid' : 'score-low';
-    var ruleName = (row.rule_name || '').replace(/"/g, '&quot;');
-    var ruleId = row.rule_id || '';
-    var ruleDisplay = ruleId ? '#' + ruleId + ' ' + (row.rule_name || '-') : (row.rule_name || '-');
-    var ruleTitle = ruleDisplay.replace(/"/g, '&quot;');
-    var hzTag = '';
-    var hzMap = window._rulesHorizonMap || {};
-    var hz = row.rule_id ? hzMap[row.rule_id] : null;
-    if (hz) hzTag = ' <span class="horizon-tag hz-' + hz + '" style="font-size:10px">' + (HORIZON_LABEL[hz] || hz) + '</span>';
-    var ruleCell = '<span style="color:var(--text-muted)">' + (row.rule_name || '-') + '</span>' + hzTag;
-    var marketCap = row.market_cap ? row.market_cap.toFixed(1) : '--';
-    return '<tr>' +
-        '<td style="color:var(--text-muted);width:40px">' + (idx != null ? idx : '') + '</td>' +
-        '<td><span class="code-link" onclick="openKline(\'' + (row.code || '') + '\')">' + (row.code || '') + '</span>' +
-        ' <span style="cursor:pointer;margin-left:4px;font-size:12px" onclick="showScoreHistory(\'' + (row.code || '') + '\')" title="查看趋势">📈</span></td>' +
-        '<td>' + (row.name || '-') + '</td>' +
-        '<td class="' + scoreClass + '">' + (row.score != null ? row.score : '--') + '</td>' +
-        '<td style="color:var(--text-secondary)">' + marketCap + '</td>' +
-        '<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + ruleTitle + '">' + ruleCell + '</td>' +
-        '</tr>';
-}
-
-let _scoreData = [];
-var currentScorePage = 1;
-var scorePerPage = 50;
-var scoreTotalPages = 1;
-
-function debounceFilter() {
-    timerManager.clear('filter');
-    timerManager.setTimeout('filter', filterScores, 300);
-}
-
-function filterScores() {
-    var keyword = (document.getElementById('stockSearch') ? document.getElementById('stockSearch').value : '').toLowerCase();
-    var minScore = parseFloat(document.getElementById('minScore') ? document.getElementById('minScore').value : '0') || 0;
-
-    // 板块筛选：获取复选框状态（勾选=排除该板块）
-    var filterKCB = document.getElementById('filterKCB') ? document.getElementById('filterKCB').checked : false;
-    var filterCYB = document.getElementById('filterCYB') ? document.getElementById('filterCYB').checked : false;
-
-    // 市值筛选（单位：亿元，0 表示不筛选）
-    var minMarketCap = parseFloat(document.getElementById('minMarketCap') ? document.getElementById('minMarketCap').value : '0') || 0;
-
-    var filtered = _scoreData;
-    if (keyword) {
-        filtered = _scoreData.filter(function(r) {
-            return (r.code || '').toLowerCase().indexOf(keyword) !== -1 ||
-                   (r.name || '').toLowerCase().indexOf(keyword) !== -1;
-        });
-    }
-    if (minScore > 0) {
-        filtered = filtered.filter(function(r) { return (r.score || 0) >= minScore; });
-    }
-
-    // 板块筛选：勾选复选框则排除对应板块（688=科创板，300/301=创业板）
-    if (filterKCB || filterCYB) {
-        filtered = filtered.filter(function(r) {
-            var code = r.code || '';
-            var prefix = code.substring(0, 3);
-            // 科创板：688 开头
-            if (filterKCB && prefix === '688') return false;
-            // 创业板：300 或 301 开头
-            if (filterCYB && (prefix === '300' || prefix === '301')) return false;
-            return true;
-        });
-    }
-
-    // 市值筛选（≤ 选中的市值）
-    if (minMarketCap > 0) {
-        filtered = filtered.filter(function(r) { return (r.market_cap || 0) <= minMarketCap; });
-    }
-
-    var countEl = document.getElementById('scoreCount');
-    if (countEl) {
-        countEl.textContent = filtered.length === 0 ? '无匹配结果' : '显示 ' + filtered.length + ' / ' + _scoreData.length + ' 条';
-    }
-
-    if (scoreClusterize) {
-        scoreClusterize.update(filtered.map(function(row, i) { return rowToScoreHTML(row, i + 1); }));
-    } else {
-        renderScoreTable(filtered);
-    }
-}
-
-async function checkSyncStatus() {
-    try {
-        const resp = await RequestManager.fetch('sync-status', API + '/system/status');
-        const el = document.getElementById('syncStatus');
-        if (!el) return;
-        if (resp.sync && resp.sync.running) {
-            el.innerHTML = '<span class="badge badge-running">同步中</span>';
-            timerManager.setTimeout('syncStatus', checkSyncStatus, 2000);
-        } else if (resp.sync && resp.sync.last_result) {
-            el.textContent = resp.sync.last_result;
-            document.getElementById('last-update').textContent = resp.sync.last_time
-                ? '最新同步 · ' + resp.sync.last_time
-                : (document.getElementById('last-update').textContent || '');
-        }
     } catch(e) {}
 }
 
@@ -2039,177 +1907,6 @@ function pollRecalcTask(taskId, onDone) {
                 onDone && onDone(false, e.message || '轮询失败');
             });
     }, 1500);
-}
-
-async function runSyncOnly() {
-    const btn = document.getElementById('btnSyncOnly');
-    const statusEl = document.getElementById('syncStatus');
-    var scoreDateEl = document.getElementById('scoreDate');
-    pendingScoreDate = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
-    btn.disabled = true; btn.textContent = '启动中...';
-    try {
-        const resp = await RequestManager.fetch('sync-trigger', API + '/sync', { method: 'POST' });
-        if (resp.error) { statusEl.textContent = resp.error; btn.disabled = false; btn.textContent = '仅同步数据'; return; }
-        statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
-        btn.textContent = '同步中...';
-        showSyncProgress();
-        pollSyncProgress(function(msg) {
-            btn.disabled = false; btn.textContent = '仅同步数据';
-            if (msg) statusEl.textContent = msg;
-            loadTab('scores');
-        });
-    } catch(e) {
-        statusEl.textContent = '启动失败: ' + e.message;
-        showToast('同步启动失败: ' + e.message, 'error');
-        btn.disabled = false; btn.textContent = '仅同步数据';
-    }
-}
-
-async function syncAndScore() {
-    const btn = event.target;
-    const statusEl = document.getElementById('syncStatus');
-    var scoreDateEl = document.getElementById('scoreDate');
-    var selectedDate = scoreDateEl && scoreDateEl.value ? scoreDateEl.value : '';
-    
-    // 保存用户选择的日期，以便同步完成后恢复
-    pendingScoreDate = selectedDate;
-    
-    btn.disabled = true; 
-    btn.textContent = '同步中...';
-    
-    try {
-        // 第一步：同步数据（传递选择的日期）
-        var syncBody = selectedDate ? JSON.stringify({date: selectedDate}) : '{}';
-        const syncResp = await RequestManager.fetch('sync-trigger', 
-            API + '/sync', { 
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: syncBody
-            });
-        if (syncResp.error) { 
-            statusEl.textContent = syncResp.error; 
-            btn.disabled = false; 
-            btn.textContent = '同步并刷新'; 
-            pendingScoreDate = null;
-            return; 
-        }
-        
-        statusEl.innerHTML = '<span class="badge badge-running">同步中</span>';
-        showSyncProgress();
-        
-        // 等待同步完成
-        pollSyncProgress(async function(msg) {
-            if (msg) statusEl.textContent = msg;
-            
-            // 第二步：计算打分
-            btn.textContent = '计算中...';
-            try {
-                var calcResp = await RequestManager.fetch('calculate-scores',
-                    API + '/scoring/run', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({date: selectedDate, force: true})
-                    });
-                
-                if (calcResp.success) {
-                    showToast(calcResp.message, 'success');
-                } else {
-                    showToast(calcResp.error || '计算失败', 'error');
-                }
-            } catch(e) {
-                showToast('计算失败: ' + e.message, 'error');
-            }
-            
-            btn.disabled = false; 
-            btn.textContent = '同步并刷新';
-            // loadTab 会使用 pendingScoreDate 恢复日期选择器
-            loadTab('scores');
-        });
-    } catch(e) {
-        statusEl.textContent = '同步启动失败，尝试直接计算...';
-        btn.textContent = '计算中...';
-        
-        try {
-            var calcResp = await RequestManager.fetch('calculate-scores',
-                API + '/scoring/run', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({date: selectedDate, force: true})
-                });
-            
-            if (calcResp.success) {
-                showToast(calcResp.message, 'success');
-            }
-        } catch(e2) {}
-        
-        btn.disabled = false; 
-        btn.textContent = '同步并刷新';
-        loadTab('scores');
-    }
-}
-
-
-
-async function showScoreHistory(code) {
-    const days = document.getElementById('historyDays')?.value || '30';
-    const resp = await RequestManager.fetch('score-history-' + code, API + `/scoring/stock/${code}/history?days=${days}`);
-
-    const modalHtml = `
-        <div>
-            <select id="historyDays" onchange="showScoreHistory('${code}')" style="margin-bottom:12px;">
-                <option value="7" ${days==='7'?'selected':''}>近7天</option>
-                <option value="30" ${days==='30'?'selected':''}>近30天</option>
-                <option value="60" ${days==='60'?'selected':''}>近60天</option>
-                <option value="90" ${days==='90'?'selected':''}>近90天</option>
-            </select>
-            <div id="historyChart" style="width:100%;height:350px;"></div>
-        </div>`;
-
-    showModal(code + ' 打分趋势', modalHtml);
-
-    if (!resp.data || resp.data.length < 2) {
-        document.getElementById('historyChart').innerHTML =
-            '<div style="text-align:center;padding:60px;color:var(--text-secondary);">数据不足</div>';
-        return;
-    }
-
-    const byRule = {};
-    const allDates = new Set();
-    resp.data.forEach(d => {
-        if (!byRule[d.rule_name]) byRule[d.rule_name] = {};
-        byRule[d.rule_name][d.trade_date] = d.score;
-        allDates.add(d.trade_date);
-    });
-
-    const dates = Array.from(allDates).sort();
-    const colors = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4'];
-
-    const series = Object.entries(byRule).map(([rule, dateMap], idx) => ({
-        name: rule,
-        type: 'line',
-        smooth: true,
-        data: dates.map(d => dateMap[d] ?? null),
-        lineStyle: { color: colors[idx % colors.length] },
-    }));
-
-    const xLabels = dates.map(d => parseInt(days) <= 7 ? d.slice(5) : d);
-
-    var scoreChartInst = ChartManager.get('scoreHistory', document.getElementById('historyChart'));
-    scoreChartInst.setOption({
-        tooltip: { trigger: 'axis' },
-        toolbox: { feature: { saveAsImage: { title: '下载' } } },
-        xAxis: { type: 'category', data: xLabels, axisLabel: { rotate: 45, fontSize: 10 } },
-        yAxis: { type: 'value', name: '分' },
-        series: series,
-        grid: { left: 50, right: 20, top: 30, bottom: 60 },
-    });
-    if (!window._scoreHistoryResizeBound) {
-        window._scoreHistoryResizeBound = true;
-        window.addEventListener('resize', function() {
-            var inst = ChartManager.instances['scoreHistory'];
-            if (inst) inst.resize();
-        });
-    }
 }
 
 function closeModal() {
@@ -2744,6 +2441,7 @@ async function loadBacktestTab(container) {
                     <div class="panel-header">
                         <h3>📊 回测报告</h3>
                         <div style="display:flex;gap:8px;margin-left:auto">
+                            <button class="btn btn-sm" id="btSaveRuleBtn" onclick="btSaveAsRule()" style="display:none">⭐ 存为常驻规则</button>
                             <button class="btn btn-sm" onclick="btExport('csv')">⬇ CSV</button>
                             <button class="btn btn-sm" onclick="btExport('json')">⬇ JSON</button>
                             <button class="btn btn-primary btn-sm" onclick="btResetForm()">🔄 新建</button>
@@ -3148,6 +2846,34 @@ function btRenderReport(r) {
     btRenderMonthlyChart(r.monthly_returns || []);
     btRenderTradesTable(r.trades || []);
     btRenderPositionsTable(r.positions || []);
+    // 仅可视化条件回测（非 rule_id 型）且有交易时，允许存为常驻规则
+    var saveBtn = document.getElementById('btSaveRuleBtn');
+    if (saveBtn) {
+        var canSave = !btSelectedRuleId && btConditions.length > 0 && (r.total_trades || 0) > 0;
+        saveBtn.style.display = canSave ? '' : 'none';
+    }
+}
+
+async function btSaveAsRule() {
+    if (!btCurrentTaskId) { showToast('没有可保存的回测任务', 'warning'); return; }
+    var defName = '策略_' + new Date().toISOString().slice(0, 10);
+    var ruleName = prompt('为该回测命名为常驻规则（同名将更新）：', defName);
+    if (ruleName == null) return;
+    ruleName = ruleName.trim();
+    if (!ruleName) { showToast('规则名不能为空', 'warning'); return; }
+    try {
+        var resp = await fetch(BT_API + '/save_as_rule', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: btCurrentTaskId, rule_name: ruleName })
+        });
+        var data = await resp.json();
+        if (resp.status === 409) { showToast(data.error || '已存在相同条件的规则', 'warning'); return; }
+        if (!data.success) { showToast('保存失败：' + (data.error || '未知错误'), 'error'); return; }
+        showToast('已存为常驻规则：' + ruleName, 'success');
+        btLoadRules();
+    } catch (e) {
+        showToast('保存失败：' + e.message, 'error');
+    }
 }
 
 function btRenderMetrics(r) {

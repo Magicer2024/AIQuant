@@ -1,6 +1,7 @@
 """
 rules_store.py —— 策略规则 CRUD
 """
+import json
 from typing import List, Optional, Dict
 from core.db import get_conn
 
@@ -120,6 +121,54 @@ def delete_rule(rule_id: int) -> bool:
 def get_active_rules() -> List[dict]:
     """获取所有启用的规则（打分用）"""
     return list_rules(active_only=True)
+
+
+def _normalize_conditions(conditions_json: str) -> str:
+    """把 conditions JSON 规范化为可比较的字符串（用于内容去重）。
+
+    兼容两种格式：
+    - list: [{"factor", "operator", "threshold"}, ...]
+    - dict: {factor: {op: threshold}, ...}
+    无法解析或为空时返回空字符串。
+    """
+    try:
+        data = json.loads(conditions_json or "")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    items = []
+    if isinstance(data, list):
+        for c in data:
+            if not isinstance(c, dict):
+                continue
+            f, op, thr = c.get("factor"), c.get("operator"), c.get("threshold")
+            if f is not None and op is not None and thr is not None:
+                try:
+                    items.append((str(f), str(op), round(float(thr), 6)))
+                except (TypeError, ValueError):
+                    continue
+    elif isinstance(data, dict):
+        for f, op_dict in data.items():
+            if isinstance(op_dict, dict):
+                for op, thr in op_dict.items():
+                    try:
+                        items.append((str(f), str(op), round(float(thr), 6)))
+                    except (TypeError, ValueError):
+                        continue
+    if not items:
+        return ""
+    items.sort()
+    return json.dumps(items, ensure_ascii=False)
+
+
+def find_rule_by_conditions(conditions_json: str) -> Optional[dict]:
+    """按规范化 conditions 查找已存在的规则；找到返回该规则，否则 None。"""
+    norm = _normalize_conditions(conditions_json)
+    if not norm:
+        return None
+    for r in list_rules():
+        if _normalize_conditions(r.get("conditions") or "") == norm:
+            return r
+    return None
 
 
 def _save_rule_version_internal(rule_id: int):

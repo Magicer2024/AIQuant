@@ -15,6 +15,7 @@ routes/backtest.py —— 智能可视化回测 API 路由
 """
 from __future__ import annotations
 
+import json
 import traceback
 
 from flask import Blueprint, Response, jsonify, request
@@ -78,6 +79,88 @@ def list_backtest_rules():
         for r in list_rules(active_only=True)
     ]
     return ok({"items": items})
+
+
+# ──────────── 回测结果存为常驻规则 ────────────
+@backtest_bp.route("/save_as_rule", methods=["POST"])
+def save_as_rule():
+    """把一次可视化条件回测的结果存为常驻策略规则（选股→回测→推荐闭环）。
+
+    Body: {"task_id": "<回测任务 id>", "rule_name": "<规则名>"}
+    仅支持可视化条件回测（含 conditions）；rule_id 型回测已是规则，直接拒绝。
+    去重：同名→更新（save_rule）；同条件异名→409。
+    """
+    from strategy.rules_store import save_rule, find_rule_by_conditions, derive_horizon
+
+    payload = request.get_json(force=True, silent=True) or {}
+    task_id = (payload.get("task_id") or "").strip()
+    rule_name = (payload.get("rule_name") or "").strip()
+    if not task_id:
+        return fail("缺少 task_id")
+    if not rule_name:
+        return fail("请填写规则名称")
+
+    task = bt_service.get_task(task_id)
+    if not task:
+        return fail("回测任务不存在或已过期", 404)
+    if task.get("status") != "done":
+        return fail("回测尚未完成，无法存为规则")
+
+    task_payload = bt_service.get_task_payload(task_id) or {}
+    if task_payload.get("rule_id") or (task_payload.get("params") or {}).get("rule_id"):
+        return fail("该回测来自已有规则，无需再次保存")
+
+    conditions = task_payload.get("conditions")
+    if not conditions:
+        return fail("回测无选股条件，无法存为规则")
+    conditions_json = json.dumps(conditions, ensure_ascii=False)
+
+    result = bt_service.get_task_result(task_id)
+    if not result:
+        return fail("回测结果不可用")
+
+    # 内容去重：同条件且规则名不同→409
+    dup = find_rule_by_conditions(conditions_json)
+    if dup and dup.get("rule_name") != rule_name:
+        return fail(f"已存在相同条件的规则：{dup.get('rule_name')}", 409)
+
+    params = task_payload.get("params") or {}
+    holding_max = params.get("max_hold_days") or 20
+    try:
+        holding_max = int(holding_max)
+    except (TypeError, ValueError):
+        holding_max = 20
+
+    annual = float(result.get("annual_return", 0) or 0)
+    win = float(result.get("win_rate", 0) or 0)
+    sharpe = float(result.get("sharpe_ratio", 0) or 0)
+    mdd = float(result.get("max_drawdown", 0) or 0)
+    trades = int(result.get("total_trades", 0) or 0)
+    fitness = round(max(0.0, annual * 1.5 + win + min(sharpe, 3.0) * 0.5 - abs(mdd)), 4)
+
+    rule = {
+        "rule_name": rule_name,
+        "rule_type": "visual",
+        "encoding": conditions_json,
+        "conditions": conditions_json,
+        "sell_conditions": "",
+        "holding_min": 3,
+        "holding_max": holding_max,
+        "horizon": derive_horizon(holding_max),
+        "source": "backtest",
+        "fitness": fitness,
+        "annual_return": round(annual * 100, 2),
+        "win_rate": round(win * 100, 2),
+        "sharpe_ratio": round(sharpe, 3),
+        "max_drawdown": round(mdd * 100, 2),
+        "total_trades": trades,
+    }
+    try:
+        rule_id = save_rule(rule)
+    except Exception as e:
+        traceback.print_exc()
+        return fail(str(e), 500)
+    return ok({"rule_id": rule_id, "rule_name": rule_name, "horizon": rule["horizon"]})
 
 
 # ──────────── 自然语言策略解析 ────────────

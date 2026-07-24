@@ -272,6 +272,36 @@ def recalc_all_scores():
     return jsonify(result)
 
 
+@sync_bp.route("/scan_rules", methods=["POST"])
+def scan_rules():
+    """手动触发常驻规则扫描（消费启用规则，命中写入 strategy_signals）。
+    body/query: {"date": "YYYY-MM-DD", "max_rules": 50, "lookback_rows": 300}
+      - date          可选，缺省取最新交易日
+      - max_rules      可选，只扫 fitness 最高的前 N 条（缺省用模块默认值）
+      - lookback_rows  可选，因子计算保留的最近行数（缺省用模块默认值）
+    """
+    from flask import request
+    from strategy.rule_scanner import (
+        scan_active_rules, DEFAULT_MAX_RULES, DEFAULT_LOOKBACK_ROWS,
+    )
+    body = request.get_json(silent=True) or {}
+
+    def _pick_int(key, default):
+        raw = body.get(key, request.args.get(key))
+        if raw is None or raw == "":
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    date = (body.get("date") or request.args.get("date") or "").strip() or None
+    max_rules = _pick_int("max_rules", DEFAULT_MAX_RULES)
+    lookback_rows = _pick_int("lookback_rows", DEFAULT_LOOKBACK_ROWS)
+    result = scan_active_rules(trade_date=date, max_rules=max_rules, lookback_rows=lookback_rows)
+    return jsonify({"success": True, "data": result})
+
+
 @sync_bp.route("/recalc", methods=["POST"])
 def start_recalc():
     """重算打分（异步）

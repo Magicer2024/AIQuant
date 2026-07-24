@@ -133,7 +133,9 @@ CREATE TABLE IF NOT EXISTS stock_signal (
     sent_wechat     INTEGER DEFAULT 0,
     created_at      TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sig_scan_trade_code ON stock_signal(scan_date, code);
+-- 注意：stock_signal 的唯一索引为 (scan_date, code, horizon) 三列，
+-- 允许同一交易日同一股票并存短/中/长三条信号。
+-- 该索引在下方“三周期迁移”中添加（需先有 horizon 列），此处不再建两列旧索引。
 CREATE INDEX IF NOT EXISTS idx_sig_trade_date ON stock_signal(trade_date);
 
 -- 策略筛选记录（旧表，兼容用）
@@ -463,21 +465,8 @@ CREATE TABLE IF NOT EXISTS factor_daily (
 CREATE INDEX IF NOT EXISTS idx_factor_code_date ON factor_daily(code, trade_date);
 CREATE INDEX IF NOT EXISTS idx_factor_name_date ON factor_daily(factor_name, trade_date);
 
--- 每日打分排名
-CREATE TABLE IF NOT EXISTS stock_score (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    trade_date  TEXT    NOT NULL,
-    code        TEXT    NOT NULL,
-    name        TEXT,
-    score       REAL    DEFAULT 0,
-    rule_id     TEXT,
-    rule_name   TEXT,
-    factors_json TEXT,
-    created_at  TEXT    DEFAULT (datetime('now','localtime')),
-    UNIQUE(trade_date, code)
-);
-CREATE INDEX IF NOT EXISTS idx_stock_score_date ON stock_score(trade_date);
-CREATE INDEX IF NOT EXISTS idx_stock_score_code ON stock_score(code);
+-- 每日打分排名表 stock_score 已随「每日打分」功能下线（改用 daily_price.fusion_score）。
+-- 既有库的残留表在下方迁移段一次性 DROP。
 
 -- 回测结果汇总
 CREATE TABLE IF NOT EXISTS backtest_results (
@@ -569,6 +558,12 @@ CREATE INDEX IF NOT EXISTS idx_bt_trades_code ON backtest_trades(code);
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_code_date_uniq "
                 "ON daily_price(code, trade_date)")
+        except Exception:
+            pass
+
+        # ── 6. 迁移：下线「每日打分」，清除残留 stock_score 表 ──────
+        try:
+            conn.execute("DROP TABLE IF EXISTS stock_score")
         except Exception:
             pass
 
