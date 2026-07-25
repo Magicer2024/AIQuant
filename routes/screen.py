@@ -4,6 +4,7 @@ routes/screen.py —— 指标筛选 API
 from flask import Blueprint, request, jsonify
 from utils.api import ok, fail
 from core.db import get_conn
+import numpy as np
 import pandas as pd
 
 screen_bp = Blueprint("screen", __name__, url_prefix="/api/screen")
@@ -86,97 +87,89 @@ def screen_stocks():
         return ok([], date=trade_date, total=0)
     
     # 如果需要计算技术指标，获取历史数据
-    need_indicators = bool(macd_conditions or rsi_conditions or kdj_conditions or ma_conditions or vol_conditions)
-    
+    need_indicators = bool(macd_conditions or rsi_conditions or kdj_conditions or ma_conditions or vol_conditions
+                           or macd_dif_filter or macd_dea_filter or macd_hist_filter)
+
     if need_indicators:
-        # 获取最近60天的历史数据用于计算指标
-        from strategy.indicators import calc_macd, calc_rsi, calc_kdj, calc_ma
-        
+        # 向量化批量计算：groupby + Cython 加速的 rolling/ewm 一次算完全市场，
+        # 替代原逐股建 DataFrame + 逐股调指标函数的 Python 循环（4000+ 只 × ~8ms ≈ 33s）
         with get_conn() as conn:
-            history_rows = conn.execute("""
-                SELECT code, trade_date, open, high, low, close, volume
+            hist_df = pd.read_sql_query("""
+                SELECT code, trade_date, high, low, close, volume
                 FROM daily_price
                 WHERE trade_date >= date(?, '-60 days')
                 ORDER BY code, trade_date
-            """, (trade_date,)).fetchall()
-        
-        # 按股票分组
-        stock_history = {}
-        for r in history_rows:
-            code = r["code"]
-            if code not in stock_history:
-                stock_history[code] = []
-            stock_history[code].append(dict(r))
-        
-        # 计算每只股票的指标
-        for s in stocks_with_cap:
-            code = s["code"]
-            hist = stock_history.get(code, [])
-            
-            if len(hist) < 20:
-                continue
-            
-            df = pd.DataFrame(hist)
-            close = df["close"]
-            high = df["high"]
-            low = df["low"]
-            
-            # MACD
-            need_macd = macd_conditions or macd_dif_filter
+            """, conn, params=(trade_date,))
+
+        # 与原逻辑一致：历史不足 20 根K线的股票不算指标
+        if not hist_df.empty:
+            cnt = hist_df.groupby("code", sort=False)["close"].transform("size")
+            hist_df = hist_df[cnt >= 20].reset_index(drop=True)
+
+        if not hist_df.empty:
+            close = hist_df["close"]
+
+            # MACD（EMA 递推 = ewm，逐组向量化）
+            need_macd = bool(macd_conditions or macd_dif_filter or macd_dea_filter or macd_hist_filter)
             if need_macd:
-                try:
-                    macd = calc_macd(close, fast=macd_fast, slow=macd_slow, signal=macd_signal)
-                    dif = macd["MACD_DIF"].iloc[-1]
-                    dea = macd["MACD_DEA"].iloc[-1]
-                    hist_val = macd["MACD_HIST"].iloc[-1]
-                    s["macd_dif"] = float(dif) if pd.notna(dif) else None
-                    s["macd_dea"] = float(dea) if pd.notna(dea) else None
-                    s["macd_hist"] = float(hist_val) if pd.notna(hist_val) else None
-                except:
-                    pass
-            
-            # RSI
+                ema_fast = hist_df.groupby("code", sort=False)["close"].ewm(
+                    span=macd_fast, adjust=False).mean().droplevel(0)
+                ema_slow = hist_df.groupby("code", sort=False)["close"].ewm(
+                    span=macd_slow, adjust=False).mean().droplevel(0)
+                hist_df["macd_dif"] = ema_fast - ema_slow
+                hist_df["macd_dea"] = hist_df.groupby("code", sort=False)["macd_dif"].ewm(
+                    span=macd_signal, adjust=False).mean().droplevel(0)
+                hist_df["macd_hist"] = (hist_df["macd_dif"] - hist_df["macd_dea"]) * 2
+
+            # RSI14（Wilder 平滑 = ewm(com=n-1)）
             if rsi_conditions:
-                try:
-                    rsi = calc_rsi(close)
-                    val = rsi["RSI14"].iloc[-1]
-                    s["rsi14"] = float(val) if pd.notna(val) else None
-                except:
-                    pass
-            
-            # KDJ
+                delta = hist_df.groupby("code", sort=False)["close"].diff()
+                hist_df["_gain"] = delta.where(delta > 0, 0.0)
+                hist_df["_loss"] = -delta.where(delta < 0, 0.0)
+                avg_gain = hist_df.groupby("code", sort=False)["_gain"].ewm(
+                    com=13, adjust=False).mean().droplevel(0)
+                avg_loss = hist_df.groupby("code", sort=False)["_loss"].ewm(
+                    com=13, adjust=False).mean().droplevel(0)
+                rs = avg_gain / avg_loss.replace(0, np.nan)
+                hist_df["rsi14"] = 100 - (100 / (1 + rs))
+
+            # KDJ（K/D 递推 k=2/3·k_prev+1/3·rsv 等价于 ewm(alpha=1/3)）
             if kdj_conditions:
-                try:
-                    kdj = calc_kdj(high, low, close)
-                    k = kdj["KDJ_K"].iloc[-1]
-                    d = kdj["KDJ_D"].iloc[-1]
-                    j = kdj["KDJ_J"].iloc[-1]
-                    s["kdj_k"] = float(k) if pd.notna(k) else None
-                    s["kdj_d"] = float(d) if pd.notna(d) else None
-                    s["kdj_j"] = float(j) if pd.notna(j) else None
-                except:
-                    pass
-            
-            # 均线
+                low_min = hist_df.groupby("code", sort=False)["low"].rolling(9).min().droplevel(0)
+                high_max = hist_df.groupby("code", sort=False)["high"].rolling(9).max().droplevel(0)
+                hist_df["_rsv"] = (close - low_min) / (high_max - low_min + 1e-10) * 100
+                hist_df["kdj_k"] = hist_df.groupby("code", sort=False)["_rsv"].ewm(
+                    alpha=1.0 / 3, adjust=False).mean().droplevel(0)
+                hist_df["kdj_d"] = hist_df.groupby("code", sort=False)["kdj_k"].ewm(
+                    alpha=1.0 / 3, adjust=False).mean().droplevel(0)
+                hist_df["kdj_j"] = 3 * hist_df["kdj_k"] - 2 * hist_df["kdj_d"]
+
+            # 均线偏离度
             if ma_conditions:
-                try:
-                    ma = calc_ma(close)
-                    # 计算偏离度
-                    s["ma5_dev"] = float((close.iloc[-1] / ma["MA5"].iloc[-1] - 1) * 100) if pd.notna(ma["MA5"].iloc[-1]) else None
-                    s["ma10_dev"] = float((close.iloc[-1] / ma["MA10"].iloc[-1] - 1) * 100) if pd.notna(ma["MA10"].iloc[-1]) else None
-                    s["ma20_dev"] = float((close.iloc[-1] / ma["MA20"].iloc[-1] - 1) * 100) if pd.notna(ma["MA20"].iloc[-1]) else None
-                except:
-                    pass
-            
+                for p in (5, 10, 20):
+                    ma_p = hist_df.groupby("code", sort=False)["close"].rolling(p).mean().droplevel(0)
+                    hist_df[f"ma{p}_dev"] = (close / ma_p - 1) * 100
+
             # 量比
             if vol_conditions:
-                try:
-                    vol = df["volume"]
-                    vol_ma5 = vol.rolling(5).mean().iloc[-1]
-                    if pd.notna(vol_ma5) and vol_ma5 > 0:
-                        s["vol_ratio"] = float(vol.iloc[-1] / vol_ma5)
-                except:
-                    pass
+                vol_ma5 = hist_df.groupby("code", sort=False)["volume"].rolling(5).mean().droplevel(0)
+                hist_df["vol_ratio"] = hist_df["volume"] / vol_ma5.replace(0, np.nan)
+
+            # 末行评估：只取每只股票最新一行的指标值挂到候选列表
+            ind_cols = [c for c in (
+                "macd_dif", "macd_dea", "macd_hist", "rsi14",
+                "kdj_k", "kdj_d", "kdj_j",
+                "ma5_dev", "ma10_dev", "ma20_dev", "vol_ratio",
+            ) if c in hist_df.columns]
+            last_rows = hist_df.groupby("code", sort=False).tail(1).set_index("code")
+            ind_map = last_rows[ind_cols].to_dict("index") if ind_cols else {}
+
+            for s in stocks_with_cap:
+                vals = ind_map.get(s["code"])
+                if not vals:
+                    continue
+                for key, v in vals.items():
+                    s[key] = float(v) if pd.notna(v) else None
     
     # 应用筛选条件
     results = []
