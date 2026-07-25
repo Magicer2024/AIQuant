@@ -1120,7 +1120,26 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     TAKE_PROFIT_SC = 0.20
     START_CAPITAL_SC = 10000
     POSITION_PER_SC = 0.5
-    SIG_THRESHOLD = 15.0
+
+    # P3: 自适应权重与阈值
+    from config.strategy_params import ADAPTIVE_WEIGHTS_ENABLED, DEFAULT_SIG_THRESHOLD
+    if ADAPTIVE_WEIGHTS_ENABLED:
+        try:
+            from strategy.adaptive_weights import get_adaptive_weights, get_adaptive_threshold, detect_market_state
+            _market_state = detect_market_state()
+            _active_weights = get_adaptive_weights(_market_state)
+            SIG_THRESHOLD = get_adaptive_threshold(_market_state)
+            print(f"  [自适应权重] 市场状态: {_market_state['detail']}")
+            print(f"  [自适应权重] 使用权重: {_active_weights}，阈值: {SIG_THRESHOLD}")
+        except Exception as e:
+            print(f"  [WARN] 自适应权重加载失败，回退默认: {e}")
+            from config.strategy_params import DEFAULT_WEIGHTS
+            _active_weights = DEFAULT_WEIGHTS
+            SIG_THRESHOLD = DEFAULT_SIG_THRESHOLD
+    else:
+        from config.strategy_params import DEFAULT_WEIGHTS
+        _active_weights = DEFAULT_WEIGHTS
+        SIG_THRESHOLD = DEFAULT_SIG_THRESHOLD
 
     if target == "watchlist":
         if count_watchlist() == 0:
@@ -1221,7 +1240,7 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                 s3 = strategy_price_volume_divergence(df)
                 s4 = strategy_bottom_fishing(df)
                 s5 = strategy_whale_accumulation(df)
-                fused = fuse_signals([s1, s2, s3, s4, s5], weights=DEFAULT_WEIGHTS)
+                fused = fuse_signals([s1, s2, s3, s4, s5], weights=_active_weights)
                 qual = quality_series(name, df, _ts).reindex(fused.index).fillna(False)
                 for _, row in fused.iterrows():
                     fs = float(row.get("FUSION_SCORE", 0) or 0)
@@ -1344,6 +1363,15 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
         print(f"  常驻规则扫描完成: {rule_result.get('rules', 0)} 条规则 / {rule_hits} 条命中写入 strategy_signals")
     except Exception as e:
         print(f"  [WARN] 常驻规则扫描失败（不影响主流程）: {e}")
+
+    # ── 推荐结果闭环追踪（best-effort）──
+    try:
+        from core.outcome_tracker import insert_new_outcomes, evaluate_outcomes
+        insert_new_outcomes()
+        outcome_updated = evaluate_outcomes()
+        print(f"  推荐结果追踪: {outcome_updated} 条评估更新")
+    except Exception as e:
+        print(f"  [WARN] 推荐结果追踪失败（不影响主流程）: {e}")
 
     return {
         "success": success,

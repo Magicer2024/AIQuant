@@ -351,6 +351,14 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
+                <h3>出场跟踪 · 近10天推荐的出场状态</h3>
+                <span class="text-muted" style="font-size:12px" id="exitTrackHint">基于 v3 出场纪律：硬止损-6% / 浮盈+10%减半 / 回撤10%清仓 / 破MA5离场</span>
+            </div>
+            <div id="exitTrackPanel">加载中…</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
                 <h3>策略规则命中 · 常驻规则今日筛出</h3>
                 <div class="rule-scan-ctl">
                     <label title="只扫 fitness 最高的前 N 条启用规则">Top-N
@@ -406,6 +414,7 @@ async function loadHomeTab(container) {
     await Promise.all([
         loadMarketOverview(),
         loadTodayPicks(),
+        loadExitTrack(),
         loadRuleSignals(),
         loadMyPositions(),
         loadMyWatchlist(),
@@ -912,6 +921,19 @@ async function loadMarketOverview() {
         ` : '';
         if (grid) grid.innerHTML = idxHtml + northHtml;
 
+        // P3: 自适应权重模式
+        const aw = d.adaptive_weights || {};
+        if (aw.regime && aw.regime !== 'unknown') {
+            const regimeEmoji = aw.regime === 'bull' ? '📈' : (aw.regime === 'bear' ? '📉' : '📊');
+            const weightHint = aw.adaptive_enabled ?
+                `${regimeEmoji} ${aw.regime_label} · 权重: 放量${((aw.weights||[])[0]*100).toFixed(0)}% / 均线${((aw.weights||[])[1]*100).toFixed(0)}% / 背离${((aw.weights||[])[2]*100).toFixed(0)}% / 抄底${((aw.weights||[])[3]*100).toFixed(0)}% / 主力${((aw.weights||[])[4]*100).toFixed(0)}%` :
+                '固定权重模式';
+            const weightEl = document.createElement('div');
+            weightEl.style.cssText = 'margin-top:8px;padding:6px 12px;background:rgba(0,212,240,0.06);border-radius:6px;font-size:11px;color:var(--text-secondary)';
+            weightEl.innerHTML = `🎯 策略权重: ${weightHint}`;
+            if (grid) grid.parentElement.appendChild(weightEl);
+        }
+
         const upd = document.getElementById('marketUpdatedAt');
         if (upd && d.updated_at) upd.textContent = '更新于 ' + d.updated_at;
     } catch(e) {
@@ -1075,6 +1097,55 @@ async function loadTodayPicks(isFallback) {
     }
 }
 
+// P0: 出场跟踪（近10天推荐的出场状态）
+async function loadExitTrack() {
+    const box = document.getElementById('exitTrackPanel');
+    if (!box) return;
+    try {
+        const resp = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice?days=10');
+        const d = (resp && resp.data) || {};
+        const items = d.items || [];
+        const summary = d.summary || {};
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-state">暂无需要跟踪的推荐<br><span style="color:var(--text-muted);font-size:12px">推荐后超过1个交易日才会显示出场状态</span></div>';
+            return;
+        }
+        // 汇总徽章
+        let html = `<div class="exit-summary" style="margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap">
+            <span class="exit-sum-chip" style="background:rgba(16,185,129,0.1);color:#10b981;padding:4px 12px;border-radius:12px;font-size:12px">🟢 持有 ${summary.hold||0}</span>
+            <span class="exit-sum-chip" style="background:rgba(255,171,64,0.1);color:#ffab40;padding:4px 12px;border-radius:12px;font-size:12px">🟠 减仓 ${summary.reduce||0}</span>
+            <span class="exit-sum-chip" style="background:rgba(255,77,79,0.1);color:#ff4d4f;padding:4px 12px;border-radius:12px;font-size:12px">🔴 清仓 ${summary.clear||0}</span>
+        </div>`;
+        // 明细表格
+        html += '<div class="table-wrapper"><table><thead><tr>';
+        html += '<th>代码</th><th>名称</th><th>推荐日</th><th>买入价</th><th>持仓天数</th><th>浮盈</th><th>状态</th><th>原因</th>';
+        html += '</tr></thead><tbody>';
+        items.forEach(it => {
+            const detail = it.detail || {};
+            const pnl = detail.current_pnl_pct;
+            const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
+            const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
+            const statusIcon = it.status === 'clear' ? '🔴' : (it.status === 'reduce' ? '🟠' : '🟢');
+            const statusLabel = it.status === 'clear' ? '清仓' : (it.status === 'reduce' ? '减仓' : '持有');
+            const statusCls = it.status === 'clear' ? 'color:var(--danger)' : (it.status === 'reduce' ? 'color:var(--warning)' : 'color:var(--green, #10b981)');
+            html += `<tr>
+                <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
+                <td>${it.name||''}</td>
+                <td>${it.scan_date||''}</td>
+                <td>${it.entry_price||'--'}</td>
+                <td>${detail.hold_days||0}天</td>
+                <td class="${pnlCls}">${pnlStr}</td>
+                <td style="${statusCls};font-weight:600">${statusIcon} ${statusLabel}</td>
+                <td style="font-size:11px;color:var(--text-secondary);max-width:200px">${it.reason||''}</td>
+            </tr>`;
+        });
+        html += '</tbody></table></div>';
+        box.innerHTML = html;
+    } catch(e) {
+        box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
 // 策略规则命中（常驻规则今日筛出，独立于融合分信号）
 async function loadRuleSignals() {
     const box = document.getElementById('ruleSignals');
@@ -1170,6 +1241,20 @@ function renderPickCard(it) {
                 </div>
             ` : '';
 
+            // ── P0: 出场建议徽章 ──
+            const ea = it.exit_advice;
+            let exitHtml = '';
+            if (ea && ea.status) {
+                const eaCls = ea.status === 'clear' ? 'exit-clear' : (ea.status === 'reduce' ? 'exit-reduce' : 'exit-hold');
+                const eaIcon = ea.status === 'clear' ? '🔴' : (ea.status === 'reduce' ? '🟠' : '🟢');
+                const eaLabel = ea.status === 'clear' ? '清仓' : (ea.status === 'reduce' ? '减仓' : '持有');
+                exitHtml = `
+                    <div class="exit-advice-badge ${eaCls}" title="${ea.reason||''}">
+                        <span>${eaIcon} ${eaLabel}</span>
+                        <span class="exit-reason">${ea.reason||''}</span>
+                    </div>`;
+            }
+
             // ── 3 个挂单位置 ──
             let entryHtml = '';
             if (es.aggressive && es.stable && es.conservative) {
@@ -1240,6 +1325,7 @@ function renderPickCard(it) {
                         </div>
                     </div>
                     ${sigHtml}
+                    ${exitHtml}
                     <div class="action-prices">
                         <div class="price-cell buy">
                             <div class="price-lbl">建议买入</div>
@@ -1421,11 +1507,14 @@ async function loadRecHistory() {
             const avgSign = summary.avg_return >= 0 ? '+' : '';
             const bestCls = summary.best_return >= 0 ? 'idx-up' : 'idx-down';
             const worstCls = summary.worst_return >= 0 ? 'idx-up' : 'idx-down';
+            const pf = summary.profit_factor || 0;
+            const pfCls = pf >= 1.5 ? 'idx-up' : (pf >= 1 ? '' : 'idx-down');
             summaryEl.innerHTML = `
                 <div class="metrics-row" style="margin-bottom:12px">
                     <div class="metric-card"><div class="val">${summary.total}</div><div class="lbl">推荐总数</div></div>
                     <div class="metric-card"><div class="val" style="color:${summary.win_rate>=50?'var(--green, #10b981)':'var(--danger)'}">${summary.win_rate}%</div><div class="lbl">胜率</div></div>
                     <div class="metric-card"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
+                    <div class="metric-card"><div class="val ${pfCls}">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
                     <div class="metric-card"><div class="val ${bestCls}">+${summary.best_return}%</div><div class="lbl">最佳</div></div>
                     <div class="metric-card"><div class="val ${worstCls}">${summary.worst_return}%</div><div class="lbl">最差</div></div>
                     <div class="metric-card"><div class="val" style="color:var(--danger)">${summary.stop_loss_count||0}</div><div class="lbl">触发止损</div></div>
@@ -1437,7 +1526,7 @@ async function loadRecHistory() {
         if (tableEl) {
             const show = items.slice(0, 15);
             let html = '<div class="table-wrapper"><table><thead><tr>';
-            html += '<th>代码</th><th>名称</th><th>推荐日</th><th>买入价</th><th>当前价</th><th>收益</th><th>状态</th>';
+            html += '<th>代码</th><th>名称</th><th>推荐日</th><th>买入价</th><th>T+1</th><th>T+3</th><th>T+5</th><th>收益</th><th>状态</th>';
             html += '</tr></thead><tbody>';
             show.forEach(r => {
                 const pnlCls = r.pnl_pct >= 0 ? 'positive' : 'negative';
@@ -1445,12 +1534,16 @@ async function loadRecHistory() {
                 let status = '持有中';
                 if (r.hit_stop_loss) status = '<span style="color:var(--danger)">已止损</span>';
                 else if (r.hit_take_profit) status = '<span style="color:var(--green, #10b981)">已止盈</span>';
+                else if (r.exit_reason === 'max_hold_days') status = '<span style="color:var(--text-muted)">到期出场</span>';
+                const fmtRet = (v) => v != null ? `<span class="${v>=0?'positive':'negative'}">${v>=0?'+':''}${v}%</span>` : '--';
                 html += `<tr>
                     <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
                     <td>${r.name||''}</td>
                     <td>${r.scan_date||''}</td>
-                    <td>${r.entry_price}</td>
-                    <td>${r.current_price}</td>
+                    <td>${r.entry_price||'--'}</td>
+                    <td>${fmtRet(r.t1_return)}</td>
+                    <td>${fmtRet(r.t3_return)}</td>
+                    <td>${fmtRet(r.t5_return)}</td>
                     <td class="${pnlCls}">${sign}${r.pnl_pct}%</td>
                     <td>${status}</td>
                 </tr>`;

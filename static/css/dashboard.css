@@ -831,6 +831,35 @@ tr:hover td {
     color: #ffab40;
 }
 
+/* ── P0: 出场建议徽章 ── */
+.exit-advice-badge {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    margin: 6px 0;
+    border-radius: 8px;
+    font-size: 12px; font-weight: 600;
+}
+.exit-advice-badge .exit-reason {
+    font-weight: 400;
+    font-size: 11px;
+    opacity: 0.85;
+}
+.exit-advice-badge.exit-hold {
+    background: rgba(16,185,129,0.1);
+    color: #10b981;
+    border: 1px solid rgba(16,185,129,0.3);
+}
+.exit-advice-badge.exit-reduce {
+    background: rgba(255,171,64,0.1);
+    color: #ffab40;
+    border: 1px solid rgba(255,171,64,0.3);
+}
+.exit-advice-badge.exit-clear {
+    background: rgba(255,77,79,0.1);
+    color: #ff4d4f;
+    border: 1px solid rgba(255,77,79,0.3);
+}
+
 /* ── 3 个挂单位置 ── */
 .entry-strategy {
     padding: 8px 0 4px;

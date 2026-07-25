@@ -148,8 +148,50 @@ def _ensure_personal_tables():
 
 
 # ─────────────────────────────────────────────
-# 1. 今日推荐：直接告诉散户"买什么、什么价买、什么价卖、什么价止损"
+# 1. 今日推荐：直接告诉散户“买什么、什么价买、什么价卖、什么价止损”
 # ─────────────────────────────────────────────
+
+def _get_exit_advice(d: dict) -> Optional[dict]:
+    """P0: 对推荐日后 10 天内的票评估出场状态。
+
+    返回 None（新推荐，无需出场评估）或 {status, reason, detail}。
+    """
+    scan_date = d.get("scan_date")
+    entry = d.get("buy_price") or d.get("signal_price") or 0
+    if not scan_date or not entry or entry <= 0:
+        return None
+
+    # 只对推荐日后 10 天内的票评估
+    try:
+        from datetime import datetime as _dt
+        scan_dt = _dt.strptime(str(scan_date)[:10], "%Y-%m-%d")
+        days_since = (_dt.now() - scan_dt).days
+        if days_since > 14 or days_since < 0:  # 超过 14 天不再评估
+            return None
+    except (ValueError, TypeError):
+        return None
+
+    try:
+        from strategy.exit_advisor import evaluate_exit
+        import pandas as pd
+        code = d.get("code")
+        if not code:
+            return None
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT trade_date, close, high, low
+                FROM daily_price WHERE code = ?
+                ORDER BY trade_date ASC
+            """, (code,)).fetchall()
+        if not rows:
+            return None
+        df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+        advice = evaluate_exit(entry_price=entry, entry_date=str(scan_date)[:10], df=df)
+        return advice
+    except Exception:
+        return None
+
+
 @investor_bp.route("/today", methods=["GET"])
 def today_recommendations():
     """今日推荐（action plan）—— 按 short/mid/long 三周期分组
@@ -434,6 +476,7 @@ def today_recommendations():
                 "entry_strategy": entry_strategy,   # 新增
                 "position_plan": position_plan,     # 新增
                 "signal": signal,                   # 新增
+                "exit_advice": _get_exit_advice(d),  # P0: 出场建议
                 "reasons": reasons,
                 "weaknesses": weaknesses,
                 "triggers": triggers,
@@ -465,9 +508,115 @@ def available_dates():
         return ok({"dates": dates})
 
 
+@investor_bp.route("/exit_advice", methods=["GET"])
+def exit_advice():
+    """出场建议：对近 N 个交易日的推荐评估出场状态
+    GET /api/investor/exit_advice?days=10
+    返回每条推荐的出场状态：hold/reduce/clear + 原因 + 详情
+    """
+    days = request.args.get("days", 10, type=int)
+    days = max(1, min(days, 30))
+
+    try:
+        from strategy.exit_advisor import evaluate_exit
+        from core.db import get_conn as _get_conn
+        import pandas as pd
+
+        with _get_conn() as conn:
+            # 取近 N 个交易日的推荐记录
+            signals = conn.execute("""
+                SELECT s.code, s.name, s.scan_date, s.buy_price,
+                       s.stop_loss, s.take_profit, s.fusion_score,
+                       COALESCE(s.horizon, 'short') AS horizon,
+                       s.strategy
+                FROM stock_signal s
+                WHERE s.scan_date >= date('now', ?)
+                  AND s.buy_price IS NOT NULL
+                  AND s.buy_price > 0
+                ORDER BY s.scan_date DESC
+            """, (f"-{days} days",)).fetchall()
+
+            if not signals:
+                return ok({"items": [], "count": 0, "days": days})
+
+            # 按 (code, scan_date) 去重
+            seen = set()
+            unique_signals = []
+            for s in signals:
+                key = (s["code"], s["scan_date"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_signals.append(s)
+
+            results = []
+            for sig in unique_signals:
+                code = sig["code"]
+                scan_date = sig["scan_date"]
+                entry_price = sig["buy_price"]
+
+                # 加载该股日线数据
+                rows = conn.execute("""
+                    SELECT trade_date, close, high, low
+                    FROM daily_price
+                    WHERE code = ?
+                    ORDER BY trade_date ASC
+                """, (code,)).fetchall()
+
+                if not rows:
+                    continue
+
+                df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+
+                # 评估出场状态
+                advice = evaluate_exit(
+                    entry_price=entry_price,
+                    entry_date=scan_date,
+                    df=df,
+                )
+
+                results.append({
+                    "code": code,
+                    "name": sig["name"],
+                    "scan_date": scan_date,
+                    "horizon": sig["horizon"],
+                    "strategy": sig["strategy"],
+                    "entry_price": round(entry_price, 2),
+                    "fusion_score": round(sig["fusion_score"] or 0, 1),
+                    "status": advice["status"],
+                    "reason": advice["reason"],
+                    "detail": advice["detail"],
+                })
+
+        # 按状态排序：clear > reduce > hold
+        status_order = {"clear": 0, "reduce": 1, "hold": 2}
+        results.sort(key=lambda x: (status_order.get(x["status"], 3), x["scan_date"]))
+
+        return ok(_sanitize({
+            "items": results,
+            "count": len(results),
+            "days": days,
+            "summary": {
+                "hold": sum(1 for r in results if r["status"] == "hold"),
+                "reduce": sum(1 for r in results if r["status"] == "reduce"),
+                "clear": sum(1 for r in results if r["status"] == "clear"),
+            },
+        }))
+    except Exception as e:
+        return fail(f"出场建议评估失败: {e}", 500)
+
+
 # ─────────────────────────────────────────────
 # 2. 市场速览：指数涨跌 + 北向资金 + 大盘冷热
 # ─────────────────────────────────────────────
+
+def _get_adaptive_weights_info() -> dict:
+    """P3: 获取自适应权重信息（供 market-overview API 返回）。"""
+    try:
+        from strategy.adaptive_weights import get_market_summary
+        return get_market_summary()
+    except Exception:
+        return {"regime": "unknown", "regime_label": "未知", "adaptive_enabled": False}
+
 @investor_bp.route("/market-overview", methods=["GET"])
 def market_overview():
     """市场速览：核心指数 + 北向资金 + 大盘情绪冷热"""
@@ -582,6 +731,7 @@ def market_overview():
                 "avg_pct": round(avg_pct, 2) if avg_pct is not None else None,
                 "total_amount": round(total_amt / 1e8, 1) if total_amt else None,  # 亿
             },
+            "adaptive_weights": _get_adaptive_weights_info(),  # P3: 自适应权重
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
@@ -880,13 +1030,83 @@ def risk_alerts():
 # ─────────────────────────────────────────────
 # 6. 历史推荐回测：过去 30 天推荐的真实表现
 # ─────────────────────────────────────────────
+@investor_bp.route("/outcome_summary", methods=["GET"])
+def outcome_summary():
+    """推荐胜率闭环汇总（从 recommend_outcome 表读取）
+    GET /api/investor/outcome_summary?days=30
+    """
+    days = request.args.get("days", 30, type=int)
+    days = max(1, min(days, 90))
+    try:
+        from core.outcome_tracker import get_summary
+        summary = get_summary(days)
+        return ok({"summary": summary, "days": days})
+    except Exception as e:
+        return fail(f"查询失败: {e}", 500)
+
+
+@investor_bp.route("/outcome_list", methods=["GET"])
+def outcome_list():
+    """推荐结果明细列表
+    GET /api/investor/outcome_list?days=30&limit=200
+    """
+    days = request.args.get("days", 30, type=int)
+    days = max(1, min(days, 90))
+    limit = request.args.get("limit", 200, type=int)
+    limit = max(1, min(limit, 500))
+    try:
+        from core.outcome_tracker import get_outcome_list
+        items = get_outcome_list(days, limit)
+        return ok(_sanitize({"items": items, "days": days, "total": len(items)}))
+    except Exception as e:
+        return fail(f"查询失败: {e}", 500)
+
 @investor_bp.route("/recommendations/history", methods=["GET"])
 def recommendations_history():
     """历史推荐回测：过去 N 天推荐的股票，到今天的实际涨跌
     GET /api/investor/recommendations/history?days=30
+    优先从 recommend_outcome 表读取持久化数据，fallback 到实时计算。
     """
     days = request.args.get("days", "30", type=int)
     days = max(1, min(days, 90))
+
+    # 优先尝试从 recommend_outcome 读取
+    try:
+        from core.outcome_tracker import get_outcome_list, get_summary
+        items = get_outcome_list(days, 200)
+        if items:
+            summary = get_summary(days)
+            # 转换为前端兼容格式
+            results = []
+            for it in items:
+                ret = it.get("exit_return") or it.get("t5_return") or it.get("t3_return") or it.get("t1_return") or 0
+                results.append({
+                    "code": it["code"],
+                    "name": None,  # outcome 表不存 name，前端可后续补
+                    "scan_date": it["scan_date"],
+                    "entry_price": round(it["entry_price"], 2) if it.get("entry_price") else None,
+                    "current_price": None,
+                    "pnl_pct": ret,
+                    "hit_stop_loss": bool(it.get("hit_stop")),
+                    "hit_take_profit": bool(it.get("hit_tp")),
+                    "fusion_score": round(it.get("fusion_score") or 0, 1),
+                    "t1_return": it.get("t1_return"),
+                    "t3_return": it.get("t3_return"),
+                    "t5_return": it.get("t5_return"),
+                    "exit_reason": it.get("exit_reason"),
+                    "days_held": None,
+                })
+            results.sort(key=lambda x: x["pnl_pct"], reverse=True)
+            return ok({
+                "items": _sanitize(results),
+                "summary": summary,
+                "days": days,
+                "source": "recommend_outcome",
+            })
+    except Exception:
+        pass  # fallback 到实时计算
+
+    # Fallback: 实时计算（原有逻辑）
 
     with get_conn() as conn:
         # 获取最近 N 天的推荐记录（stock_signal 中有 buy_price 的）

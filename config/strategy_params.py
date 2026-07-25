@@ -10,6 +10,23 @@ DEFAULT_WEIGHTS = [0.30, 0.15, 0.20, 0.20, 0.15]
 # 纯抄底策略（历史实验配置）
 PURE_BOTTOM_WEIGHTS = [0.00, 0.00, 0.00, 1.00, 0.00]
 
+# ── P3: 自适应权重配置 ─────────────────────────
+ADAPTIVE_WEIGHTS_ENABLED = True  # 总开关
+
+# 牛市/上升趋势：加重放量突破+均线
+BULL_WEIGHTS = [0.35, 0.25, 0.15, 0.10, 0.15]
+
+# 震荡市：默认均衡
+RANGE_WEIGHTS = [0.30, 0.15, 0.20, 0.20, 0.15]
+
+# 熊市/下跌趋势：加重抄底+背离
+BEAR_WEIGHTS = [0.15, 0.10, 0.30, 0.30, 0.15]
+
+# 融合分阈值（SIG_THRESHOLD）
+DEFAULT_SIG_THRESHOLD = 15.0
+HIGH_VOL_THRESHOLD = 0.02       # 20日波动率 > 2% 视为高波动
+HIGH_VOL_SIG_THRESHOLD = 18.0   # 高波动时提高阈值
+
 # ── 策略1：放量突破 ────────────────────────────
 VOLUME_BREAKOUT = {
     "vol_factor": 1.5,    # 放量倍数

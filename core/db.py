@@ -503,6 +503,34 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 );
 CREATE INDEX IF NOT EXISTS idx_bt_trades_result ON backtest_trades(result_id);
 CREATE INDEX IF NOT EXISTS idx_bt_trades_code ON backtest_trades(code);
+
+-- 推荐结果闭环追踪
+CREATE TABLE IF NOT EXISTS recommend_outcome (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    code            TEXT NOT NULL,
+    scan_date       TEXT NOT NULL,
+    horizon         TEXT DEFAULT 'short',
+    strategy        TEXT,
+    entry_price     REAL,
+    stop_loss       REAL,
+    take_profit     REAL,
+    fusion_score    REAL,
+    t1_return       REAL,
+    t3_return       REAL,
+    t5_return       REAL,
+    t10_return      REAL,
+    max_return      REAL,
+    min_return      REAL,
+    hit_stop        INTEGER DEFAULT 0,
+    hit_tp          INTEGER DEFAULT 0,
+    exit_reason     TEXT,
+    exit_date       TEXT,
+    exit_return     REAL,
+    evaluated_at    TEXT,
+    UNIQUE(code, scan_date, horizon)
+);
+CREATE INDEX IF NOT EXISTS idx_outcome_scan ON recommend_outcome(scan_date);
+CREATE INDEX IF NOT EXISTS idx_outcome_code ON recommend_outcome(code);
         """)
 
         # ── 2. 迁移：为旧版 daily_price 补充策略评分列 ────────────
