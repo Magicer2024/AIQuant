@@ -408,6 +408,15 @@ async function loadHomeTab(container) {
             <div id="recHistorySummary"></div>
             <div id="recHistoryTable">加载中…</div>
         </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>推荐复盘 · 胜率追踪（出场纪律口径）</h3>
+                <span class="text-muted" style="font-size:12px">按止损/止盈/到期出场后的最终收益统计</span>
+            </div>
+            <div id="outcomeReviewSummary"></div>
+            <div id="outcomeReviewTable">加载中…</div>
+        </div>
     `;
 
     // 并行加载所有数据
@@ -421,6 +430,7 @@ async function loadHomeTab(container) {
         loadAlertsBanner(),
         loadExplainerGrid(),
         loadRecHistory(),
+        loadOutcomeReview(),
         loadSyncStatusPanel(),
     ]);
 
@@ -600,6 +610,42 @@ async function loadScreenTab(container) {
                     <input type="checkbox" id="scr_vol_shrink" class="scr-vol" style="accent-color:var(--accent)"> 缩量 (量比<0.5)
                 </label>
             </div>
+            
+            <!-- 换手率 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">换手率</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                    <input type="number" id="scr_turnover_min" placeholder="不限" step="0.5" min="0" style="width:60px;font-size:12px;color:#f0f4ff;background:#0a0f1e;border:1px solid #182240;border-radius:2px;">
+                    <span style="font-size:12px;color:var(--text-muted)">% ~</span>
+                    <input type="number" id="scr_turnover_max" placeholder="不限" step="0.5" min="0" style="width:60px;font-size:12px;color:#f0f4ff;background:#0a0f1e;border:1px solid #182240;border-radius:2px;">
+                    <span style="font-size:12px;color:var(--text-muted)">%</span>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted)">经验：3~10% 为活跃，>15% 需警惕</div>
+            </div>
+            
+            <!-- 涨跌幅 -->
+            <div style="min-width:200px;">
+                <div style="font-weight:600;margin-bottom:8px;color:var(--accent)">涨跌幅</div>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_chg_up" class="scr-chg" style="accent-color:var(--danger)"> 今日上涨
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_chg_down" class="scr-chg" style="accent-color:var(--green, #10b981)"> 今日下跌
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_chg_limit_up" class="scr-chg" style="accent-color:var(--danger)"> 涨停 (≥+9.8%)
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+                    <input type="checkbox" id="scr_chg_limit_down" class="scr-chg" style="accent-color:var(--green, #10b981)"> 跌停 (≤-9.8%)
+                </label>
+            </div>
+        </div>
+        
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-muted)">一键策略模板：</span>
+            <button class="btn btn-sm" onclick="applyScreenTemplate('oversold_rebound')" title="RSI超卖 + KDJ金叉，找超跌后刚启动的票">🎯 超跌反弹</button>
+            <button class="btn btn-sm" onclick="applyScreenTemplate('strong_breakout')" title="MACD金叉 + 均线多头 + 放量，找强势突破票">🚀 强势突破</button>
+            <button class="btn btn-sm" onclick="applyScreenTemplate('active_smallcap')" title="市值≤100亿 + 换手3~15% + 站上20日线，找活跃小盘票">⚡ 活跃小盘</button>
         </div>
         
         <div style="display:flex;gap:8px;margin-bottom:16px;">
@@ -627,10 +673,37 @@ function clearScreenFilters() {
     document.getElementById('scr_macd_dea_val').value = '0';
     document.getElementById('scr_macd_hist_op').value = '';
     document.getElementById('scr_macd_hist_val').value = '0';
+    document.getElementById('scr_turnover_min').value = '';
+    document.getElementById('scr_turnover_max').value = '';
     document.getElementById('screenTableContainer').innerHTML = '<div class="empty-state">请勾选筛选条件后点击"开始筛选"</div>';
     document.getElementById('screenMetrics').innerHTML = '';
     document.getElementById('screenStatus').textContent = '';
     screenClusterize = null;
+}
+
+// 一键策略模板：预设条件组合，勾选后自动触发筛选
+function applyScreenTemplate(name) {
+    clearScreenFilters();
+    if (name === 'oversold_rebound') {
+        // 超跌反弹：RSI超卖 + KDJ金叉
+        document.getElementById('scr_rsi_oversold').checked = true;
+        document.getElementById('scr_kdj_golden').checked = true;
+        showToast('已应用模板：超跌反弹（RSI超卖 + KDJ金叉）', 'info');
+    } else if (name === 'strong_breakout') {
+        // 强势突破：MACD金叉 + 均线多头 + 放量
+        document.getElementById('scr_macd_golden').checked = true;
+        document.getElementById('scr_ma_bull').checked = true;
+        document.getElementById('scr_vol_surge').checked = true;
+        showToast('已应用模板：强势突破（MACD金叉 + 均线多头 + 放量）', 'info');
+    } else if (name === 'active_smallcap') {
+        // 活跃小盘：市值≤100亿 + 换手3~15% + 站上20日线
+        document.getElementById('scr_marketCap').value = '100';
+        document.getElementById('scr_turnover_min').value = '3';
+        document.getElementById('scr_turnover_max').value = '15';
+        document.getElementById('scr_ma_above20').checked = true;
+        showToast('已应用模板：活跃小盘（市值≤100亿 + 换手3~15% + 站上20日线）', 'info');
+    }
+    runScreen();
 }
 
 async function runScreen() {
@@ -698,11 +771,27 @@ async function runScreen() {
     if (document.getElementById('scr_vol_surge').checked) filters.vol.push('surge');
     if (document.getElementById('scr_vol_shrink').checked) filters.vol.push('shrink');
     
+    // 换手率区间
+    var toMin = parseFloat(document.getElementById('scr_turnover_min').value);
+    var toMax = parseFloat(document.getElementById('scr_turnover_max').value);
+    if (!isNaN(toMin) || !isNaN(toMax)) {
+        filters.turnover = {};
+        if (!isNaN(toMin)) filters.turnover.min = toMin;
+        if (!isNaN(toMax)) filters.turnover.max = toMax;
+    }
+    
+    // 涨跌幅条件
+    filters.change = [];
+    if (document.getElementById('scr_chg_up').checked) filters.change.push('up');
+    if (document.getElementById('scr_chg_down').checked) filters.change.push('down');
+    if (document.getElementById('scr_chg_limit_up').checked) filters.change.push('limit_up');
+    if (document.getElementById('scr_chg_limit_down').checked) filters.change.push('limit_down');
+    
     // 检查是否有筛选条件
     var hasFilter = filters.exclude_kcb || filters.exclude_cyb || filters.max_market_cap > 0 ||
         filters.macd.length > 0 || filters.rsi.length > 0 || filters.kdj.length > 0 ||
-        filters.ma.length > 0 || filters.vol.length > 0 ||
-        filters.macd_dif || filters.macd_dea || filters.macd_hist;
+        filters.ma.length > 0 || filters.vol.length > 0 || filters.change.length > 0 ||
+        filters.turnover || filters.macd_dif || filters.macd_dea || filters.macd_hist;
     
     if (!hasFilter) {
         showToast('请至少勾选一个筛选条件', 'warning');
@@ -1355,6 +1444,19 @@ function renderPickCard(it) {
                 </div>`;
 }
 
+// 渲染持仓出场诊断徽章（清仓/减仓/持有）
+function renderPositionAdvice(advice) {
+    if (!advice || !advice.status) return '';
+    const map = {
+        clear:  { color: 'var(--danger)',  icon: '⛔', label: '建议清仓' },
+        reduce: { color: 'var(--warning)', icon: '⚠', label: '建议减仓' },
+        hold:   { color: 'var(--text-muted)', icon: '✓', label: '持有' },
+    };
+    const m = map[advice.status] || map.hold;
+    const reason = advice.reason ? ' · ' + advice.reason : '';
+    return `<div style="padding:4px 10px;font-size:12px;color:${m.color};border-left:2px solid ${m.color};background:rgba(255,255,255,0.02);margin-top:2px">${m.icon} 诊断：${m.label}${reason}</div>`;
+}
+
 async function loadMyPositions() {
     const box = document.getElementById('myPositions');
     try {
@@ -1381,6 +1483,7 @@ async function loadMyPositions() {
             const pnlCls2 = p.pnl >= 0 ? 'idx-up' : 'idx-down';
             const sign2 = p.pnl >= 0 ? '+' : '';
             const warnHtml = p.warning ? `<div class="position-warn">⚠ ${p.warning}</div>` : '';
+            const adviceHtml = renderPositionAdvice(p.advice);
             const pname = (p.name||p.code).replace(/'/g, "\\'");
             return `
             <div class="position-row">
@@ -1400,7 +1503,7 @@ async function loadMyPositions() {
                     <div class="pr-pct-sm ${pnlCls2}">${sign2}${p.pnl_pct}%</div>
                 </div>
                 <button class="btn btn-danger btn-sm" onclick="closeMyPosition(${p.id})" title="平仓">×</button>
-            </div>${warnHtml}`;
+            </div>${warnHtml}${adviceHtml}`;
         }).join('');
 
         box.innerHTML = html;
@@ -1428,11 +1531,27 @@ async function loadMyWatchlist() {
                 ? `<button class="btn btn-sm" style="margin-left:6px" onclick="resyncOneStock('${w.code}')" title="无行情数据，点击立即补拉">拉取</button>`
                 : '';
             const wname = (w.name||w.code).replace(/'/g, "\\'");
+            // 目标价小字：有目标价时显示 "目标 12.50 · 距 +3.2%"，触达时高亮
+            let targetHtml = '';
+            if (w.target_price != null) {
+                const dirTxt = w.alert_dir === 'below' ? '↓' : '↑';
+                let distTxt = '';
+                if (w.target_distance_pct != null) {
+                    const ds = w.target_distance_pct >= 0 ? '+' : '';
+                    distTxt = ` · 距 ${ds}${w.target_distance_pct}%`;
+                }
+                const hit = w.latest_close != null && (
+                    (w.alert_dir === 'below' && w.latest_close <= w.target_price) ||
+                    (w.alert_dir !== 'below' && w.latest_close >= w.target_price));
+                const tColor = hit ? 'var(--warning)' : 'var(--text-muted)';
+                targetHtml = `<div style="font-size:11px;color:${tColor}">${dirTxt} 目标 ${w.target_price}${distTxt}${hit?' · 已触达':''}</div>`;
+            }
             return `
             <div class="watch-row">
                 <div class="wr-left" onclick="openKline('${w.code}')">
                     <div class="wr-name">${w.name||w.code}</div>
                     <div class="wr-code">${w.code}${w.industry?` · ${w.industry}`:''}</div>
+                    ${targetHtml}
                 </div>
                 <div class="wr-mid">
                     <div class="wr-price">${w.latest_close?w.latest_close.toFixed(2):'--'}</div>
@@ -1556,6 +1675,75 @@ async function loadRecHistory() {
     }
 }
 
+// 推荐复盘：recommend_outcome 表的胜率闭环统计（出场纪律口径）
+async function loadOutcomeReview() {
+    const summaryEl = document.getElementById('outcomeReviewSummary');
+    const tableEl = document.getElementById('outcomeReviewTable');
+    try {
+        const [sumResp, listResp] = await Promise.all([
+            RequestManager.fetch('outcome-summary', API + '/investor/outcome_summary?days=30'),
+            RequestManager.fetch('outcome-list', API + '/investor/outcome_list?days=30&limit=50'),
+        ]);
+        const summary = (sumResp.data || {}).summary || {};
+        const items = (listResp.data || {}).items || [];
+
+        if (!summary.total) {
+            if (summaryEl) summaryEl.innerHTML = '';
+            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无复盘数据<br><span style="color:var(--text-muted);font-size:12px">推荐产生后经过重算会自动归档到这里</span></div>';
+            return;
+        }
+
+        if (summaryEl) {
+            const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
+            const avgSign = summary.avg_return >= 0 ? '+' : '';
+            const pf = summary.profit_factor || 0;
+            const pfCls = pf >= 1.5 ? 'idx-up' : (pf >= 1 ? '' : 'idx-down');
+            summaryEl.innerHTML = `
+                <div class="metrics-row" style="margin-bottom:12px">
+                    <div class="metric-card"><div class="val">${summary.total}</div><div class="lbl">复盘样本</div></div>
+                    <div class="metric-card"><div class="val" style="color:${summary.win_rate>=50?'var(--green, #10b981)':'var(--danger)'}">${summary.win_rate}%</div><div class="lbl">胜率</div></div>
+                    <div class="metric-card"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
+                    <div class="metric-card"><div class="val ${pfCls}">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
+                    <div class="metric-card"><div class="val" style="color:var(--danger)">${summary.stop_loss_count||0}</div><div class="lbl">止损次数</div></div>
+                    <div class="metric-card"><div class="val" style="color:var(--green, #10b981)">${summary.take_profit_count||0}</div><div class="lbl">止盈次数</div></div>
+                </div>`;
+        }
+
+        if (tableEl) {
+            if (items.length === 0) {
+                tableEl.innerHTML = '<div class="empty-state">暂无明细</div>';
+                return;
+            }
+            const show = items.slice(0, 15);
+            const fmtRet = (v) => v != null ? `<span class="${v>=0?'positive':'negative'}">${v>=0?'+':''}${v}%</span>` : '--';
+            const exitTxt = (r) => {
+                if (r.hit_stop) return '<span style="color:var(--danger)">止损</span>';
+                if (r.hit_tp) return '<span style="color:var(--green, #10b981)">止盈</span>';
+                if (r.exit_reason === 'max_hold_days') return '<span style="color:var(--text-muted)">到期</span>';
+                return r.exit_reason ? r.exit_reason : '跟踪中';
+            };
+            let html = '<div class="table-wrapper"><table><thead><tr>';
+            html += '<th>代码</th><th>推荐日</th><th>买入价</th><th>T+5收益</th><th>最终收益</th><th>出场方式</th>';
+            html += '</tr></thead><tbody>';
+            show.forEach(r => {
+                const finalRet = r.exit_return != null ? r.exit_return : r.t5_return;
+                html += `<tr>
+                    <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
+                    <td>${r.scan_date||''}</td>
+                    <td>${r.entry_price!=null?r.entry_price.toFixed(2):'--'}</td>
+                    <td>${fmtRet(r.t5_return)}</td>
+                    <td>${fmtRet(finalRet)}</td>
+                    <td>${exitTxt(r)}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+            tableEl.innerHTML = html;
+        }
+    } catch(e) {
+        if (tableEl) tableEl.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
 async function showExplainDialog(key) {
     try {
         const resp = await RequestManager.fetch('explain-' + key, API + '/investor/explain/' + key);
@@ -1638,6 +1826,12 @@ function showAddWatchlistDialog() {
         <div style="line-height:1.7">
             <div style="margin-bottom:10px"><label>股票代码 <input type="text" id="addWatchCode" placeholder="如 002150" style="width:120px"></label></div>
             <div style="margin-bottom:10px"><label>备注 <input type="text" id="addWatchNote" placeholder="例如：底部启动" style="width:240px"></label></div>
+            <div style="margin-bottom:10px"><label>目标价 <input type="number" step="0.01" id="addWatchTarget" placeholder="选填，如 12.50" style="width:120px"></label>
+                <select id="addWatchDir" style="margin-left:6px">
+                    <option value="above">涨到提醒</option>
+                    <option value="below">跌到提醒</option>
+                </select>
+            </div>
             <div style="margin-top:16px"><button class="btn btn-primary" onclick="submitAddWatch()">加入自选</button></div>
         </div>
     `;
@@ -1647,12 +1841,15 @@ function showAddWatchlistDialog() {
 async function submitAddWatch() {
     const code = document.getElementById('addWatchCode').value.trim();
     const note = document.getElementById('addWatchNote').value.trim();
+    const targetRaw = document.getElementById('addWatchTarget').value.trim();
+    const target_price = targetRaw ? parseFloat(targetRaw) : null;
+    const alert_dir = document.getElementById('addWatchDir').value || 'above';
     if (!code) { showToast('请填写代码', 'warning'); return; }
     try {
         const resp = await RequestManager.fetch('add-watch', API + '/api/investor/watchlist', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({code, note}),
+            body: JSON.stringify({code, note, target_price, alert_dir}),
         });
         const data = (resp && resp.data) || {};
         if (data.sync_status === 'syncing') {

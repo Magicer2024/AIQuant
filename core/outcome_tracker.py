@@ -27,6 +27,8 @@ def insert_new_outcomes(days_back: int = 60):
     """将 stock_signal 中近 N 天、尚未录入 recommend_outcome 的推荐写入。
 
     去重逻辑：UNIQUE(code, scan_date, horizon)，INSERT OR IGNORE。
+    口径：stock_signal 每天写入近乎全市场打分，只有每天每周期
+    fusion_score 前 8 名才是真正的「推荐」（与今日推荐面板一致）。
     """
     cutoff = f"-{days_back} days"
     with get_conn() as conn:
@@ -34,19 +36,30 @@ def insert_new_outcomes(days_back: int = 60):
             INSERT OR IGNORE INTO recommend_outcome
                 (code, scan_date, horizon, strategy, entry_price,
                  stop_loss, take_profit, fusion_score)
-            SELECT
-                s.code,
-                s.scan_date,
-                COALESCE(s.horizon, 'short'),
-                s.strategy,
-                s.buy_price,
-                s.stop_loss,
-                s.take_profit,
-                s.fusion_score
-            FROM stock_signal s
-            WHERE s.scan_date >= date('now', ?)
-              AND s.buy_price IS NOT NULL
-              AND s.buy_price > 0
+            SELECT code, scan_date, horizon, strategy, buy_price,
+                   stop_loss, take_profit, fusion_score
+            FROM (
+                SELECT
+                    s.code,
+                    s.scan_date,
+                    COALESCE(s.horizon, 'short') AS horizon,
+                    s.strategy,
+                    s.buy_price,
+                    s.stop_loss,
+                    s.take_profit,
+                    s.fusion_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
+                        ORDER BY COALESCE(s.fusion_score, 0) DESC
+                    ) AS rn
+                FROM stock_signal s
+                WHERE s.scan_date >= date('now', ?)
+                  AND s.buy_price IS NOT NULL
+                  AND s.buy_price > 0
+                  AND s.name NOT LIKE '%ST%'
+                  AND s.name NOT LIKE '%退%'
+            )
+            WHERE rn <= 8
         """, (cutoff,))
 
 

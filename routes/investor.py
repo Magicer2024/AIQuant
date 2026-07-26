@@ -13,7 +13,7 @@ import json
 from datetime import date, datetime
 from typing import Optional
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request
 
 from core.db import get_conn, _safe_add_column, init_db
 from utils.api import ok, fail
@@ -145,6 +145,9 @@ def _ensure_personal_tables():
         """)
         # stock_info 可能缺少 industry 列（个人投资者会希望按行业筛选）
         _safe_add_column(conn, "stock_info", "industry", "TEXT")
+        # 自选股价格预警：目标价 + 触发方向（above=现价↑目标 / below=现价↓目标）
+        _safe_add_column(conn, "personal_watchlist", "target_price", "REAL")
+        _safe_add_column(conn, "personal_watchlist", "alert_dir", "TEXT")
 
 
 # ─────────────────────────────────────────────
@@ -248,16 +251,13 @@ def today_recommendations():
                     s.trigger_list, s.scan_date, s.trade_date,
                     COALESCE(s.horizon, 'short') AS horizon,
                     s.strategy,
-                    dp.close  AS latest_close,
-                    dp.pct_change AS latest_pct,
-                    dp.high   AS latest_high,
-                    dp.low    AS latest_low,
+                    lp.close  AS latest_close,
+                    lp.pct_change AS latest_pct,
+                    lp.high   AS latest_high,
+                    lp.low    AS latest_low,
                     i.industry
                 FROM stock_signal s
-                LEFT JOIN daily_price dp
-                    ON dp.code = s.code AND dp.trade_date = (
-                        SELECT MAX(trade_date) FROM daily_price WHERE code = s.code
-                    )
+                LEFT JOIN latest_price lp ON lp.code = s.code
                 LEFT JOIN stock_info i ON i.code = s.code
                 WHERE s.scan_date = ?
                   AND COALESCE(s.horizon, 'short') = ?
@@ -524,16 +524,29 @@ def exit_advice():
 
         with _get_conn() as conn:
             # 取近 N 个交易日的推荐记录
+            # 注意：stock_signal 每天写入近乎全市场打分（数千条均带 buy_price），
+            # 必须与「今日推荐」口径对齐：每天每周期只取 fusion_score 前 8 名
             signals = conn.execute("""
-                SELECT s.code, s.name, s.scan_date, s.buy_price,
-                       s.stop_loss, s.take_profit, s.fusion_score,
-                       COALESCE(s.horizon, 'short') AS horizon,
-                       s.strategy
-                FROM stock_signal s
-                WHERE s.scan_date >= date('now', ?)
-                  AND s.buy_price IS NOT NULL
-                  AND s.buy_price > 0
-                ORDER BY s.scan_date DESC
+                SELECT code, name, scan_date, buy_price,
+                       stop_loss, take_profit, fusion_score, horizon, strategy
+                FROM (
+                    SELECT s.code, s.name, s.scan_date, s.buy_price,
+                           s.stop_loss, s.take_profit, s.fusion_score,
+                           COALESCE(s.horizon, 'short') AS horizon,
+                           s.strategy,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
+                               ORDER BY COALESCE(s.fusion_score, 0) DESC
+                           ) AS rn
+                    FROM stock_signal s
+                    WHERE s.scan_date >= date('now', ?)
+                      AND s.buy_price IS NOT NULL
+                      AND s.buy_price > 0
+                      AND s.name NOT LIKE '%ST%'
+                      AND s.name NOT LIKE '%退%'
+                )
+                WHERE rn <= 8
+                ORDER BY scan_date DESC
             """, (f"-{days} days",)).fetchall()
 
             if not signals:
@@ -739,20 +752,47 @@ def market_overview():
 # ─────────────────────────────────────────────
 # 3. 个人持仓：CRUD + 实时盈亏
 # ─────────────────────────────────────────────
+def _diagnose_position(conn, code: str, cost_price, opened_at) -> Optional[dict]:
+    """对单条持仓运行 exit_advisor 出场诊断，返回 {status, reason, detail} 或 None。
+
+    entry_price 取持仓成本价，entry_date 取建仓日；异常时降级为 None，不影响持仓主列表。
+    """
+    if not code or not cost_price or cost_price <= 0 or not opened_at:
+        return None
+    try:
+        from strategy.exit_advisor import evaluate_exit
+        import pandas as pd
+        rows = conn.execute(
+            """
+            SELECT trade_date, close, high, low
+            FROM daily_price WHERE code = ?
+            ORDER BY trade_date ASC
+            """,
+            (code,),
+        ).fetchall()
+        if not rows:
+            return None
+        df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+        return evaluate_exit(
+            entry_price=float(cost_price),
+            entry_date=str(opened_at)[:10],
+            df=df,
+        )
+    except Exception:
+        return None
+
+
 @investor_bp.route("/positions", methods=["GET"])
 def list_positions():
-    """列出当前持仓（含最新价 + 浮动盈亏）"""
+    """列出当前持仓（含最新价 + 浮动盈亏 + 出场诊断）"""
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT p.*,
-                   dp.close AS latest_close,
-                   dp.pct_change AS latest_pct
+                   lp.close AS latest_close,
+                   lp.pct_change AS latest_pct
             FROM personal_position p
-            LEFT JOIN daily_price dp
-              ON dp.code = p.code AND dp.trade_date = (
-                  SELECT MAX(trade_date) FROM daily_price WHERE code = p.code
-              )
+            LEFT JOIN latest_price lp ON lp.code = p.code
             WHERE p.status = 'holding'
             ORDER BY p.opened_at DESC
             """
@@ -777,6 +817,10 @@ def list_positions():
             elif d.get("latest_close") and tp and d["latest_close"] >= tp:
                 warning = "已触及止盈价，可考虑止盈"
 
+            # 出场诊断（清仓/减仓/持有）——复用推荐票出场纪律
+            advice = _diagnose_position(conn, d.get("code"),
+                                        d.get("cost_price"), d.get("opened_at"))
+
             total_cost += cost
             total_value += value
             items.append({
@@ -791,6 +835,7 @@ def list_positions():
                 "pnl": round(pnl, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "warning": warning,
+                "advice": advice,
             })
 
         # 持仓集中度
@@ -875,23 +920,34 @@ def delete_position(pid: int):
 # ─────────────────────────────────────────────
 @investor_bp.route("/watchlist", methods=["GET"])
 def get_watchlist():
-    """自选股列表（附带最新价 + 当日打分）"""
+    """自选股列表（附带最新价 + 当日打分 + 目标价）"""
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT w.id, w.code, w.note, w.created_at,
+                   w.target_price, w.alert_dir,
                    i.name, i.industry,
-                   dp.close  AS latest_close,
-                   dp.pct_change AS latest_pct,
-                   dp.fusion_score AS latest_score
+                   lp.close  AS latest_close,
+                   lp.pct_change AS latest_pct,
+                   lp.fusion_score AS latest_score
             FROM personal_watchlist w
-            LEFT JOIN stock_info i      ON i.code = w.code
-            LEFT JOIN daily_price dp    ON dp.code = w.code
-                AND dp.trade_date = (SELECT MAX(trade_date) FROM daily_price WHERE code = w.code)
+            LEFT JOIN stock_info i   ON i.code = w.code
+            LEFT JOIN latest_price lp ON lp.code = w.code
             ORDER BY w.created_at DESC
             """
         ).fetchall()
-        return ok(_sanitize([dict(r) for r in rows]))
+        items = []
+        for r in rows:
+            d = dict(r)
+            tp = d.get("target_price")
+            latest = d.get("latest_close")
+            # 距目标价百分比（正=还需上涨，负=已超过）
+            if tp and tp > 0 and latest:
+                d["target_distance_pct"] = round((tp - latest) / latest * 100, 2)
+            else:
+                d["target_distance_pct"] = None
+            items.append(d)
+        return ok(_sanitize(items))
 
 
 @investor_bp.route("/watchlist", methods=["POST"])
@@ -911,12 +967,28 @@ def add_watchlist():
     if not (code.isdigit() and len(code) == 6):
         return fail("code 格式非法（需 6 位数字）", 400)
 
+    # 可选目标价（价格预警）：target_price + alert_dir(above/below)
+    target_price = body.get("target_price")
+    try:
+        target_price = float(target_price) if target_price not in (None, "") else None
+    except (TypeError, ValueError):
+        target_price = None
+    alert_dir = (body.get("alert_dir") or "above").strip().lower()
+    if alert_dir not in ("above", "below"):
+        alert_dir = "above"
+
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO personal_watchlist(code, note, created_at) VALUES (?,?,?)",
             (code, body.get("note"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         inserted = cur.rowcount > 0
+        # 无论新增还是已存在，均允许更新目标价
+        if target_price is not None:
+            conn.execute(
+                "UPDATE personal_watchlist SET target_price=?, alert_dir=? WHERE code=?",
+                (target_price, alert_dir, code),
+            )
 
     task_id = None
     sync_status = "already_has_data"
@@ -961,10 +1033,9 @@ def risk_alerts():
     with get_conn() as conn:
         positions = conn.execute(
             """
-            SELECT p.*, dp.close AS latest_close
+            SELECT p.*, lp.close AS latest_close
             FROM personal_position p
-            LEFT JOIN daily_price dp ON dp.code=p.code
-                AND dp.trade_date = (SELECT MAX(trade_date) FROM daily_price WHERE code=p.code)
+            LEFT JOIN latest_price lp ON lp.code = p.code
             WHERE p.status='holding'
             """
         ).fetchall()
@@ -1000,12 +1071,11 @@ def risk_alerts():
         # 持仓集中度告警
         rows = conn.execute(
             """
-            SELECT p.code, p.shares, dp.close,
+            SELECT p.code, p.shares, lp.close,
                    (p.cost_price * p.shares) AS cost,
-                   (dp.close * p.shares)    AS value
+                   (lp.close * p.shares)    AS value
             FROM personal_position p
-            LEFT JOIN daily_price dp ON dp.code=p.code
-                AND dp.trade_date = (SELECT MAX(trade_date) FROM daily_price WHERE code=p.code)
+            LEFT JOIN latest_price lp ON lp.code = p.code
             WHERE p.status='holding'
             """
         ).fetchall()
@@ -1023,6 +1093,49 @@ def risk_alerts():
 
         # 持仓票打分下降告警
         alerts.extend(_score_drop_alerts(conn))
+
+        # 自选股价格预警：目标价触达/接近
+        watch_rows = conn.execute(
+            """
+            SELECT w.code, w.target_price, w.alert_dir,
+                   i.name, lp.close AS latest_close
+            FROM personal_watchlist w
+            LEFT JOIN stock_info i ON i.code = w.code
+            LEFT JOIN latest_price lp ON lp.code = w.code
+            WHERE w.target_price IS NOT NULL AND w.target_price > 0
+            """
+        ).fetchall()
+        for r in watch_rows:
+            d = dict(r)
+            latest = d.get("latest_close")
+            tp = d.get("target_price")
+            if not latest or not tp:
+                continue
+            direction = (d.get("alert_dir") or "above").lower()
+            name = d.get("name") or d["code"]
+            gap_pct = (latest - tp) / tp * 100
+            if direction == "above":
+                if latest >= tp:
+                    alerts.append({
+                        "level": "info", "code": d["code"], "name": name,
+                        "msg": f"自选已达目标价 {tp:.2f}（现价 {latest:.2f}）",
+                    })
+                elif gap_pct >= -2:
+                    alerts.append({
+                        "level": "warning", "code": d["code"], "name": name,
+                        "msg": f"自选接近目标价 {tp:.2f}（差 {abs(gap_pct):.1f}%）",
+                    })
+            else:  # below
+                if latest <= tp:
+                    alerts.append({
+                        "level": "info", "code": d["code"], "name": name,
+                        "msg": f"自选已跌至目标价 {tp:.2f}（现价 {latest:.2f}）",
+                    })
+                elif gap_pct <= 2:
+                    alerts.append({
+                        "level": "warning", "code": d["code"], "name": name,
+                        "msg": f"自选接近目标价 {tp:.2f}（差 {abs(gap_pct):.1f}%）",
+                    })
 
         return ok({"alerts": alerts, "count": len(alerts)})
 

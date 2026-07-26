@@ -1,7 +1,7 @@
 """
 routes/screen.py —— 指标筛选 API
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request
 from utils.api import ok, fail
 from core.db import get_conn
 import numpy as np
@@ -29,6 +29,8 @@ def screen_stocks():
     kdj_conditions = body.get("kdj", [])
     ma_conditions = body.get("ma", [])
     vol_conditions = body.get("vol", [])
+    turnover_filter = body.get("turnover")  # {min: float, max: float} 换手率%
+    change_conditions = body.get("change", [])  # ["up","down","limit_up","limit_down"]
     
     # 获取最新交易日
     with get_conn() as conn:
@@ -63,7 +65,7 @@ def screen_stocks():
     
     with get_conn() as conn:
         price_rows = conn.execute(f"""
-            SELECT code, close, volume
+            SELECT code, close, volume, turnover, pct_change
             FROM daily_price
             WHERE trade_date = ? AND code IN ({placeholders})
         """, [trade_date] + codes).fetchall()
@@ -79,6 +81,8 @@ def screen_stocks():
         market_cap = price_info["close"] * (s.get("total_shares") or 0) / 1e8
         s["market_cap"] = market_cap
         s["close"] = price_info["close"]
+        s["turnover"] = price_info.get("turnover")
+        s["pct_change"] = price_info.get("pct_change")
         if max_market_cap > 0 and market_cap > max_market_cap:
             continue
         stocks_with_cap.append(s)
@@ -327,6 +331,36 @@ def screen_stocks():
                 elif cond == "shrink" and not (vol < 0.5):
                     vol_ok = False
             if not vol_ok:
+                continue
+        
+        # 换手率筛选（区间）
+        if turnover_filter:
+            to = s.get("turnover")
+            if to is None:
+                continue
+            tmin = turnover_filter.get("min")
+            tmax = turnover_filter.get("max")
+            if tmin is not None and to < tmin:
+                continue
+            if tmax is not None and to > tmax:
+                continue
+        
+        # 涨跌幅筛选
+        if change_conditions:
+            pc = s.get("pct_change")
+            if pc is None:
+                continue
+            chg_ok = True
+            for cond in change_conditions:
+                if cond == "up" and not (pc > 0):
+                    chg_ok = False
+                elif cond == "down" and not (pc < 0):
+                    chg_ok = False
+                elif cond == "limit_up" and not (pc >= 9.8):
+                    chg_ok = False
+                elif cond == "limit_down" and not (pc <= -9.8):
+                    chg_ok = False
+            if not chg_ok:
                 continue
         
         results.append(s)
