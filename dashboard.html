@@ -357,23 +357,6 @@ async function loadHomeTab(container) {
             <div id="exitTrackPanel">加载中…</div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">
-                <h3>策略规则命中 · 常驻规则今日筛出</h3>
-                <div class="rule-scan-ctl">
-                    <label title="只扫 fitness 最高的前 N 条启用规则">Top-N
-                        <input type="number" id="ruleScanMaxRules" value="50" min="1" max="999" step="1">
-                    </label>
-                    <label title="因子计算保留的最近行数（需 &gt; 252）">回溯
-                        <input type="number" id="ruleScanLookback" value="300" min="253" max="5000" step="10">
-                    </label>
-                    <button class="btn btn-sm" id="ruleScanBtn" onclick="scanRulesNow()">立即扫描</button>
-                    <span class="text-muted" id="ruleSigDate" style="font-size:12px"></span>
-                </div>
-            </div>
-            <div id="ruleSignals">加载中…</div>
-        </div>
-
         <div class="grid-2col">
             <div class="panel">
                 <div class="panel-header">
@@ -402,20 +385,11 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
-                <h3>历史推荐回测 · 过去30天推荐的真实表现</h3>
+                <h3>推荐复盘 · 过去30天推荐的真实表现与出场结果</h3>
                 <span class="text-muted" style="font-size:12px" id="recHistoryUpdatedAt"></span>
             </div>
             <div id="recHistorySummary"></div>
             <div id="recHistoryTable">加载中…</div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h3>推荐复盘 · 胜率追踪（出场纪律口径）</h3>
-                <span class="text-muted" style="font-size:12px">按止损/止盈/到期出场后的最终收益统计</span>
-            </div>
-            <div id="outcomeReviewSummary"></div>
-            <div id="outcomeReviewTable">加载中…</div>
         </div>
     `;
 
@@ -424,13 +398,11 @@ async function loadHomeTab(container) {
         loadMarketOverview(),
         loadTodayPicks(),
         loadExitTrack(),
-        loadRuleSignals(),
         loadMyPositions(),
         loadMyWatchlist(),
         loadAlertsBanner(),
         loadExplainerGrid(),
         loadRecHistory(),
-        loadOutcomeReview(),
         loadSyncStatusPanel(),
     ]);
 
@@ -1000,15 +972,21 @@ async function loadMarketOverview() {
                 </div>`;
         }).join('');
 
-        const north = d.north_bound || {};
-        const northHtml = north.north_net_buy != null ? `
-            <div class="idx-card north-card">
-                <div class="idx-name">北向资金</div>
-                <div class="idx-price ${(north.north_net_buy||0)>=0?'idx-up':'idx-down'}">${(north.north_net_buy/1e8).toFixed(1)}<span style="font-size:14px;color:var(--text-muted)"> 亿</span></div>
-                <div class="idx-trend" style="color:var(--text-secondary);font-size:11px">${north.label || ''}</div>
+        // 市场宽度：涨跌家数 + 两市成交额
+        const br = d.breadth || {};
+        const breadthHtml = (br.up_count || br.down_count) ? `
+            <div class="idx-card">
+                <div class="idx-name">涨跌家数</div>
+                <div class="idx-price"><span class="idx-up">${br.up_count||0}</span><span style="font-size:14px;color:var(--text-muted)"> / </span><span class="idx-down">${br.down_count||0}</span></div>
+                <div class="idx-trend" style="color:var(--text-secondary);font-size:11px">${br.label || ''}</div>
+            </div>
+            <div class="idx-card">
+                <div class="idx-name">两市成交额</div>
+                <div class="idx-price">${br.total_amount != null ? Number(br.total_amount).toLocaleString() : '--'}<span style="font-size:14px;color:var(--text-muted)"> 亿</span></div>
+                <div class="idx-trend" style="color:var(--text-secondary);font-size:11px">${br.trade_date || ''}</div>
             </div>
         ` : '';
-        if (grid) grid.innerHTML = idxHtml + northHtml;
+        if (grid) grid.innerHTML = idxHtml + breadthHtml;
 
         // P3: 自适应权重模式
         const aw = d.adaptive_weights || {};
@@ -1245,22 +1223,35 @@ async function loadRuleSignals() {
         const data = (resp && resp.data) || {};
         const items = data.items || [];
         const total = data.total != null ? data.total : items.length;
-        if (dateEl) dateEl.textContent = data.date ? ('数据日期 ' + data.date + (total > items.length ? ('（命中 ' + total + '，显示前 ' + items.length + '）') : '')) : '';
+        const excluded = data.excluded_rules || 0;
+        if (dateEl) {
+            let txt = data.date ? ('数据日期 ' + data.date + (total > items.length ? ('（命中 ' + total + '，显示前 ' + items.length + '）') : '')) : '';
+            if (excluded > 0) txt += ' · 已隐藏 ' + excluded + ' 条命中过泛的规则（单日命中>' + (data.max_hits || 200) + '只）';
+            dateEl.textContent = txt;
+        }
         if (!items.length) {
-            box.innerHTML = '<div class="empty-state">暂无规则命中<br><span style="color:var(--text-muted);font-size:12px">先在「回测」将策略存为常驻规则，同步时自动扫描</span></div>';
+            box.innerHTML = excluded > 0
+                ? '<div class="empty-state">所有启用规则命中都过泛（单条规则命中超 ' + (data.max_hits || 200) + ' 只，无筛选价值），已全部隐藏<br><span style="color:var(--text-muted);font-size:12px">建议到「回测」收紧规则条件后重新保存</span></div>'
+                : '<div class="empty-state">暂无规则命中<br><span style="color:var(--text-muted);font-size:12px">先在「回测」将策略存为常驻规则，同步时自动扫描</span></div>';
             return;
         }
         box.innerHTML = '<div class="rule-sig-list">' + items.map(it => {
             const price = it.latest_close != null ? Number(it.latest_close).toFixed(2) : '--';
-            const conf = it.confidence != null ? Number(it.confidence).toFixed(2) : '--';
+            const hitsTip = it.rule_hits != null ? (' · 今日命中 ' + it.rule_hits + ' 只') : '';
+            // 规则回测胜率徽章：≥55% 用涨色（优），<50% 用跌色警示（沿用 A股红涨绿跌配色）
+            const wr = it.rule_win_rate;
+            const wrCls = wr == null ? '' : (wr >= 55 ? 'idx-up' : (wr >= 50 ? '' : 'idx-down'));
+            const wrHtml = wr != null
+                ? `<span class="${wrCls}" style="font-family:var(--font-mono)" title="该规则历史回测胜率（${it.rule_total_trades || 0} 笔交易）${wr < 50 ? ' · 低于50%，谨慎参考' : ''}">胜率 ${Number(wr).toFixed(1)}%</span>`
+                : '<span style="color:var(--text-muted)">胜率 --</span>';
             return `<div class="rule-sig-row" onclick="openKline('${it.code}')">
                 <div class="rule-sig-main">
                     <span class="rule-sig-code">${it.code}</span>
                     <span class="rule-sig-name">${it.name || '--'}</span>
                 </div>
-                <span class="rule-sig-rule" title="${it.rule_name || ''}">${it.rule_name || ('#' + it.rule_id)}</span>
+                <span class="rule-sig-rule" title="${(it.rule_name || '') + hitsTip}">${it.rule_name || ('#' + it.rule_id)}</span>
                 <span class="rule-sig-price">¥${price}</span>
-                <span class="rule-sig-conf">强度 ${conf}</span>
+                <span class="rule-sig-conf">${wrHtml}</span>
             </div>`;
         }).join('') + '</div>';
     } catch(e) {
@@ -1466,7 +1457,7 @@ async function loadMyPositions() {
         const summary = d.summary || {};
 
         if (positions.length === 0) {
-            box.innerHTML = '<div class="empty-state">还没有添加持仓<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你已经买/想买的股票</span></div>';
+            box.innerHTML = '<div class="empty-state">还没有添加持仓<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你已经买/想买的股票；添加后这里会自动给出盈亏和出场诊断</span><br><button class="btn btn-sm" style="margin-top:10px" onclick="showAddPositionDialog()">+ 添加第一笔持仓</button></div>';
             return;
         }
 
@@ -1513,13 +1504,44 @@ async function loadMyPositions() {
     }
 }
 
+// 空态引导：把今日短线推荐前 3 名加入自选（目标价取推荐止盈价）
+async function addTopPicksToWatchlist() {
+    try {
+        const resp = await RequestManager.fetch('today-for-watch', API + '/investor/today');
+        const groups = ((resp && resp.data) || {}).groups || {};
+        const picks = (groups.short || []).slice(0, 3);
+        if (!picks.length) { showToast('今日暂无推荐，先点「立即重算打分」', 'warning'); return; }
+        let added = 0;
+        for (const it of picks) {
+            const ap = it.action_plan || {};
+            try {
+                await RequestManager.fetch('add-watch-' + it.code, API + '/investor/watchlist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        code: it.code,
+                        note: '来自今日推荐',
+                        target_price: ap.take_profit || null,
+                        alert_dir: 'above',
+                    }),
+                });
+                added++;
+            } catch(e) { /* 单只失败不阻断其余 */ }
+        }
+        showToast(added ? ('已加入 ' + added + ' 只自选，目标价默认为推荐止盈价') : '添加失败，请重试', added ? 'success' : 'error');
+        if (added) await loadMyWatchlist();
+    } catch(e) {
+        showToast('获取今日推荐失败', 'error');
+    }
+}
+
 async function loadMyWatchlist() {
     const box = document.getElementById('myWatchlist');
     try {
         const resp = await RequestManager.fetch('watchlist', API + '/investor/watchlist');
         const items = resp.data || [];
         if (items.length === 0) {
-            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你想跟踪的股票</span></div>';
+            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你想跟踪的股票，或直接从今日推荐开始</span><br><button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="addTopPicksToWatchlist()">⭐ 一键加入今日短线推荐前 3 名</button></div>';
             return;
         }
         box.innerHTML = items.map(w => {
@@ -1675,75 +1697,6 @@ async function loadRecHistory() {
     }
 }
 
-// 推荐复盘：recommend_outcome 表的胜率闭环统计（出场纪律口径）
-async function loadOutcomeReview() {
-    const summaryEl = document.getElementById('outcomeReviewSummary');
-    const tableEl = document.getElementById('outcomeReviewTable');
-    try {
-        const [sumResp, listResp] = await Promise.all([
-            RequestManager.fetch('outcome-summary', API + '/investor/outcome_summary?days=30'),
-            RequestManager.fetch('outcome-list', API + '/investor/outcome_list?days=30&limit=50'),
-        ]);
-        const summary = (sumResp.data || {}).summary || {};
-        const items = (listResp.data || {}).items || [];
-
-        if (!summary.total) {
-            if (summaryEl) summaryEl.innerHTML = '';
-            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无复盘数据<br><span style="color:var(--text-muted);font-size:12px">推荐产生后经过重算会自动归档到这里</span></div>';
-            return;
-        }
-
-        if (summaryEl) {
-            const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
-            const avgSign = summary.avg_return >= 0 ? '+' : '';
-            const pf = summary.profit_factor || 0;
-            const pfCls = pf >= 1.5 ? 'idx-up' : (pf >= 1 ? '' : 'idx-down');
-            summaryEl.innerHTML = `
-                <div class="metrics-row" style="margin-bottom:12px">
-                    <div class="metric-card"><div class="val">${summary.total}</div><div class="lbl">复盘样本</div></div>
-                    <div class="metric-card"><div class="val" style="color:${summary.win_rate>=50?'var(--green, #10b981)':'var(--danger)'}">${summary.win_rate}%</div><div class="lbl">胜率</div></div>
-                    <div class="metric-card"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
-                    <div class="metric-card"><div class="val ${pfCls}">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
-                    <div class="metric-card"><div class="val" style="color:var(--danger)">${summary.stop_loss_count||0}</div><div class="lbl">止损次数</div></div>
-                    <div class="metric-card"><div class="val" style="color:var(--green, #10b981)">${summary.take_profit_count||0}</div><div class="lbl">止盈次数</div></div>
-                </div>`;
-        }
-
-        if (tableEl) {
-            if (items.length === 0) {
-                tableEl.innerHTML = '<div class="empty-state">暂无明细</div>';
-                return;
-            }
-            const show = items.slice(0, 15);
-            const fmtRet = (v) => v != null ? `<span class="${v>=0?'positive':'negative'}">${v>=0?'+':''}${v}%</span>` : '--';
-            const exitTxt = (r) => {
-                if (r.hit_stop) return '<span style="color:var(--danger)">止损</span>';
-                if (r.hit_tp) return '<span style="color:var(--green, #10b981)">止盈</span>';
-                if (r.exit_reason === 'max_hold_days') return '<span style="color:var(--text-muted)">到期</span>';
-                return r.exit_reason ? r.exit_reason : '跟踪中';
-            };
-            let html = '<div class="table-wrapper"><table><thead><tr>';
-            html += '<th>代码</th><th>推荐日</th><th>买入价</th><th>T+5收益</th><th>最终收益</th><th>出场方式</th>';
-            html += '</tr></thead><tbody>';
-            show.forEach(r => {
-                const finalRet = r.exit_return != null ? r.exit_return : r.t5_return;
-                html += `<tr>
-                    <td><span class="code-link" onclick="openKline('${r.code}')">${r.code}</span></td>
-                    <td>${r.scan_date||''}</td>
-                    <td>${r.entry_price!=null?r.entry_price.toFixed(2):'--'}</td>
-                    <td>${fmtRet(r.t5_return)}</td>
-                    <td>${fmtRet(finalRet)}</td>
-                    <td>${exitTxt(r)}</td>
-                </tr>`;
-            });
-            html += '</tbody></table></div>';
-            tableEl.innerHTML = html;
-        }
-    } catch(e) {
-        if (tableEl) tableEl.innerHTML = '<div class="empty-state">加载失败</div>';
-    }
-}
-
 async function showExplainDialog(key) {
     try {
         const resp = await RequestManager.fetch('explain-' + key, API + '/investor/explain/' + key);
@@ -1793,7 +1746,7 @@ async function submitAddPosition() {
         return;
     }
     try {
-        const resp = await RequestManager.fetch('add-pos', API + '/api/investor/positions', {
+        const resp = await RequestManager.fetch('add-pos', API + '/investor/positions', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
@@ -1814,7 +1767,7 @@ async function submitAddPosition() {
 async function closeMyPosition(pid) {
     if (!confirm('确认平仓这条记录？')) return;
     try {
-        await RequestManager.fetch('close-pos-' + pid, API + '/api/investor/positions/' + pid, {method:'DELETE'});
+        await RequestManager.fetch('close-pos-' + pid, API + '/investor/positions/' + pid, {method:'DELETE'});
         showToast('已平仓', 'success');
         loadMyPositions();
         loadAlertsBanner();
@@ -1846,7 +1799,7 @@ async function submitAddWatch() {
     const alert_dir = document.getElementById('addWatchDir').value || 'above';
     if (!code) { showToast('请填写代码', 'warning'); return; }
     try {
-        const resp = await RequestManager.fetch('add-watch', API + '/api/investor/watchlist', {
+        const resp = await RequestManager.fetch('add-watch', API + '/investor/watchlist', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({code, note, target_price, alert_dir}),
@@ -1873,7 +1826,7 @@ async function resyncOneStock(code) {
     showToast(`开始补拉 ${code}…`, 'info');
     try {
         const resp = await RequestManager.fetch('resync-' + code,
-            API + '/api/sync/stock/' + encodeURIComponent(code),
+            API + '/sync/stock/' + encodeURIComponent(code),
             { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) }
         );
         const data = (resp && resp.data) || {};
@@ -1891,7 +1844,7 @@ async function resyncOneStock(code) {
 async function removeFromWatchlist(code) {
     if (!confirm('移出自选 ' + code + '?')) return;
     try {
-        await RequestManager.fetch('rm-watch-' + code, API + '/api/investor/watchlist/' + code, {method:'DELETE'});
+        await RequestManager.fetch('rm-watch-' + code, API + '/investor/watchlist/' + code, {method:'DELETE'});
         loadMyWatchlist();
     } catch(e) {}
 }
@@ -1990,6 +1943,11 @@ function pollSyncProgress(onDone) {
             document.getElementById('syncProgressPct').textContent = pct + '%';
             document.getElementById('syncProgressText').textContent =
                 '同步中: ' + p.current + '/' + p.total + '  成功:' + p.success + '  失败:' + p.failed;
+            // 首页内联进度条同步更新（不在首页时 setInlineProgress 内部自动跳过）
+            if (p.running) {
+                setInlineProgress('sync', p.current, p.total,
+                    p.total > 0 ? (p.current + '/' + p.total + ' 成功:' + p.success + ' 失败:' + p.failed) : '启动中...');
+            }
             if (!p.running) {
                 hideSyncProgress();
                 showToast(p.message || '同步完成', p.last_error ? 'warning' : 'success');
@@ -2760,6 +2718,22 @@ async function loadBacktestTab(container) {
                 </div>
             </div>
         </div>
+        <div class="panel">
+            <div class="panel-header">
+                <h3>策略规则命中 · 常驻规则今日筛出</h3>
+                <div class="rule-scan-ctl">
+                    <label title="只扫 fitness 最高的前 N 条启用规则">Top-N
+                        <input type="number" id="ruleScanMaxRules" value="50" min="1" max="999" step="1">
+                    </label>
+                    <label title="因子计算保留的最近行数（需 &gt; 252）">回溯
+                        <input type="number" id="ruleScanLookback" value="300" min="253" max="5000" step="10">
+                    </label>
+                    <button class="btn btn-sm" id="ruleScanBtn" onclick="scanRulesNow()">立即扫描</button>
+                    <span class="text-muted" id="ruleSigDate" style="font-size:12px"></span>
+                </div>
+            </div>
+            <div id="ruleSignals">加载中…</div>
+        </div>
         <div id="btHistoryDrawer" class="bt-drawer">
             <div class="bt-drawer-content">
                 <div class="bt-drawer-head">
@@ -2787,6 +2761,7 @@ async function loadBacktestTab(container) {
     btRenderConditions();
     btGotoStep(1);
     btLoadRules();
+    loadRuleSignals();
 }
 
 // ── 策略规则一键回测：下拉加载 / 选中导入 ──
