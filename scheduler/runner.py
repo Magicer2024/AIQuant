@@ -1,5 +1,10 @@
 """
 scheduler/runner.py -- background sync task and scheduler
+
+调度策略：
+  - 07:00  盘前同步（自选股增量）
+  - 15:30  盘后同步（全市场收盘数据 + 策略分重算）
+  - 失败后指数退避重试（30min → 60min → 120min，最多 3 次）
 """
 import threading
 import schedule
@@ -8,25 +13,24 @@ from datetime import datetime, date
 
 from scheduler.state import SYNC_STATUS, SCHEDULER_RUNNING, SCHEDULER_THREAD
 
-_retry_queued = False
-RETRY_DELAY_SECONDS = 30 * 60
+_retry_count = 0
+_MAX_RETRIES = 3
+_BASE_RETRY_DELAY = 30 * 60  # 30 分钟
 
 
 def run_sync_blocking():
-    """Background thread: 每日 07:00 自选股同步
+    """Background thread: 自选股同步 + 盘后全市场同步
 
     流程：
-      1) update_stock_list() —— 拉全 A 列表写入 stock_info（约 5~10 秒）
-         保证后续自选股能匹配到 stock_info 记录
+      1) update_stock_list() —— 拉全 A 列表写入 stock_info
       2) 检查自选股列表
-         - 空：直接跳过（日志记录"自选为空"）
-         - 非空：daily_sync_by_date(target="watchlist")（东财 push2his，
-           1 个交易日 ≈ 3 秒，5~10 个交易日约 15~30 秒）
+      3) daily_sync_by_date(target="watchlist")
+      4) 失败时指数退避重试
     """
-    global _retry_queued
+    global _retry_count
     try:
         from core.sync import daily_sync_by_date, is_trading_day, update_stock_list
-        from core.db import init_db, count_watchlist
+        from core.db import init_db, count_watchlist, log_sync
 
         init_db()
         today = date.today().strftime("%Y-%m-%d")
@@ -37,7 +41,7 @@ def run_sync_blocking():
             SYNC_STATUS["running"] = False
             return
 
-        # 0) 先同步股票列表全集（用户要求）
+        # 0) 先同步股票列表全集
         SYNC_STATUS["last_result"] = "更新股票列表..."
         try:
             update_stock_list()
@@ -49,50 +53,69 @@ def run_sync_blocking():
             SYNC_STATUS["last_result"] = "自选列表为空，跳过数据同步（请先添加自选股）"
             SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             SYNC_STATUS["running"] = False
-            _retry_queued = False
+            _retry_count = 0
             return
 
-        # 2) 自选股按日同步（东财 push2his 快速路径）
+        # 2) 自选股按日同步
         SYNC_STATUS["last_result"] = "自选股按日同步中..."
+        t0 = time.time()
         result = daily_sync_by_date(
-            trade_dates=None,  # 默认最近 1 个交易日
+            trade_dates=None,
             verbose=False,
             target="watchlist",
         )
+        elapsed = round(time.time() - t0, 1)
 
         if result.get("skipped") == "empty_watchlist":
             SYNC_STATUS["last_result"] = "自选列表为空，跳过"
         else:
+            rows = result.get('rows', 0)
             SYNC_STATUS["last_result"] = (
-                f"自选同步完成 [watchlist]: {result['rows']} 行, 耗时 {result['elapsed_s']}s"
+                f"自选同步完成 [watchlist]: {rows} 行, 耗时 {elapsed}s"
             )
+            # 写入 sync_log 表（持久化同步记录）
+            try:
+                log_sync(
+                    sync_type="scheduler_watchlist",
+                    total=count_watchlist(),
+                    success=rows,
+                    failed=0,
+                    duration_s=elapsed,
+                    note=f"target=watchlist, dates={result.get('dates', [])}",
+                )
+            except Exception:
+                pass
+
         SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _retry_queued = False
+        _retry_count = 0  # 成功后重置重试计数
     except Exception as e:
         SYNC_STATUS["last_result"] = f"错误: {e}"
-        if not _retry_queued:
-            _retry_queued = True
-            threading.Thread(target=_schedule_retry, daemon=True).start()
+        # 指数退避重试
+        if _retry_count < _MAX_RETRIES:
+            delay = _BASE_RETRY_DELAY * (2 ** _retry_count)
+            _retry_count += 1
+            print(f"[Scheduler] 同步失败，{delay//60}分钟后第 {_retry_count} 次重试")
+            threading.Thread(target=_schedule_retry, args=(delay,), daemon=True).start()
+        else:
+            print(f"[Scheduler] 同步失败，已达最大重试次数({_MAX_RETRIES})，放弃")
+            _retry_count = 0
         import traceback
         traceback.print_exc()
     finally:
         SYNC_STATUS["running"] = False
 
 
-def _schedule_retry():
-    """30分钟后重试一次"""
-    import time as _time
-    global _retry_queued
-    _time.sleep(RETRY_DELAY_SECONDS)
+def _schedule_retry(delay_seconds: int):
+    """指数退避重试"""
+    time.sleep(delay_seconds)
     if SYNC_STATUS["running"]:
         return
     SYNC_STATUS["running"] = True
     run_sync_blocking()
-    _retry_queued = False
 
 
 def start_scheduler():
-    """Start timed sync scheduler (daily at 07:00)"""
+    """启动定时同步调度器（07:00 盘前 + 15:30 盘后）"""
     def _sched_loop():
         while SCHEDULER_RUNNING["enabled"]:
             schedule.run_pending()
@@ -100,7 +123,8 @@ def start_scheduler():
 
     schedule.clear()
     schedule.every().day.at("07:00").do(_job_sync)
-    print("[Scheduler] 每日 07:00 自动数据同步")
+    schedule.every().day.at("15:30").do(_job_sync)
+    print("[Scheduler] 每日 07:00 / 15:30 自动数据同步")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)

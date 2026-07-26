@@ -5,8 +5,12 @@ Flask 入口
 import os
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from utils.logger import setup_logging
 from utils.timing import init_app as init_timing
 from utils.api import ok, fail
+
+# 初始化统一日志（控制台 INFO + 文件 DEBUG 按日轮转）
+setup_logging()
 
 from routes.system import system_bp
 from routes.sync import sync_bp

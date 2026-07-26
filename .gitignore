@@ -33,6 +33,7 @@ reports/
 .cache/
 .uploads/
 .workbuddy/
+logs/
 
 config/llm_config.yaml
 .qoder/
