@@ -2,9 +2,10 @@
 routes/system.py -- system status, sync, scheduler routes
 """
 import threading
-from flask import jsonify, request
+from flask import request
 
 from routes import system_bp
+from utils.api import ok, fail
 from scheduler.state import SYNC_STATUS, SCHEDULER_RUNNING
 from scheduler.runner import start_scheduler
 
@@ -13,7 +14,7 @@ from scheduler.runner import start_scheduler
 def system_status():
     """Get system status"""
     from routes.sync import _sync_progress
-    return jsonify({
+    return ok({
         "sync": {
             "running": SYNC_STATUS["running"] or _sync_progress["running"],
             "last_time": SYNC_STATUS.get("last_time"),
@@ -32,13 +33,13 @@ def system_scheduler():
     enable = data.get("enable")
 
     if enable is None:
-        return jsonify({"error": "缺少 enable 参数"}), 400
+        return fail("缺少 enable 参数")
 
     if enable:
         if not SCHEDULER_RUNNING["enabled"]:
             SCHEDULER_RUNNING["enabled"] = True
             start_scheduler()
-        return jsonify({"status": "enabled", "message": "定时任务已开启"})
+        return ok({"status": "enabled", "message": "定时任务已开启"})
     else:
         SCHEDULER_RUNNING["enabled"] = False
-        return jsonify({"status": "disabled", "message": "定时任务已关闭"})
+        return ok({"status": "disabled", "message": "定时任务已关闭"})

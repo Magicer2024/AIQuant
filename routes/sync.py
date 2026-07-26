@@ -3,9 +3,9 @@ routes/sync.py —— 数据同步相关接口
 """
 import threading
 from datetime import datetime
-from flask import jsonify
 
 from routes import sync_bp
+from utils.api import ok, fail
 from core.sync import recalc_all_scores as run_recalc_all_scores
 from core.task_queue import submit_task, get_task_status, is_any_running
 from scheduler.state import SYNC_STATUS
@@ -37,7 +37,7 @@ def _progress_callback(current, total, success, failed):
 @sync_bp.route("/progress", methods=["GET"])
 def sync_progress():
     """Get sync progress"""
-    return jsonify({"success": True, "data": dict(_sync_progress)})
+    return ok(dict(_sync_progress))
 
 
 @sync_bp.route("/stock/<code>", methods=["POST"])
@@ -54,7 +54,7 @@ def sync_single_stock(code: str):
     force = bool(body.get("force", False))
 
     if not (isinstance(code, str) and code.isdigit() and len(code) == 6):
-        return jsonify({"success": False, "error": "code 格式非法（需 6 位数字）"}), 400
+        return fail("code 格式非法（需 6 位数字）")
 
     # 强制重拉：先清空 daily_price 中该 code 的所有数据
     if force:
@@ -64,8 +64,9 @@ def sync_single_stock(code: str):
         # 重置 has_watchlist_data 缓存效果：sync_single_stock_to_watchlist 会重新拉取
 
     result = sync_single_stock_to_watchlist(code, verbose=False)
-    status_code = 200 if result.get("ok") else 400
-    return jsonify({"success": result.get("ok", False), "data": result}), status_code
+    if result.get("ok"):
+        return ok(result)
+    return fail(result.get("error", "同步失败"))
 
 
 @sync_bp.route("/auto-status", methods=["GET"])
@@ -88,14 +89,11 @@ def auto_sync_status():
             needs_sync = (last_date != today)
         except Exception:
             needs_sync = True
-    return jsonify({
-        "success": True,
-        "data": {
-            "running": running,
-            "last_time": last_time,
-            "last_result": SYNC_STATUS.get("last_result", ""),
-            "needs_sync": needs_sync,
-        }
+    return ok({
+        "running": running,
+        "last_time": last_time,
+        "last_result": SYNC_STATUS.get("last_result", ""),
+        "needs_sync": needs_sync,
     })
 
 
@@ -111,7 +109,7 @@ def start_sync():
         target = "all"
 
     if _sync_progress["running"]:
-        return jsonify({"error": "同步正在进行中，请稍候"}), 409
+        return fail("同步正在进行中，请稍候", 409)
     _sync_progress.update({"running": True, "current": 0, "total": 0,
                             "success": 0, "failed": 0, "message": "",
                             "last_error": None, "target": target})
@@ -132,7 +130,7 @@ def start_sync():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return jsonify({"status": "started", "message": f"数据同步已启动（target={target}）", "target": target})
+    return ok({"status": "started", "message": f"数据同步已启动（target={target}）", "target": target})
 
 
 @sync_bp.route("/fast", methods=["POST"])
@@ -144,7 +142,7 @@ def start_fast_sync():
     """
     from flask import request
     if _sync_progress["running"]:
-        return jsonify({"error": "同步正在进行中，请稍候"}), 409
+        return fail("同步正在进行中，请稍候", 409)
 
     body = request.get_json(silent=True) or {}
     # 默认拉最近 1 个交易日；可指定 trade_dates: ["20260624", "20260625"]
@@ -172,7 +170,7 @@ def start_fast_sync():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return jsonify({"status": "started", "message": f"按日批量同步已启动（target={target}）", "target": target})
+    return ok({"status": "started", "message": f"按日批量同步已启动（target={target}）", "target": target})
 
 
 @sync_bp.route("/pool", methods=["POST"])
@@ -185,7 +183,7 @@ def fetch_recommend_pool():
     body = request.get_json(silent=True) or {}
     codes = body.get("codes", [])
     if not codes:
-        return jsonify({"error": "codes 不能为空"}), 400
+        return fail("codes 不能为空")
     max_workers = int(body.get("max_workers", 8))
 
     def _run():
@@ -194,7 +192,7 @@ def fetch_recommend_pool():
         return result
 
     task_id = submit_task(_run)
-    return jsonify({"success": True, "task_id": task_id, "total": len(codes)})
+    return ok({"task_id": task_id, "total": len(codes)})
 
 
 @sync_bp.route("/realtime", methods=["GET"])
@@ -219,18 +217,9 @@ def get_realtime():
     # 再包一层（fetch_realtime_all 内部已经走护栏了，这里双保险）
     df, source = cached_fetch("realtime_all", {"endpoint": "/realtime"}, _do_fetch, ttl=ttl)
     if df is None or df.empty:
-        return jsonify({
-            "success": False,
-            "source": source,
-            "error": "东财接口无数据，可能被反爬封禁",
-        }), 502
+        return fail("东财接口无数据，可能被反爬封禁", 502, source=source)
 
-    return jsonify({
-        "success": True,
-        "source": source,            # 告诉前端数据是 fresh / network / stale
-        "count": len(df),
-        "data": df.to_dict("records"),
-    })
+    return ok(df.to_dict("records"), source=source, count=len(df))
 
 
 @sync_bp.route("/guard-status", methods=["GET"])
@@ -241,7 +230,7 @@ def guard_status():
     """
     from core.em_guard import guard_status as _gs
     status = _gs()
-    return jsonify({"success": True, "data": status})
+    return ok(status)
 
 
 @sync_bp.route("/guard-clear", methods=["POST"])
@@ -254,7 +243,7 @@ def guard_clear():
     from core.em_guard import force_clear_cache
     body = request.get_json(silent=True) or {}
     n = force_clear_cache(name=body.get("name"))
-    return jsonify({"success": True, "cleared": n})
+    return ok({"cleared": n})
 
 
 @sync_bp.route("/recalc_all_scores", methods=["GET"])
@@ -269,7 +258,7 @@ def recalc_all_scores():
     if target not in ("all", "watchlist"):
         target = "all"
     result = run_recalc_all_scores(target=target)
-    return jsonify(result)
+    return ok(result)
 
 
 @sync_bp.route("/scan_rules", methods=["POST"])
@@ -299,7 +288,7 @@ def scan_rules():
     max_rules = _pick_int("max_rules", DEFAULT_MAX_RULES)
     lookback_rows = _pick_int("lookback_rows", DEFAULT_LOOKBACK_ROWS)
     result = scan_active_rules(trade_date=date, max_rules=max_rules, lookback_rows=lookback_rows)
-    return jsonify({"success": True, "data": result})
+    return ok(result)
 
 
 @sync_bp.route("/recalc", methods=["POST"])
@@ -314,11 +303,11 @@ def start_recalc():
         target = "all"
 
     if is_any_running():
-        return jsonify({"success": False, "error": "有任务正在进行中，请稍后再试"}), 409
+        return fail("有任务正在进行中，请稍后再试", 409)
 
     task_id = submit_task(lambda: run_recalc_all_scores(target=target))
-    return jsonify({"success": True, "task_id": task_id, "target": target,
-                    "message": f"重算任务已启动（target={target}）"})
+    return ok({"task_id": task_id, "target": target,
+              "message": f"重算任务已启动（target={target}）"})
 
 
 @sync_bp.route("/status/<task_id>", methods=["GET"])
@@ -326,5 +315,5 @@ def task_status(task_id):
     """查询任务状态"""
     status = get_task_status(task_id)
     if not status:
-        return jsonify({"success": False, "error": "任务不存在或已过期"}), 404
-    return jsonify({"success": True, "data": status})
+        return fail("任务不存在或已过期", 404)
+    return ok(status)

@@ -9,7 +9,8 @@ url_prefix 保持 /api/scoring 不变，避免改动前端既有 URL。
 """
 from datetime import date
 from utils.serialization import sanitize_numeric as _sanitize
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request
+from utils.api import ok, fail
 from core.db import get_conn
 
 scoring_bp = Blueprint("scoring", __name__, url_prefix="/api/scoring")
@@ -43,13 +44,13 @@ def kline_data(code: str):
 
         marks = []
 
-        return jsonify({"success": True, "data": {"kline": kline, "marks": marks}, "error": None})
+        return ok({"kline": kline, "marks": marks})
 
 
 @scoring_bp.route("/latest_date", methods=["GET"])
 def latest_date():
     """获取最新行情日期 GET /api/scoring/latest_date"""
-    return jsonify({"success": True, "data": None, "date": _get_latest_trade_date(), "error": None})
+    return ok(None, date=_get_latest_trade_date())
 
 
 def _get_latest_trade_date() -> str:
