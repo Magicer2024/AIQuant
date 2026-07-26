@@ -36,6 +36,9 @@ REGIME_LABEL = {
 def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_up):
     """根据评分 / 盈亏比 / 大盘冷热 / 持仓联动 / 趋势，返回操作信号灯。
 
+    注意：fusion_score 量纲为 0~50（strategies.py 中 clip(upper=50)），
+    门槛按此量纲设定：30 分≈百分制 60，40 分≈百分制 80。
+
     返回 dict: { level, emoji, label, reasons: list, warnings: list }
     """
     reasons: list = []
@@ -51,20 +54,20 @@ def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_
             "warnings": ["止损距离过近或止盈空间不足，建议放弃"],
         }
 
-    # 1. 评分门槛
-    if score < 60:
+    # 1. 评分门槛（30/50 ≈ 百分制 60）
+    if score < 30:
         return {
             "level": "wait",
             "emoji": "🔴",
             "label": "观望",
-            "reasons": [f"综合评分 {score:.0f}，低于 60 分门槛"],
+            "reasons": [f"综合评分 {score:.0f}（满分 50），低于 30 分门槛"],
             "warnings": ["等评分回升或换标的"],
         }
 
     # 2. 大盘冷热权重
     if market_regime in ("cold", "cool"):
-        # 大盘冷：要评分 ≥ 80 才"可小仓"
-        if score >= 80:
+        # 大盘冷：要评分 ≥ 40（≈百分制 80）才“可小仓”
+        if score >= 40:
             reasons.append(f"大盘{REGIME_LABEL.get(market_regime, '')}，但个股独立强势")
             warnings.append("建议仓位 ≤ 10%，抢反弹思路")
         else:
@@ -329,7 +332,7 @@ def today_recommendations():
             if risk_pct and reward_pct and risk_pct > 0:
                 risk_reward = round(reward_pct / risk_pct, 2)
 
-            # 散户可读的中文评分理由（基于 5 个子分）
+            # 散户可读的中文评分理由（基于 5 个子分，量纲 0~10，见 strategies.py 的 0-3→0-10 映射）
             reasons = []
             weaknesses = []
             sub_scores = [
@@ -341,7 +344,7 @@ def today_recommendations():
             ]
             for key, good_label, weak_label in sub_scores:
                 val = d.get(key) or 0
-                if val >= 60:
+                if val >= 6:      # 6/10 ≈ 百分制 60，认定为亮点
                     reasons.append(good_label)
                 elif val > 0:
                     weaknesses.append(weak_label)
@@ -600,9 +603,9 @@ def exit_advice():
                     "detail": advice["detail"],
                 })
 
-        # 按状态排序：clear > reduce > hold
+        # 排序：推荐日降序（最新在前），同一天内 clear > reduce > hold
         status_order = {"clear": 0, "reduce": 1, "hold": 2}
-        results.sort(key=lambda x: (status_order.get(x["status"], 3), x["scan_date"]))
+        results.sort(key=lambda x: (x["scan_date"], -status_order.get(x["status"], 3)), reverse=True)
 
         return ok(_sanitize({
             "items": results,
@@ -686,26 +689,25 @@ def market_overview():
                 "trade_date": d,
             })
 
-        # 北向资金最近一日
-        north = conn.execute(
-            """SELECT trade_date, north_net_buy, hgt_net_buy, sgt_net_buy
-               FROM stock_hsgt_north
-               ORDER BY trade_date DESC LIMIT 1"""
-        ).fetchone()
-        north_data = dict(north) if north else None
-
-        # 大盘冷热：近 20 日指数平均涨幅 + 成交活跃度（用 daily_price 总成交额近似）
+        # 市场宽度 + 大盘冷热：涨跌家数、总成交额、平均涨幅（基于 daily_price 最新一日）
         sentiment_row = conn.execute(
             """
             SELECT
-              AVG(pct_change) AS avg_pct,
-              SUM(amount)     AS total_amount
+              MAX(trade_date)  AS trade_date,
+              AVG(pct_change)  AS avg_pct,
+              SUM(amount)      AS total_amount,
+              SUM(CASE WHEN pct_change > 0 THEN 1 ELSE 0 END) AS up_count,
+              SUM(CASE WHEN pct_change < 0 THEN 1 ELSE 0 END) AS down_count,
+              SUM(CASE WHEN pct_change = 0 THEN 1 ELSE 0 END) AS flat_count
             FROM daily_price
             WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)
             """
         ).fetchone()
         avg_pct = sentiment_row["avg_pct"] if sentiment_row else None
         total_amt = sentiment_row["total_amount"] if sentiment_row else None
+        up_count = (sentiment_row["up_count"] or 0) if sentiment_row else 0
+        down_count = (sentiment_row["down_count"] or 0) if sentiment_row else 0
+        flat_count = (sentiment_row["flat_count"] or 0) if sentiment_row else 0
 
         # 简单规则：日均涨幅 > 0.5% 偏热，< -0.5% 偏冷
         if avg_pct is None:
@@ -724,19 +726,18 @@ def market_overview():
 
         return ok({
             "indices": _sanitize(index_cards),
-            "north_bound": _sanitize({
-                "trade_date": north_data["trade_date"] if north_data else None,
-                "north_net_buy": north_data["north_net_buy"] if north_data else None,
-                "hgt_net_buy":   north_data["hgt_net_buy"] if north_data else None,
-                "sgt_net_buy":   north_data["sgt_net_buy"] if north_data else None,
+            "breadth": _sanitize({
+                "trade_date": sentiment_row["trade_date"] if sentiment_row else None,
+                "up_count": up_count,
+                "down_count": down_count,
+                "flat_count": flat_count,
+                "total_amount": round(total_amt / 1e8, 0) if total_amt else None,  # 亿
                 "label": (
-                    "大幅净流入，外资积极"
-                    if north_data and north_data["north_net_buy"] and north_data["north_net_buy"] > 50e8 else
-                    "净流入，外资偏多" if north_data and north_data["north_net_buy"] and north_data["north_net_buy"] > 0 else
-                    "净流出，外资偏空" if north_data and north_data["north_net_buy"] and north_data["north_net_buy"] < -50e8 else
-                    "小幅净流出"
-                    if north_data and north_data["north_net_buy"] else "暂无数据"
-                ),
+                    "普涨，情绪亢奋" if up_count and up_count > (down_count or 0) * 3 else
+                    "涨多跌少，偏强" if up_count > down_count else
+                    "普跌，情绪低迷" if down_count and down_count > (up_count or 1) * 3 else
+                    "跌多涨少，偏弱" if down_count > up_count else "涨跌相当"
+                ) if (up_count or down_count) else "暂无数据",
             }),
             "sentiment": {
                 "regime": regime,
@@ -1195,7 +1196,7 @@ def recommendations_history():
                 ret = it.get("exit_return") or it.get("t5_return") or it.get("t3_return") or it.get("t1_return") or 0
                 results.append({
                     "code": it["code"],
-                    "name": None,  # outcome 表不存 name，前端可后续补
+                    "name": it.get("name"),  # get_outcome_list 已 JOIN stock_info 补股名
                     "scan_date": it["scan_date"],
                     "entry_price": round(it["entry_price"], 2) if it.get("entry_price") else None,
                     "current_price": None,
@@ -1521,9 +1522,10 @@ def factor_trend():
 def rule_signals():
     """常驻策略规则命中（选股→回测→推荐闭环的推荐端）
 
-    GET /api/investor/rule_signals?date=YYYY-MM-DD&limit=100
+    GET /api/investor/rule_signals?date=YYYY-MM-DD&limit=100&max_hits=200
     - date 缺省取 strategy_signals 最新 trade_date
     - limit 缺省 100，上限 500（命中数可能很大，保护前端）
+    - max_hits 缺省 200：当日命中超过该数的规则视为过泛（无筛选价值），整条规则排除
     返回该日命中列表，JOIN 股名与最新收盘价，按 confidence 降序。
     """
     date = (request.args.get("date") or "").strip()
@@ -1532,30 +1534,53 @@ def rule_signals():
     except (TypeError, ValueError):
         limit = 100
     limit = max(1, min(limit, 500))
+    try:
+        max_hits = int(request.args.get("max_hits", 200))
+    except (TypeError, ValueError):
+        max_hits = 200
+    max_hits = max(1, min(max_hits, 100000))
     with get_conn() as conn:
         if not date:
             row = conn.execute("SELECT MAX(trade_date) AS d FROM strategy_signals").fetchone()
             date = row["d"] if row and row["d"] else None
         if not date:
             return ok(_sanitize({"date": None, "total": 0, "items": []}))
-        total = conn.execute(
-            "SELECT COUNT(*) AS c FROM strategy_signals WHERE trade_date = ?", (date,)
-        ).fetchone()["c"]
+        # 按规则统计当日命中数，排除命中过泛的规则
+        hit_rows = conn.execute(
+            """SELECT rule_id, COUNT(*) AS hits FROM strategy_signals
+               WHERE trade_date = ? GROUP BY rule_id""",
+            (date,),
+        ).fetchall()
+        rule_hits = {r["rule_id"]: r["hits"] for r in hit_rows}
+        excluded_rules = sum(1 for h in rule_hits.values() if h > max_hits)
+        total = sum(h for h in rule_hits.values() if h <= max_hits)
         rows = conn.execute(
             """
             SELECT s.code, si.name AS name, s.rule_id, s.rule_name, s.confidence,
-                   dp.close AS latest_close
+                   dp.close AS latest_close,
+                   r.win_rate AS rule_win_rate, r.annual_return AS rule_annual_return,
+                   r.total_trades AS rule_total_trades
             FROM strategy_signals s
             LEFT JOIN stock_info si ON si.code = s.code
             LEFT JOIN daily_price dp ON dp.code = s.code AND dp.trade_date = s.trade_date
+            LEFT JOIN strategy_rules r ON r.id = s.rule_id
             WHERE s.trade_date = ?
+              AND s.rule_id IN (
+                  SELECT rule_id FROM strategy_signals
+                  WHERE trade_date = ? GROUP BY rule_id HAVING COUNT(*) <= ?
+              )
             ORDER BY s.confidence DESC
             LIMIT ?
             """,
-            (date, limit),
+            (date, date, max_hits, limit),
         ).fetchall()
     items = [dict(r) for r in rows]
-    return ok(_sanitize({"date": date, "total": total, "items": items}))
+    for it in items:
+        it["rule_hits"] = rule_hits.get(it["rule_id"])
+    return ok(_sanitize({
+        "date": date, "total": total, "items": items,
+        "excluded_rules": excluded_rules, "max_hits": max_hits,
+    }))
 
 
 # ─────────────────────────────────────────────

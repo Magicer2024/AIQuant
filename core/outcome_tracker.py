@@ -266,19 +266,20 @@ def get_summary(days: int = 30) -> dict:
 # ─────────────────────────────────────────────
 
 def get_outcome_list(days: int = 30, limit: int = 200) -> list:
-    """返回近 N 日推荐结果明细列表。"""
+    """返回近 N 日推荐结果明细列表（JOIN stock_info 补股名）。"""
     cutoff = f"-{days} days"
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT code, scan_date, horizon, strategy, entry_price,
-                   stop_loss, take_profit, fusion_score,
-                   t1_return, t3_return, t5_return, t10_return,
-                   max_return, min_return, hit_stop, hit_tp,
-                   exit_reason, exit_date, exit_return, evaluated_at
-            FROM recommend_outcome
-            WHERE scan_date >= date('now', ?)
-              AND entry_price > 0
-            ORDER BY scan_date DESC
+            SELECT o.code, si.name AS name, o.scan_date, o.horizon, o.strategy, o.entry_price,
+                   o.stop_loss, o.take_profit, o.fusion_score,
+                   o.t1_return, o.t3_return, o.t5_return, o.t10_return,
+                   o.max_return, o.min_return, o.hit_stop, o.hit_tp,
+                   o.exit_reason, o.exit_date, o.exit_return, o.evaluated_at
+            FROM recommend_outcome o
+            LEFT JOIN stock_info si ON si.code = o.code
+            WHERE o.scan_date >= date('now', ?)
+              AND o.entry_price > 0
+            ORDER BY o.scan_date DESC
             LIMIT ?
         """, (cutoff, limit)).fetchall()
     return [dict(r) for r in rows]
