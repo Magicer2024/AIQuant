@@ -1114,7 +1114,7 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     对数据库中所有股票的历史评分进行全量补算，
     同时将每日融合分高于阈值的日期写入 stock_signal 表。
 
-    :param progress_callback: 进度回调 fn(current, total, success, failed), 可选
+    :param progress_callback: 进度回调 fn(percent, message)，percent 为 0~100 整数，可选
     :param target: "all"（全市场，默认）/ "watchlist"（仅自选股）
                    watchlist 模式下，stock_signal 也只写自选股命中
     :return: dict with total, success, failed, signals, elapsed_s, target
@@ -1178,6 +1178,9 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     for i, (code, name) in enumerate(stocks):
         if (i + 1) % 200 == 0:
             print(f"  补算进度: {i+1}/{total}  成功:{success}  失败:{failed}")
+        if progress_callback and (i + 1) % 50 == 0:
+            progress_callback(int((i + 1) / total * 100),
+                              f"正在重算 {i+1}/{total}  成功:{success} 失败:{failed}")
 
         ok = sync_strategy_score(code, verbose=False)
         if ok:
@@ -1331,9 +1334,6 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
         except Exception as e:
             print(f"  [{code}] stock_signal 写入失败: {e}")
 
-        if progress_callback and i % 50 == 0:
-            progress_callback(i, "正在重算 " + str(i) + "/" + str(total))
-
     # Batch insert with single transaction
     if sig_records:
         with get_conn() as conn:
@@ -1359,7 +1359,7 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     print(f"历史评分补算完成: {success} 只成功 / {failed} 只失败，{len(sig_records)} 条推荐写入 stock_signal，耗时 {elapsed:.0f}秒")
 
     if progress_callback:
-        progress_callback(total, "重算完成: " + str(len(sig_records)) + " 条信号")
+        progress_callback(100, "重算完成: " + str(len(sig_records)) + " 条信号")
 
     # ── 并入常驻规则扫描（选股→回测→推荐闭环，best-effort）──
     rule_hits = 0

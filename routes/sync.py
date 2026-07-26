@@ -305,7 +305,8 @@ def start_recalc():
     if is_any_running():
         return fail("有任务正在进行中，请稍后再试", 409)
 
-    task_id = submit_task(lambda: run_recalc_all_scores(target=target))
+    # progress_callback=True 启用 task_queue 的进度桥接（任务内回调 → /sync/status/<id> 可读）
+    task_id = submit_task(run_recalc_all_scores, target=target, progress_callback=True)
     return ok({"task_id": task_id, "target": target,
               "message": f"重算任务已启动（target={target}）"})
 
