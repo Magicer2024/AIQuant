@@ -83,13 +83,22 @@ def update_position_price(position_id: int, current_price: float):
 
 
 def get_positions(status: str = "holding") -> list[dict]:
-    """获取持仓列表"""
+    """获取持仓列表（从 latest_price 物化表补全最新价）"""
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM positions WHERE status=? ORDER BY entry_date DESC",
-            (status,)
+            """
+            SELECT p.*, lp.close AS latest_close, lp.trade_date AS price_date
+            FROM positions p
+            LEFT JOIN latest_price lp ON lp.code = p.code
+            WHERE p.status = ?
+            ORDER BY p.entry_date DESC
+            """,
+            (status,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    for r in result:
+        r["current_price"] = r.get("latest_close") or r.get("current_price") or 0
+    return result
 
 
 def get_position_by_id(position_id: int) -> dict | None:
@@ -118,15 +127,20 @@ def delete_position(position_id: int):
 
 
 def get_position_summary() -> dict:
-    """持仓汇总统计"""
+    """持仓汇总统计（从 latest_price 物化表取最新价）"""
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM positions WHERE status='holding'"
+            """
+            SELECT p.entry_price, p.shares, lp.close
+            FROM positions p
+            LEFT JOIN latest_price lp ON lp.code = p.code
+            WHERE p.status='holding'
+            """
         ).fetchall()
     if not rows:
         return {"total_value": 0, "total_pnl": 0, "pnl_pct": 0, "count": 0}
     total_cost = sum(r["entry_price"] * r["shares"] for r in rows)
-    total_value = sum((r["current_price"] or r["entry_price"]) * r["shares"] for r in rows)
+    total_value = sum((r["close"] or r["entry_price"]) * r["shares"] for r in rows)
     total_pnl = total_value - total_cost
     pnl_pct = (total_pnl / total_cost * 100) if total_cost else 0
     return {

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import traceback
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, request
 
 from utils.api import ok, fail
 from backtest.conditions import get_catalog

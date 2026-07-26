@@ -1029,6 +1029,13 @@ def sync_single_stock_to_watchlist(code: str, verbose: bool = False) -> dict:
                 print(f"[watchlist] {code} sync_strategy_score 异常: {e}")
             score_ok = False
 
+        # 4) 刷新 latest_price 物化表（单股）
+        try:
+            from core.repository.price_repo import refresh_latest_price
+            refresh_latest_price([code])
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "code": code,
@@ -1487,6 +1494,17 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         except Exception as e:
             if verbose:
                 print(f"  [WARN] 策略分数重算失败: {e}")
+
+        # 刷新 latest_price 物化表（消除查询时的 N+1 子查询）
+        try:
+            from core.repository.price_repo import refresh_latest_price
+            if wl_set:
+                refresh_latest_price(list(wl_set))
+            else:
+                refresh_latest_price()
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] latest_price 刷新失败: {e}")
 
     elapsed = time.time() - t0
     if verbose:

@@ -77,19 +77,16 @@ def update_strategy_scores_batch(code: str, scores_df: pd.DataFrame):
     if not records:
         return
     with _get_conn() as conn:
-        conn.execute("PRAGMA foreign_keys=OFF")
-        for rec in records:
-            conn.execute("""
-                UPDATE daily_price SET
-                    vol_score = :vol_score,
-                    ma_score = :ma_score,
-                    diverge_score = :diverge_score,
-                    bottom_score = :bottom_score,
-                    whale_score = :whale_score,
-                    fusion_score = :fusion_score
-                WHERE code = :code AND trade_date = :trade_date
-            """, rec)
-        conn.commit()
+        conn.executemany("""
+            UPDATE daily_price SET
+                vol_score = :vol_score,
+                ma_score = :ma_score,
+                diverge_score = :diverge_score,
+                bottom_score = :bottom_score,
+                whale_score = :whale_score,
+                fusion_score = :fusion_score
+            WHERE code = :code AND trade_date = :trade_date
+        """, records)
 
 
 def get_daily_price(code: str, start_date: str = None, end_date: str = None,
@@ -257,3 +254,36 @@ def get_stock_count_in_db() -> int:
             "SELECT COUNT(DISTINCT code) as n FROM daily_price"
         ).fetchone()
     return row["n"] if row else 0
+
+
+# ── latest_price 物化表维护 ─────────────────────
+
+def refresh_latest_price(codes: list[str] = None):
+    """刷新 latest_price 物化表（每只股票取最新一行）。
+
+    - codes 为 None 时全量刷新；否则仅刷新指定 code 子集。
+    - 应在每次数据同步完成后调用。
+    """
+    with _get_conn() as conn:
+        if codes:
+            placeholders = ",".join("?" for _ in codes)
+            conn.execute(f"DELETE FROM latest_price WHERE code IN ({placeholders})", codes)
+            conn.execute(f"""
+                INSERT INTO latest_price (code, trade_date, close, pct_change, high, low, volume, amount, fusion_score)
+                SELECT code, trade_date, close, pct_change, high, low, volume, amount, fusion_score
+                FROM daily_price
+                WHERE code IN ({placeholders})
+                  AND trade_date = (
+                      SELECT MAX(trade_date) FROM daily_price dp2 WHERE dp2.code = daily_price.code
+                  )
+            """, codes)
+        else:
+            conn.execute("DELETE FROM latest_price")
+            conn.execute("""
+                INSERT INTO latest_price (code, trade_date, close, pct_change, high, low, volume, amount, fusion_score)
+                SELECT code, trade_date, close, pct_change, high, low, volume, amount, fusion_score
+                FROM daily_price
+                WHERE (code, trade_date) IN (
+                    SELECT code, MAX(trade_date) FROM daily_price GROUP BY code
+                )
+            """)

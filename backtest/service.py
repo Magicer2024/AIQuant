@@ -30,6 +30,41 @@ from backtest.engine import VisualBacktestEngine, BacktestParams
 _TASKS: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.RLock()
 
+# 任务池容量与 TTL（防止长期运行内存泄漏）
+_MAX_TASKS = 50
+_TASK_TTL_SECONDS = 2 * 3600  # 完成后 2 小时自动清理
+
+
+def _purge_stale_tasks():
+    """清理已完成且超过 TTL 的任务，以及超出容量上限的旧任务。"""
+    now = datetime.now()
+    with _LOCK:
+        # 1) 清理超 TTL 的已完成任务
+        stale_ids = []
+        for tid, t in _TASKS.items():
+            if t["status"] in ("done", "error", "cancelled"):
+                started = t.get("started_at", "")
+                try:
+                    started_dt = datetime.fromisoformat(started)
+                    if (now - started_dt).total_seconds() > _TASK_TTL_SECONDS:
+                        stale_ids.append(tid)
+                except (ValueError, TypeError):
+                    stale_ids.append(tid)
+        for tid in stale_ids:
+            del _TASKS[tid]
+
+        # 2) 容量上限：删除最早的非运行中任务
+        if len(_TASKS) > _MAX_TASKS:
+            finished = [
+                (tid, t.get("started_at", ""))
+                for tid, t in _TASKS.items()
+                if t["status"] != "running"
+            ]
+            finished.sort(key=lambda x: x[1])
+            overflow = len(_TASKS) - _MAX_TASKS
+            for tid, _ in finished[:overflow]:
+                del _TASKS[tid]
+
 
 # ──────────── 工具 ────────────
 
@@ -163,6 +198,7 @@ def _save_result(result: Dict[str, Any], rule_name: str) -> Optional[int]:
 
 def create_task(payload: Dict[str, Any]) -> str:
     """创建任务并异步执行；返回 task_id"""
+    _purge_stale_tasks()
     task_id = uuid.uuid4().hex[:16]
     params = _build_params(payload)
     rule_name = payload.get("rule_name") or "可视化回测"
