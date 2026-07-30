@@ -1418,9 +1418,17 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
             print(f"  [{code}] stock_signal 写入失败: {e}")
 
     # Batch insert with single transaction
-    if sig_records:
-        with get_conn() as conn:
-            conn.execute("BEGIN TRANSACTION")
+    # 先清掉本轮重算范围内的短线融合旧信号再写入：闸门/阈值收紧后不再命中的
+    # 历史信号必须删除，INSERT OR REPLACE 只覆盖同键行，否则旧推荐（如已跌破
+    # MA20 的接飞刀票）会一直残留在今日推荐里
+    _recalc_codes = [c for c, _ in stocks]
+    with get_conn() as conn:
+        conn.execute("BEGIN TRANSACTION")
+        conn.executemany(
+            "DELETE FROM stock_signal WHERE code=? AND horizon='short' "
+            "AND strategy IN ('短线融合', '超跌反弹v3')",
+            [(c,) for c in _recalc_codes])
+        if sig_records:
             conn.executemany("""
                 INSERT OR REPLACE INTO stock_signal
                   (scan_date, trade_date, code, name, price, fusion_score,
@@ -1435,8 +1443,8 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                    :buy_volume, :buy_money, :sent_wechat, :created_at,
                    :horizon, :strategy)
             """, sig_records)
-            conn.commit()
-        print(f"  stock_signal 写入完成: {len(sig_records)} 条记录")
+        conn.commit()
+    print(f"  stock_signal 写入完成: {len(sig_records)} 条记录（已清理重算范围内旧短线信号）")
 
     elapsed = time.time() - start
     print(f"历史评分补算完成: {success} 只成功 / {failed} 只失败，{len(sig_records)} 条推荐写入 stock_signal，耗时 {elapsed:.0f}秒")
