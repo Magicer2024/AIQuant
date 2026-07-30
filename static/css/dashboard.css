@@ -767,6 +767,30 @@ tr:hover td {
     box-shadow: 0 8px 26px rgba(255,140,0,0.22);
     transform: translateY(-2px);
 }
+
+/* ── 已突破确认价 高亮卡片（绿色强调：时机确认信号已触发，可入场）── */
+.action-card.breakout-card {
+    border: 1px solid rgba(0,230,118,0.5);
+    border-left: 3px solid #00e676;
+    background: linear-gradient(135deg, rgba(0,230,118,0.08), rgba(0,212,240,0.05) 45%, var(--bg-panel) 75%);
+    box-shadow: 0 4px 18px rgba(0,230,118,0.12);
+}
+.action-card.breakout-card:hover {
+    border-color: rgba(0,230,118,0.9);
+    box-shadow: 0 8px 26px rgba(0,230,118,0.22);
+    transform: translateY(-2px);
+}
+.price-sub.confirm-broken {
+    display: inline-block; margin-top: 2px; padding: 1px 6px;
+    color: #00e676; font-weight: 700;
+    background: rgba(0,230,118,0.12); border: 1px solid rgba(0,230,118,0.35);
+    border-radius: 4px;
+    animation: breakoutPulse 1.6s ease-in-out infinite;
+}
+@keyframes breakoutPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,230,118,0.35); }
+    50% { box-shadow: 0 0 8px 2px rgba(0,230,118,0.18); }
+}
 .strategy-badge.lhb-badge {
     color: #1a1408; font-weight: 700;
     background: linear-gradient(90deg, #ffd24a, #ff9500);

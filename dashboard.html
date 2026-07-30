@@ -1394,8 +1394,10 @@ function renderPickCard(it) {
 
             const hzKey = it.horizon || 'short';
             const isLhb = it.strategy === '隔日动量';  // 龙虎榜资金异动专属 UI
+// 现价已站上突破确认线 → 时机确认信号触发，整卡高亮提示
+            const brokeOut = !!(it.confirm_trigger && it.latest_close && it.latest_close >= it.confirm_trigger);
             return `
-                <div class="action-card${isLhb ? ' lhb-card' : ''}" onclick="openKline('${it.code}')">
+                <div class="action-card${isLhb ? ' lhb-card' : ''}${brokeOut ? ' breakout-card' : ''}" onclick="openKline('${it.code}')">
                     <div class="action-head">
                         <div>
                             <div class="action-name">${it.name || it.code} <span class="horizon-tag hz-${hzKey}">${HORIZON_LABEL[hzKey] || '短线'}</span>${it.strategy ? ` <span class="strategy-badge${isLhb ? ' lhb-badge' : ''}">${isLhb ? '🐯 龙虎榜·隔日动量' : it.strategy}</span>` : ''}</div>
@@ -1413,7 +1415,9 @@ function renderPickCard(it) {
                             <div class="price-lbl">建议买入</div>
                             <div class="price-val">${entry}</div>
                             ${pctHtml?`<div class="price-sub">最新 ${it.latest_close?.toFixed(2) || '--'} ${pctHtml}</div>`:''}
-                            ${it.confirm_trigger?`<div class="price-sub" title="回放验证：等收盘突破推荐后高点再入场，隔日胜率更高">突破确认 ${it.confirm_trigger.toFixed(2)}</div>`:''}
+                            ${it.confirm_trigger?(brokeOut
+                                ?`<div class="price-sub confirm-broken" title="现价已站上突破确认线（推荐后高点），回放验证突破后隔日胜率更高">🚀 已突破确认 ${it.confirm_trigger.toFixed(2)}</div>`
+                                :`<div class="price-sub confirm-waiting" title="回放验证：等收盘突破推荐后高点再入场，隔日胜率更高">突破确认 ${it.confirm_trigger.toFixed(2)}</div>`):''}
                         </div>
                         <div class="action-arrow">·</div>
                         <div class="price-cell sell">
