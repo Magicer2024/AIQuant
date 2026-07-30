@@ -1300,12 +1300,17 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                 s5 = strategy_whale_accumulation(df)
                 fused = fuse_signals([s1, s2, s3, s4, s5], weights=_active_weights)
                 qual = quality_series(name, df, _ts).reindex(fused.index).fillna(False)
+                # 趋势闸门：排除 MA20 向下/未站上 MA20 的"一路阴跌"接飞刀信号
+                # （2026-07-29 回测：隔日OC平均 -0.043%→-0.003%，信号数 -69%）
+                gate = trend_gate_series(df).reindex(fused.index).fillna(False)
                 for _, row in fused.iterrows():
                     fs = float(row.get("FUSION_SCORE", 0) or 0)
                     if fs < SIG_THRESHOLD:
                         continue
                     # 质量过滤（ST/流动性/市值），清理 picks，逻辑本身不改
                     if not bool(qual.get(row.name, False)):
+                        continue
+                    if not bool(gate.get(row.name, False)):
                         continue
                     trade_date = str(row.name.date()) if hasattr(row.name, "date") else str(row.name)[:10]
                     price = round(float(row["close"]), 2)
