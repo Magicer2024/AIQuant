@@ -1392,11 +1392,12 @@ function renderPickCard(it) {
             }
 
             const hzKey = it.horizon || 'short';
+            const isLhb = it.strategy === '隔日动量';  // 龙虎榜资金异动专属 UI
             return `
-                <div class="action-card" onclick="openKline('${it.code}')">
+                <div class="action-card${isLhb ? ' lhb-card' : ''}" onclick="openKline('${it.code}')">
                     <div class="action-head">
                         <div>
-                            <div class="action-name">${it.name || it.code} <span class="horizon-tag hz-${hzKey}">${HORIZON_LABEL[hzKey] || '短线'}</span>${it.strategy ? ` <span class="strategy-badge">${it.strategy}</span>` : ''}</div>
+                            <div class="action-name">${it.name || it.code} <span class="horizon-tag hz-${hzKey}">${HORIZON_LABEL[hzKey] || '短线'}</span>${it.strategy ? ` <span class="strategy-badge${isLhb ? ' lhb-badge' : ''}">${isLhb ? '🐯 龙虎榜·隔日动量' : it.strategy}</span>` : ''}</div>
                             <div class="action-code">${it.code}${it.industry?` · ${it.industry}`:''}</div>
                         </div>
                         <div class="action-score" style="cursor:pointer" onclick="event.stopPropagation(); showFactorDetail('${it.code}','${(it.name||it.code).replace(/'/g, "\\'")}')" title="查看融合分详情">
@@ -1883,16 +1884,11 @@ async function maybeAutoSync() {
 
 function onAutoSyncDone(msg) {
     if (msg) showToast(msg, 'success');
-    // 同步完成后，刷新首页数据 + 检查今日推荐是否最新
+    // 后端「同步」已自洽完成「拉行情 + 拉龙虎榜 + 重算打分」，此处只需刷新展示
     if (typeof currentTab !== 'undefined' && currentTab === 'home') {
         const c = document.getElementById('content');
         if (c) loadHomeTab(c);
-        // 异步检查推荐是否今天的，否则触发自动重算
-        ensureTodayRecs(true);
         loadSyncStatusPanel();
-    } else {
-        // 不在首页就不打扰，但后台跑一次打分刷新（让用户下次切回首页时看到新数据）
-        ensureTodayRecs(false);
     }
 }
 
@@ -2080,8 +2076,11 @@ async function homeSync() {
             setTimeout(() => setInlineProgress(null), 4000);
             if (btn) { btn.disabled = false; btn.textContent = '立即同步行情'; }
             if (btn2) btn2.disabled = false;
-            // 同步完成 → 自动检查/触发推荐重算
-            ensureTodayRecs(true);
+            // 后端「同步」已自洽完成：拉行情 + 拉龙虎榜 + 重算打分，此处只需刷新展示
+            if (typeof currentTab !== 'undefined' && currentTab === 'home') {
+                const c = document.getElementById('content');
+                if (c) loadHomeTab(c);
+            }
             // 同步状态刷新
             loadSyncStatusPanel();
         });

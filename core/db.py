@@ -741,7 +741,7 @@ from core.repository.futures_repo import (
     upsert_index_futures, get_index_futures, get_latest_futures_date,
 )
 from core.repository.lhb_repo import (
-    upsert_lhb_detail, get_lhb_detail, get_latest_lhb_date,
+    upsert_lhb_detail, get_lhb_detail, get_latest_lhb_date, get_lhb_map_for_date,
 )
 from core.repository.mgmt_repo import (
     upsert_mgmt_holding, get_mgmt_holding, get_latest_mgmt_holding_date,

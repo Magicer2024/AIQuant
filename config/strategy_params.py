@@ -103,6 +103,20 @@ QUALITY_FILTER = {
 }
 
 
+# ── 隔日动量信号线（龙虎榜净买占比，独立于超跌反弹并行） ──
+# Phase 1 样本外验证（2026-01~07，tools/mine_next_day.py）：
+#   净买占比>=10% 且非涨停 → 次日 open->close 胜率 54.3%、均值 +0.95%（OC 现实口径）；
+#   龙虎榜盘后公布，只能次日开盘买入，故用 OC 口径而非 CC（含买不到的隔夜跳空）。
+# enabled=False 即一键下线，不影响任何现有短线链路。
+NEXT_DAY_MOMENTUM = {
+    "enabled": True,
+    "min_net_buy_ratio": 10.0,   # 龙虎榜净买额占总成交比下限（%）
+    "exclude_limit_up": True,    # 剔除当日涨停（次日巨幅高开买不到、日内易回落）
+    "stop_loss_pct": -0.04,      # 止损 -4%
+    "take_profit_pct": 0.065,    # 止盈 +6.5%（盈亏比≈1.6 稳超 1.5，规避信号灯 avoid 的浮点边界）
+}
+
+
 # ── Phase 1: 模板穷举配置 ──
 PHASE1_CONFIG = {
     "ic_min_abs": 0.02,           # IC 过滤阈值

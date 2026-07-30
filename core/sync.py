@@ -22,6 +22,8 @@ from core.db import (
     # 自选股相关
     get_watchlist_codes, get_watchlist_with_names, count_watchlist,
     has_watchlist_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
+    # 龙虎榜（隔日动量信号线）
+    upsert_lhb_detail, get_latest_lhb_date, get_lhb_map_for_date,
 )
 from qlib_engine.data_bridge import append_daily_data, batch_append_daily, append_calendar_dates
 from qlib_engine import init_qlib as _init_qlib
@@ -118,8 +120,9 @@ from strategy.strategies import (
     fuse_signals, DEFAULT_WEIGHTS
 )
 from strategy.mid_long import scan_mid_term, scan_long_term
+from strategy.next_day_momentum import scan_next_day_momentum
 from strategy.rec_filters import trend_gate_series, quality_series, passes_quality
-from config.strategy_params import SHORT_ENGINE
+from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM
 
 # ─────────────────────────────────────────────
 # 配置
@@ -705,7 +708,8 @@ def _clear_sync_cache(start_date: str, end_date: str):
 
 
 def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 1,
-               min_coverage: float = 0.9, target: str = "all") -> dict:
+               min_coverage: float = 0.9, target: str = "all",
+               recalc: bool = True) -> dict:
     """
     每天运行一次：增量拉取当日行情（单线程版本，baostock 不支持多线程）
 
@@ -715,6 +719,9 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         max_workers: 已废弃，保持单线程
         min_coverage: 覆盖率阈值，默认0.9（90%），数据源不完整时可降低
         target: "all"（全市场，默认）/ "watchlist"（仅自选股）
+        recalc: 同步完成后是否立即重算打分（默认 True）。置 True 时本函数
+                自洽完成「拉行情 + 拉龙虎榜 + 重算打分」，保证隔日动量金色卡片
+                无需再手动点「立即重算打分」即可出现。
     """
     import baostock as bs
 
@@ -953,10 +960,38 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         total_idx = sum(index_results.values())
         print(f">>> 指数同步完成，共写入 {total_idx} 行")
 
+    # 同步当日龙虎榜（供隔日动量信号线）—— 抓取失败不阻断主流程
+    if NEXT_DAY_MOMENTUM.get("enabled"):
+        try:
+            if verbose:
+                print(f"\n>>> 同步龙虎榜 {start_date}~{end_date}...")
+            from core.data_fetcher import fetch_lhb_detail
+            lhb_df = fetch_lhb_detail(start_date, end_date)
+            n_lhb = upsert_lhb_detail(lhb_df) if lhb_df is not None and not lhb_df.empty else 0
+            if verbose:
+                print(f">>> 龙虎榜同步完成，写入/更新 {n_lhb} 条")
+        except Exception as e:
+            print(f"  [WARN] 龙虎榜同步失败（不阻断同步主流程）: {e}")
+
     log_sync("daily_sync", len(stocks), success_n, failed_n,
              elapsed, f"增量 {start_date}~{end_date} 单线程")
 
-    return {"total": len(stocks), "success": success_n, "failed": failed_n}
+    # ── 同步完成后立即重算全量打分（含龙虎榜隔日动量信号）──
+    # 让「全市场同步」成为自洽流程：拉行情 + 拉龙虎榜 + 重算打分，
+    # 三步同一顺序执行，隔日动量金色卡片无需再手动点「立即重算打分」。
+    recalc_result = None
+    if recalc and success_n > 0:
+        try:
+            if verbose:
+                print(f"\n>>> 同步完成，开始重算打分（target={target}，含龙虎榜隔日动量）...")
+            recalc_result = recalc_all_scores(target=target)
+            if verbose:
+                print(f">>> 打分重算完成: {recalc_result}")
+        except Exception as e:
+            print(f"  [WARN] 同步后重算打分失败（不影响已同步的行情/龙虎榜数据）: {e}")
+
+    return {"total": len(stocks), "success": success_n, "failed": failed_n,
+            "recalc": recalc_result}
 
 
 # ─────────────────────────────────────────────
@@ -1175,6 +1210,19 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     except Exception:
         _mktcap_map = {}
 
+    # ── 隔日动量（龙虎榜净买占比）：一次性预加载最新龙虎榜日期的映射 ──
+    _lhb_map = {}
+    _lhb_date = None
+    if NEXT_DAY_MOMENTUM.get("enabled"):
+        try:
+            _lhb_date = get_latest_lhb_date()
+            if _lhb_date:
+                _lhb_map = get_lhb_map_for_date(_lhb_date)
+                print(f"  [隔日动量] 预加载龙虎榜 {_lhb_date}：{len(_lhb_map)} 只")
+        except Exception as e:
+            print(f"  [WARN] 隔日动量龙虎榜预加载失败: {e}")
+            _lhb_map = {}
+
     for i, (code, name) in enumerate(stocks):
         if (i + 1) % 200 == 0:
             print(f"  补算进度: {i+1}/{total}  成功:{success}  失败:{failed}")
@@ -1331,6 +1379,36 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                     "horizon": sig["horizon"],
                     "strategy": sig["strategy"],
                 })
+
+            # ── 隔日动量（龙虎榜净买占比）：仅最新交易日、可交易子集 ──
+            # 追加在短线记录之后：同 horizon 同票 INSERT OR REPLACE 时动量信号胜出
+            if _lhb_map:
+                nd_sig = scan_next_day_momentum(
+                    df, _lhb_map.get(code), name, _ts, params=NEXT_DAY_MOMENTUM)
+                if nd_sig and passes_quality(name, df, _ts):
+                    sig_records.append({
+                        "scan_date": nd_sig["trade_date"],
+                        "trade_date": nd_sig["trade_date"],
+                        "code": code,
+                        "name": name or code,
+                        "price": nd_sig["buy_price"],
+                        "fusion_score": nd_sig["fusion_score"],
+                        "vol_score": 0,
+                        "ma_score": 0,
+                        "diverge_score": 0,
+                        "bottom_score": 0,
+                        "whale_score": 0,
+                        "trigger_list": _json.dumps(nd_sig["triggers"], ensure_ascii=False),
+                        "buy_price": nd_sig["buy_price"],
+                        "stop_loss": nd_sig["stop_loss"],
+                        "take_profit": nd_sig["take_profit"],
+                        "buy_volume": 0,
+                        "buy_money": 0,
+                        "sent_wechat": 0,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "horizon": nd_sig["horizon"],
+                        "strategy": nd_sig["strategy"],
+                    })
         except Exception as e:
             print(f"  [{code}] stock_signal 写入失败: {e}")
 

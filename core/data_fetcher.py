@@ -606,3 +606,105 @@ def fetch_all_market_cap(codes: list[str] = None, progress_cb=None) -> list[dict
     return results
 
     return results
+
+
+# ─────────────────────────────────────────────
+# 龙虎榜明细（akshare 东方财富，自带上榜后 1/2/5/10 日涨幅标签）
+# ─────────────────────────────────────────────
+
+# akshare stock_lhb_detail_em 原始列名 → 本项目 stock_lhb_detail 表字段
+_LHB_COL_MAP = {
+    "代码": "code",
+    "名称": "name",
+    "上榜日": "trade_date",
+    "收盘价": "close_price",
+    "涨跌幅": "pct_change",
+    "龙虎榜净买额": "net_buy",
+    "龙虎榜买入额": "buy_amt",
+    "龙虎榜卖出额": "sell_amt",
+    "龙虎榜成交额": "total_amt",
+    "市场总成交额": "mkt_total_amt",
+    "净买额占总成交比": "net_buy_ratio",
+    "换手率": "turnover_rate",
+    "流通市值": "float_mkt_cap",
+    "上榜原因": "reason",
+    "上榜后1日": "perf_1d",
+    "上榜后2日": "perf_2d",
+    "上榜后5日": "perf_5d",
+    "上榜后10日": "perf_10d",
+}
+
+
+def _month_ranges(start_date: str, end_date: str):
+    """把 [start, end] 拆成按自然月的 (start, end) 段，格式 YYYYMMDD"""
+    from datetime import date
+    s = datetime.strptime(start_date, "%Y%m%d").date()
+    e = datetime.strptime(end_date, "%Y%m%d").date()
+    cur = s
+    while cur <= e:
+        if cur.month == 12:
+            nxt = date(cur.year + 1, 1, 1)
+        else:
+            nxt = date(cur.year, cur.month + 1, 1)
+        seg_end = min(e, nxt - timedelta(days=1))
+        yield cur.strftime("%Y%m%d"), seg_end.strftime("%Y%m%d")
+        cur = nxt
+
+
+def fetch_lhb_detail(start_date: str, end_date: str, progress_cb=None) -> pd.DataFrame:
+    """
+    抓取龙虎榜明细（akshare ak.stock_lhb_detail_em，东方财富）。
+    按自然月分段请求以规避单次日期跨度过大导致的接口返回不全/超时。
+
+    :param start_date: 起始日 YYYYMMDD 或 YYYY-MM-DD
+    :param end_date:   结束日 YYYYMMDD 或 YYYY-MM-DD
+    :param progress_cb: 进度回调 fn(seg_start, seg_end, i, total)
+    :return: 标准化 DataFrame，列名与 stock_lhb_detail 表字段一致；
+             上榜后 1/2/5/10 日涨幅直接映射为 perf_1d/2d/5d/10d
+    """
+    import akshare as ak
+
+    start_date = start_date.replace("-", "")
+    end_date = end_date.replace("-", "")
+    segs = list(_month_ranges(start_date, end_date))
+    frames = []
+    for i, (s, e) in enumerate(segs):
+        if progress_cb:
+            progress_cb(s, e, i, len(segs))
+        for attempt in range(3):
+            try:
+                df = ak.stock_lhb_detail_em(start_date=s, end_date=e)
+                if df is not None and not df.empty:
+                    frames.append(df)
+                break
+            except Exception as ex:
+                if attempt == 2:
+                    print(f"  [lhb] {s}~{e} 抓取失败（已重试）: {ex}")
+                else:
+                    time.sleep(1.5)
+    if not frames:
+        return pd.DataFrame()
+
+    raw = pd.concat(frames, ignore_index=True)
+    keep = [c for c in _LHB_COL_MAP if c in raw.columns]
+    out = raw[keep].rename(columns=_LHB_COL_MAP)
+
+    # 类型规整
+    out["code"] = out["code"].astype(str).str.zfill(6)
+    out["trade_date"] = pd.to_datetime(out["trade_date"]).dt.strftime("%Y-%m-%d")
+    num_cols = ["close_price", "pct_change", "net_buy", "buy_amt", "sell_amt",
+                "total_amt", "mkt_total_amt", "net_buy_ratio", "turnover_rate",
+                "float_mkt_cap", "perf_1d", "perf_2d", "perf_5d", "perf_10d"]
+    for c in num_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # 同一 (trade_date, code) 可能因多条上榜原因重复：净买额相同，reason 合并
+    if not out.empty:
+        out = (
+            out.sort_values(["trade_date", "code"])
+               .groupby(["trade_date", "code"], as_index=False)
+               .agg({**{c: "first" for c in out.columns if c not in ("trade_date", "code", "reason")},
+                     "reason": lambda s: " / ".join(sorted(set(str(x) for x in s if str(x) != "nan")))})
+        )
+    return out
