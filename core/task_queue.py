@@ -12,14 +12,15 @@ _tasks = {}
 
 
 def submit_task(fn, *args, **kwargs):
-    """提交异步任务，返回 8 字符任务 ID"""
+    """提交异步任务，返回 8 字符任务 ID。kind 用于按类型做互斥判定（如 "recalc"）"""
     task_id = str(uuid.uuid4())[:8]
     progress_callback = kwargs.pop("progress_callback", None)
+    kind = kwargs.pop("kind", "misc")
 
     with _lock:
         _tasks[task_id] = {
             "status": "pending", "progress": 0, "message": "",
-            "started_at": time.time()
+            "kind": kind, "started_at": time.time()
         }
 
     def _wrap():
@@ -65,7 +66,10 @@ def cleanup_old_tasks(max_age_seconds=3600):
             del _tasks[tid]
 
 
-def is_any_running():
-    """检查是否有正在运行的任务"""
+def is_any_running(kind=None):
+    """检查是否有正在运行的任务。kind=None 时不区分类型（兼容旧调用）；
+    指定 kind 时只统计同类任务，避免「加自选补拉/推荐池拉取」等轻量任务误伤重算。"""
     with _lock:
-        return any(t["status"] in ("pending", "running") for t in _tasks.values())
+        return any(t["status"] in ("pending", "running")
+                   and (kind is None or t.get("kind") == kind)
+                   for t in _tasks.values())

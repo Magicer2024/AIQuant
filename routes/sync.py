@@ -306,11 +306,16 @@ def start_recalc():
     if target not in ("all", "watchlist"):
         target = "all"
 
-    if is_any_running():
-        return fail("有任务正在进行中，请稍后再试", 409)
+    # 同步进行中：daily_sync 完成后会自动重算，无需重复触发
+    if _sync_progress["running"]:
+        return fail("正在同步行情（完成后会自动重算打分），请等待同步结束", 409)
+    # 只与同类重算任务互斥，避免加自选补拉/推荐池拉取等轻量任务误伤
+    if is_any_running(kind="recalc"):
+        return fail("已有一个重算任务在进行中，请稍后再试", 409)
 
     # progress_callback=True 启用 task_queue 的进度桥接（任务内回调 → /sync/status/<id> 可读）
-    task_id = submit_task(run_recalc_all_scores, target=target, progress_callback=True)
+    task_id = submit_task(run_recalc_all_scores, target=target,
+                          progress_callback=True, kind="recalc")
     return ok({"task_id": task_id, "target": target,
               "message": f"重算任务已启动（target={target}）"})
 

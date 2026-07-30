@@ -114,7 +114,13 @@ function showSkeleton(container, rowCount) {
 async function fetchJSON(url, opts) {
     opts = opts || {};
     const resp = await fetch(url, opts);
-    if (!resp.ok) throw new Error(resp.statusText);
+    if (!resp.ok) {
+        // 优先透传后端 JSON 里的中文错误信息（fail() 返回 {error: "..."}），
+        // 否则只能看到 statusText（如 409 -> "CONFLICT"）
+        let msg = '';
+        try { const j = await resp.json(); msg = (j && j.error) || ''; } catch (e) {}
+        throw new Error(msg || resp.statusText || ('HTTP ' + resp.status));
+    }
     return resp.json();
 }
 
