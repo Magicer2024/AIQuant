@@ -18,6 +18,12 @@
     --negative: #00e676;
     --warning: #ffab40;
     --danger: #ff1744;
+    /* 别名变量：dashboard.html 内联样式大量引用，缺失会导致弹窗透明等渲染问题 */
+    --surface: var(--bg-elevated);
+    --bg: var(--bg-input);
+    --text: var(--text-primary);
+    --success: #00e676;
+    --green: #10b981;
     --radius: 6px;
     --radius-md: 10px;
     --radius-lg: 14px;
@@ -496,6 +502,18 @@ tr:hover td {
     border-color: #00d4f0;
     color: #00d4f0;
 }
+/* ── K线弹窗「实时行情」跳转按钮：靠右、避开右上角关闭按钮 ── */
+.quote-link-btn {
+    margin-left: auto;
+    margin-right: 34px;
+    border-color: rgba(0,212,240,0.45);
+    color: #00d4f0;
+}
+.quote-link-btn:hover {
+    background: rgba(0,212,240,0.15);
+    border-color: #00d4f0;
+    color: #00d4f0;
+}
 
 /* ── Utility ── */
 .hidden { display: none !important; }
@@ -734,6 +752,26 @@ tr:hover td {
     display: inline-block; padding: 2px 8px; border-radius: 4px; vertical-align: middle;
     font-size: 10px; color: var(--text-secondary);
     background: rgba(139,156,192,0.10); border: 1px solid rgba(139,156,192,0.20);
+}
+
+/* ── 龙虎榜·隔日动量 专属卡片 UI（金色强强调，与普通短线卡区分）── */
+.action-card.lhb-card {
+    border: 1px solid rgba(255,180,64,0.5);
+    border-left: 3px solid #ff9500;
+    background: linear-gradient(135deg, rgba(255,77,79,0.06), rgba(255,180,64,0.06) 40%, var(--bg-panel) 72%);
+    box-shadow: 0 4px 18px rgba(255,140,0,0.10);
+}
+.action-card.lhb-card:hover {
+    border-color: rgba(255,180,64,0.9);
+    background: linear-gradient(135deg, rgba(255,77,79,0.10), rgba(255,180,64,0.09) 40%, var(--bg-panel) 72%);
+    box-shadow: 0 8px 26px rgba(255,140,0,0.22);
+    transform: translateY(-2px);
+}
+.strategy-badge.lhb-badge {
+    color: #1a1408; font-weight: 700;
+    background: linear-gradient(90deg, #ffd24a, #ff9500);
+    border: 1px solid rgba(255,140,0,0.55);
+    box-shadow: 0 1px 6px rgba(255,140,0,0.3);
 }
 
 /* ── 回测：规则导入行 / 基准对比行 ── */

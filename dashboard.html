@@ -53,6 +53,7 @@
             <button class="indicator-btn active" data-indicator="vol" onclick="toggleIndicator('vol')">成交量</button>
             <button class="indicator-btn" data-indicator="macd" onclick="toggleIndicator('macd')">MACD</button>
             <button class="indicator-btn" data-indicator="kdj" onclick="toggleIndicator('kdj')">KDJ</button>
+            <button class="indicator-btn quote-link-btn" id="klineQuoteBtn" onclick="openQuotePage()" title="在东方财富查看实时交易行情">实时行情 ↗</button>
         </div>
         <div class="chart" id="klineChart"></div>
         <div class="trade-info" id="klineTradeInfo"></div>
@@ -2177,7 +2178,7 @@ function showModal(title, bodyHtml) {
         modal.onclick = function(e) { if (e.target === modal) closeModal(); };
         document.body.appendChild(modal);
     }
-    modal.innerHTML = `<div style="background:var(--surface);border-radius:8px;padding:24px;max-width:90vw;max-height:80vh;overflow:auto;">
+    modal.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border-glow);box-shadow:var(--shadow-hover);border-radius:8px;padding:24px;max-width:90vw;max-height:80vh;overflow:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
             <h3 style="margin:0;color:var(--text);">${title}</h3>
             <button class="btn btn-danger btn-sm" onclick="closeModal()">关闭</button>
@@ -2282,18 +2283,18 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
     var subCount = subCharts.length;
     // 主图占固定 55% 高度，剩余空间平分给副图
     var mainHeight = '55%';
-    // 每个副图高度 = (100 - 55 - 顶部留白 - 底部留白) / subCount
-    // 留出约 8% 的顶部标题+间距空间，底部 dataZoom 约 30px
-    var availableSubPct = 38; // 副图可用百分比空间
-    var eachSubHeight = Math.floor(availableSubPct / subCount);
+    // 副图从 60% 开始，底部预留 6% 给 dataZoom 滑块，避免最后一个副图被挡住
     var gap = 2; // 副图之间间距百分比
+    var availableSubPct = 34; // 副图可用百分比空间（60%~94%）
+    var eachSubHeight = Math.floor((availableSubPct - gap * (subCount - 1)) / subCount);
 
     // 构建 grid 数组
     var grids = [{ left: '10%', right: '10%', top: 50, height: mainHeight }];
-    var xAxisArr = [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#6b7a9a', rotate: 30 }, axisLine: { lineStyle: { color: '#182240' } } }];
+    // 日期标签只显示 MM-DD、不旋转，压缩主图与副图之间的空白带
+    var xAxisArr = [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#6b7a9a', fontSize: 10, formatter: function(v) { return String(v).slice(5); } }, axisLine: { lineStyle: { color: '#182240' } } }];
     var yAxisArr = [{ scale: true, gridIndex: 0, axisLabel: { color: '#6b7a9a' }, splitLine: { lineStyle: { color: '#111832' } } }];
     var seriesArr = [
-        { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 20 }
+        { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barWidth: '75%', barMaxWidth: 26 }
     ];
 
     // 动态计算每个副图的 top 位置
@@ -2308,7 +2309,7 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
 
         var chartType = subCharts[i];
         if (chartType === 'vol') {
-            seriesArr.push({ type: 'bar', name: '成交量', data: volData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' });
+            seriesArr.push({ type: 'bar', name: '成交量', data: volData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '75%' });
         } else if (chartType === 'macd') {
             // 读取筛选界面设定的 MACD 参数（若存在），否则用默认 12/26/9
             var mfEl = document.getElementById('scr_macd_fast');
@@ -2325,7 +2326,7 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
                 return { value: v, itemStyle: { color: v >= 0 ? '#ef5350' : '#26a69a' } };
             });
             seriesArr.push(
-                { type: 'bar', name: 'MACD' + paramLabel, data: macdBarData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '60%' },
+                { type: 'bar', name: 'MACD' + paramLabel, data: macdBarData, xAxisIndex: gridIdx, yAxisIndex: gridIdx, barWidth: '75%' },
                 { type: 'line', name: 'DIF' + paramLabel, data: macdData.dif, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#00d4f0' } },
                 { type: 'line', name: 'DEA' + paramLabel, data: macdData.dea, xAxisIndex: gridIdx, yAxisIndex: gridIdx, smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#f5a623' } }
             );
@@ -2510,6 +2511,7 @@ function renderKlineWithIndicators(cache) {
 
 async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resultId) {
     const panel = document.getElementById('klinePanel'); panel.classList.add('open');
+    window._klineCode = code;  // 供「实时行情」跳转按钮使用（即使K线拉取失败也能跳）
     let start = '2024-01-01', end = new Date().toISOString().split('T')[0];
     if (entryDate) { const d = new Date(entryDate); d.setMonth(d.getMonth()-2); start = d.toISOString().split('T')[0]; }
     if (exitDate) { const d = new Date(exitDate); d.setMonth(d.getMonth()+2); end = d.toISOString().split('T')[0]; }
@@ -2570,6 +2572,20 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
 function closeKline() {
     document.getElementById('klinePanel').classList.remove('open');
     window._klineCache = null; // 关闭弹窗时清理缓存
+    window._klineCode = null;
+}
+
+// 跳转到东方财富实时行情页（新标签页打开）
+function quoteUrlFor(code) {
+    code = String(code || '');
+    if (/^6/.test(code)) return 'https://quote.eastmoney.com/sh' + code + '.html';
+    if (/^[489]/.test(code)) return 'https://quote.eastmoney.com/bj/' + code + '.html';
+    return 'https://quote.eastmoney.com/sz' + code + '.html';
+}
+function openQuotePage() {
+    const code = window._klineCode || (window._klineCache && window._klineCache.code);
+    if (!code) { showToast('未获取到股票代码', 'warning'); return; }
+    window.open(quoteUrlFor(code), '_blank', 'noopener');
 }
 
 // ─── Init ───
