@@ -18,7 +18,10 @@ from flask import Blueprint, request
 from core.db import get_conn, _safe_add_column, init_db
 from utils.api import ok, fail
 from utils.serialization import sanitize_numeric as _sanitize
-from config.personal_config import POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT
+from config.personal_config import (
+    POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT,
+    MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
+)
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -238,6 +241,11 @@ def today_recommendations():
             has_pe_ttm = False
 
         horizons = [horizon_filter] if horizon_filter else ["short", "mid", "long"]
+        # 板块限制：小资金未开通科创/创业板权限，仅推主板（前缀来自配置常量，非用户输入）
+        board_filter = ""
+        if MAIN_BOARD_ONLY:
+            board_filter = "".join(
+                f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
         rows_by_horizon: dict = {}
         for hz in horizons:
             pe_filter = ""
@@ -267,11 +275,13 @@ def today_recommendations():
                   AND (s.buy_price IS NOT NULL OR s.fusion_score IS NOT NULL)
                   AND s.name NOT LIKE '%ST%'
                   AND s.name NOT LIKE '%退%'
+                  {board_filter}
                   {pe_filter}
                 ORDER BY COALESCE(s.fusion_score, 0) DESC
                 LIMIT ?
                 """,
-                (scan_date, hz, limit),
+                # 多取 3 倍候选：盈亏比不达标的「避免」级会被剔除，由替补顶上
+                (scan_date, hz, limit * 3),
             ).fetchall()
         all_rows = [r for hz in horizons for r in rows_by_horizon[hz]]
 
@@ -444,6 +454,21 @@ def today_recommendations():
                         "warning": "若资金不足一手（100 股），整张卡片跳过",
                     }
 
+            # ── 突破确认买点（回放验证：推荐后等收盘突破推荐日以来最高价再入场，
+            #    隔日胜率 45.2%→46.5%、均值 0.00%→+0.24%，是唯一正向的时机确认信号）──
+            confirm_trigger = None
+            # 隔日动量本身就是突破日盘后信号，次日开盘即入场，不适用突破确认
+            if d.get("strategy") != "隔日动量":
+                try:
+                    hi_row = conn.execute(
+                        "SELECT MAX(high) AS hi FROM daily_price WHERE code=? AND trade_date>=?",
+                        (d.get("code"), d.get("scan_date")),
+                    ).fetchone()
+                    if hi_row and hi_row["hi"]:
+                        confirm_trigger = round(hi_row["hi"] * 1.002, 2)  # 高点上方 0.2%，避免假突破
+                except Exception:
+                    confirm_trigger = None
+
             # ── 新增 3：操作信号灯（持仓联动 + 大盘冷热 + 盈亏比） ──
             score = d.get("fusion_score") or 0
             is_held = d["code"] in held_codes
@@ -458,6 +483,11 @@ def today_recommendations():
                 is_held=is_held,
                 trend_up=trend_up,
             )
+            # 可建仓但现价还在确认线下方 → 提示等突破确认再入场
+            if signal["level"] == "buy" and confirm_trigger and latest > 0 and latest < confirm_trigger:
+                signal["warnings"] = signal["warnings"] + [
+                    f"建议等收盘站上 {confirm_trigger}（推荐后高点）再入场，突破确认后隔日胜率更高"
+                ]
 
             return {
                 "code": d.get("code"),
@@ -479,6 +509,7 @@ def today_recommendations():
                 "entry_strategy": entry_strategy,   # 新增
                 "position_plan": position_plan,     # 新增
                 "signal": signal,                   # 新增
+                "confirm_trigger": confirm_trigger,  # 突破确认买点（推荐日以来最高价上方）
                 "exit_advice": _get_exit_advice(d),  # P0: 出场建议
                 "reasons": reasons,
                 "weaknesses": weaknesses,
@@ -487,7 +518,12 @@ def today_recommendations():
                 "trade_date": d.get("trade_date"),
             }
 
-        groups = {hz: [_build_item(dict(r)) for r in rows_by_horizon[hz]] for hz in horizons}
+        # 构建候选卡片后剔除「避免」级（盈亏比 <1.5 一票否决），再截取前 limit 条
+        groups = {}
+        for hz in horizons:
+            items = [_build_item(dict(r)) for r in rows_by_horizon[hz]]
+            items = [it for it in items if it["signal"]["level"] != "avoid"]
+            groups[hz] = items[:limit]
         for hz in ("short", "mid", "long"):
             groups.setdefault(hz, [])
         short_items = groups.get("short", [])

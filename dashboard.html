@@ -1412,6 +1412,7 @@ function renderPickCard(it) {
                             <div class="price-lbl">建议买入</div>
                             <div class="price-val">${entry}</div>
                             ${pctHtml?`<div class="price-sub">最新 ${it.latest_close?.toFixed(2) || '--'} ${pctHtml}</div>`:''}
+                            ${it.confirm_trigger?`<div class="price-sub" title="回放验证：等收盘突破推荐后高点再入场，隔日胜率更高">突破确认 ${it.confirm_trigger.toFixed(2)}</div>`:''}
                         </div>
                         <div class="action-arrow">·</div>
                         <div class="price-cell sell">
