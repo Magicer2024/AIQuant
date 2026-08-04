@@ -7,12 +7,48 @@ from typing import Dict, Any
 # 顺序：[放量突破, 均线粘合, 量价背离, 抄底, 主力建仓]
 DEFAULT_WEIGHTS = [0.30, 0.15, 0.20, 0.20, 0.15]
 
-# 纯抄底策略（历史实验配置）
+# 纯抄底：短线推荐链路（core.sync.recalc_all_scores）与 daily_price.fusion_score
+# 实际使用的权重。2026-04 与 2026-07-31 两轮回测都是它最优，见下方回测结论。
 PURE_BOTTOM_WEIGHTS = [0.00, 0.00, 0.00, 1.00, 0.00]
 
-# ── P3: 自适应权重配置 ─────────────────────────
-ADAPTIVE_WEIGHTS_ENABLED = True  # 总开关
+# ── 融合方式 ───────────────────────────────────
+# "weighted_avg" = 归一化加权平均：Σ(分_i×权_i)/Σ权 × 策略数
+#   结构缺陷：单项再强也被其他策略低分稀释。熊市权重下「抄底」满分 10/10 仅得
+#   15 分 < 高波动阈值 18，数学上永不成信号；入选的都是"样样中不溜"的票。
+#   实测 2026-07-31 全市场 4491 只：阈值18 有 55.8% 过线，落库分布仅 18.0~26.1
+#   （满分50），排序区分度极低。
+# "max"          = 取最大值：max(分_i × 权_i/max(权)) × 5
+#   权重退化为置信度折扣，任何单一策略足够强即可独立成信号，专才不再被埋。
+#
+# 2026-07-31 五组对照回测（tools/eval_fusion_mode.py，过滤链/收益口径完全一致）
+# ① 隔日 OC 口径 · 每日Top8 · 样本外验证窗（条数对齐，排除样本量摊薄）
+#   组别            短窗 n=184        长窗 n=1432
+#   平均+自适应     53.26% +0.564%    47.28% +0.234%   ← 改造前线上口径
+#   平均+均衡       53.26% +0.581%    47.49% +0.260%
+#   取最大+自适应   59.78% +1.544%    48.88% +0.318%
+#   取最大+均衡     58.15% +1.497%    48.71% +0.334%
+#   纯抄底          58.70% +1.531%    48.18% +0.354%
+# ② 组合口径 · 长窗 2024-02~2026-07 全窗 · 474~481 笔（10日持仓/+12%/-6%/持仓5）
+#   组别            胜率    PF      最大回撤   总收益
+#   平均+自适应     40.08%  0.867   -50.28%   -34.62%  ← 五组最差
+#   平均+均衡       39.53%  0.898   -47.13%   -31.97%
+#   取最大+自适应   41.75%  0.887   -45.03%   -36.28%
+#   取最大+均衡     42.20%  0.923   -40.07%   -27.29%
+#   纯抄底          44.35%  1.066   -27.22%   +29.19%  ← 唯一赚钱，年化+10.81%
+#   （短窗组合口径仅 57~64 笔，方向与长窗相反，样本不足不采信）
+# 结论：a) 取最大稳定优于加权平均（两窗OC/CC + 长窗组合口径四次同向）；
+#      b) 纯抄底显著优于任何五策略融合 → 短线链路固定 PURE_BOTTOM_WEIGHTS；
+#      c) 自适应权重无正贡献（组合口径两次对照均为负），只保留自适应阈值。
+# 本项仅在将来重新启用多策略融合时生效（纯抄底下两种方式数学等价）。
+FUSION_MODE = "max"
 
+# ── P3: 自适应配置 ─────────────────────────────
+# 总开关。注意：2026-07-31 起自适应**只影响阈值**（高波动 15→18）与前端市场状态
+# 展示，不再改动短线打分权重（回测证明改权重是负贡献，见上）。
+ADAPTIVE_WEIGHTS_ENABLED = True
+
+# 以下三档 regime 权重目前只用于前端「市场状态」展示与将来的多策略融合实验，
+# 不参与 core.sync.recalc_all_scores 的短线打分。
 # 牛市/上升趋势：加重放量突破+均线
 BULL_WEIGHTS = [0.35, 0.25, 0.15, 0.10, 0.15]
 
@@ -152,3 +188,101 @@ def get_strategy_params(name: str) -> Dict[str, Any]:
         "oversold_rebound_v4": OVERSOLD_REBOUND_V4,
     }
     return mapping.get(name, {})
+
+
+# ─────────────────────────────────────────────
+# 运行时参数覆盖层（strategy_param_override 表）
+# ─────────────────────────────────────────────
+# 优化器建议被采纳（或手动调整）后写入 DB 覆盖层，代码常量退化为默认值；
+# 消费方（sync/rec_filters/adaptive_weights）统一走 get_param() 读取。
+# min/max 为安全边界：越界的覆盖值一律按边界截断，防止误写把策略打穿。
+
+TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
+    "sig_threshold": {
+        "default": DEFAULT_SIG_THRESHOLD, "type": float,
+        "min": 10.0, "max": 30.0, "label": "融合分阈值",
+    },
+    "high_vol_sig_threshold": {
+        "default": HIGH_VOL_SIG_THRESHOLD, "type": float,
+        "min": 12.0, "max": 32.0, "label": "高波动融合分阈值",
+    },
+    "trend_gate_ma": {
+        "default": SHORT_TREND_GATE["ma"], "type": int,
+        "min": 5, "max": 60, "label": "趋势闸门均线周期",
+    },
+    "trend_gate_slope_lookback": {
+        "default": SHORT_TREND_GATE["slope_lookback"], "type": int,
+        "min": 2, "max": 15, "label": "趋势闸门斜率回看天数",
+    },
+    "short_stop_loss": {
+        "default": -0.06, "type": float,
+        "min": -0.12, "max": -0.02, "label": "短线止损比例",
+    },
+    "short_take_profit": {
+        "default": 0.20, "type": float,
+        "min": 0.04, "max": 0.40, "label": "短线止盈比例",
+    },
+}
+
+# 覆盖值内存缓存：recalc 全市场逐股调用 get_param，不能每次都查库
+_override_cache: Dict[str, Any] = {"data": None, "ts": 0.0}
+_OVERRIDE_TTL_S = 60.0
+
+
+def _load_overrides() -> Dict[str, str]:
+    import time as _time
+    now = _time.time()
+    if _override_cache["data"] is not None and now - _override_cache["ts"] < _OVERRIDE_TTL_S:
+        return _override_cache["data"]
+    data: Dict[str, str] = {}
+    try:
+        from core.db import get_conn  # 惰性导入，避免循环依赖
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT param_key, value FROM strategy_param_override").fetchall()
+        data = {r["param_key"]: r["value"] for r in rows}
+    except Exception:
+        data = {}  # 表未建/库不可用时优雅降级为代码默认值
+    _override_cache["data"] = data
+    _override_cache["ts"] = now
+    return data
+
+
+def invalidate_param_cache():
+    """采纳/回滚参数后立即失效缓存，让新值即刻生效"""
+    _override_cache["data"] = None
+    _override_cache["ts"] = 0.0
+
+
+def get_param(key: str, default: Any = None) -> Any:
+    """读取可调参数：DB 覆盖值优先，越界截断，缺失回退代码默认值"""
+    spec = TUNABLE_PARAMS.get(key)
+    fallback = spec["default"] if spec else default
+    raw = _load_overrides().get(key)
+    if raw is None:
+        return fallback
+    try:
+        caster = spec["type"] if spec else (type(fallback) if fallback is not None else str)
+        val = caster(float(raw)) if caster in (int, float) else caster(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if spec:
+        if spec.get("min") is not None and val < spec["min"]:
+            val = spec["type"](spec["min"])
+        if spec.get("max") is not None and val > spec["max"]:
+            val = spec["type"](spec["max"])
+    return val
+
+
+def get_tunable_params_state() -> Dict[str, Dict[str, Any]]:
+    """返回全部可调参数的默认值/当前值/是否被覆盖（供优化器 API 展示）"""
+    overrides = _load_overrides()
+    return {
+        key: {
+            "label": spec["label"],
+            "default": spec["default"],
+            "current": get_param(key),
+            "overridden": key in overrides,
+        }
+        for key, spec in TUNABLE_PARAMS.items()
+    }

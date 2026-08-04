@@ -526,6 +526,7 @@ CREATE TABLE IF NOT EXISTS recommend_outcome (
     take_profit     REAL,
     fusion_score    REAL,
     t1_return       REAL,
+    t2_return       REAL,
     t3_return       REAL,
     t5_return       REAL,
     t10_return      REAL,
@@ -541,6 +542,53 @@ CREATE TABLE IF NOT EXISTS recommend_outcome (
 );
 CREATE INDEX IF NOT EXISTS idx_outcome_scan ON recommend_outcome(scan_date);
 CREATE INDEX IF NOT EXISTS idx_outcome_code ON recommend_outcome(code);
+
+-- 策略参数运行时覆盖层（优化器建议被采纳/手动调整后写入，代码常量退化为默认值）
+CREATE TABLE IF NOT EXISTS strategy_param_override (
+    param_key   TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    reason      TEXT,
+    source      TEXT DEFAULT 'manual',
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- 参数调整审计日志（记录旧值/新值/依据指标，支持一键回滚）
+CREATE TABLE IF NOT EXISTS param_tune_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    param_key    TEXT NOT NULL,
+    old_value    TEXT,
+    new_value    TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    reason       TEXT,
+    metrics_json TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_tune_log_key ON param_tune_log(param_key, created_at DESC);
+
+-- 优化器报告（每日诊断 diagnosis / 周五寻优 tuning，同日同类型只留最新一份）
+CREATE TABLE IF NOT EXISTS optimizer_report (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_date  TEXT NOT NULL,
+    report_type  TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(report_date, report_type)
+);
+
+-- 优化器产出的待采纳参数建议（suggest 模式：人工确认后才生效）
+CREATE TABLE IF NOT EXISTS param_suggestion (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_date  TEXT NOT NULL,
+    param_key     TEXT NOT NULL,
+    current_value TEXT,
+    suggest_value TEXT NOT NULL,
+    reason        TEXT,
+    metrics_json  TEXT,
+    status        TEXT DEFAULT 'pending',
+    decided_at    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, created_date DESC);
         """)
 
         # ── 2. 迁移：为旧版 daily_price 补充策略评分列 ────────────
@@ -559,6 +607,9 @@ CREATE INDEX IF NOT EXISTS idx_outcome_code ON recommend_outcome(code);
         # stock_info 增加市值相关字段
         _safe_add_column(conn, "stock_info", "total_shares",  "REAL")   # 总股本
         _safe_add_column(conn, "stock_info", "circ_shares",   "REAL")   # 流通股本
+
+        # recommend_outcome 补充 T+2 收益列
+        _safe_add_column(conn, "recommend_outcome", "t2_return", "REAL")
 
         # ── 4. 迁移：三周期（horizon）维度 ────────────────────
         # strategy_rules 加 horizon；stock_signal 加 horizon/strategy

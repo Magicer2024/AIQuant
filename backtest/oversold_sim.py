@@ -79,15 +79,22 @@ def run_v3_portfolio(
     equity_curve: List[Dict[str, Any]] = []
 
     def _mark_equity(dt) -> float:
+        """按最近一次有效收盘价给持仓估值。
+
+        停牌/数据缺口日不能回退到 entry_price——那会把持仓期内已有的浮盈浮亏
+        在停牌日抹平，权益曲线出现瞬时台阶，max_drawdown 失真
+        （同类问题见 backtest/engine.py 收盘快照的注释）。
+        """
         pv = 0.0
         for c, pos in positions.items():
             df = stock_data.get(c)
             if df is not None and dt in df.index:
                 px = float(df.loc[dt, "close"])
                 if px > 0 and not pd.isna(px):
+                    pos["last_close"] = px
                     pv += pos["shares"] * px
                     continue
-            pv += pos["shares"] * pos["entry_price"]
+            pv += pos["shares"] * float(pos.get("last_close") or pos["entry_price"])
         return cash + pv
 
     def _sell(code, dt, shares, reason, sell_price, entry_price, entry_date, cost_per_share):
@@ -142,6 +149,7 @@ def run_v3_portfolio(
                     "cost_per_share": (cost + commission) / shares,
                     "entry_date": dt.strftime("%Y-%m-%d"),
                     "entry_price": fill_price,
+                    "last_close": fill_price,
                     "peak": fill_price,
                     "partial_done": False,
                     "name": info_map.get(code, {}).get("name", code),
@@ -240,9 +248,12 @@ def run_v3_portfolio(
     for code in list(positions.keys()):
         pos = positions[code]
         df = stock_data.get(code)
-        if df is None or last_dt not in df.index:
-            continue
-        close = float(df.loc[last_dt, "close"])
+        if df is not None and last_dt in df.index:
+            close = float(df.loc[last_dt, "close"])
+        else:
+            # 末日停牌/数据缺口：用最近一次有效收盘价强平。旧版本 continue，
+            # 这笔资金既不回现金也不记 trades，等于凭空蒸发（final_assets 只算 cash）。
+            close = float(pos.get("last_close") or 0)
         if close <= 0 or pd.isna(close):
             close = pos["entry_price"]
         sell_price = close * (1 - slippage_rate)

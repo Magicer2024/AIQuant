@@ -79,12 +79,12 @@ def evaluate_outcomes():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_conn() as conn:
-        # 取尚未评估完的记录（t10_return 为 NULL 或 evaluated_at 为空）
+        # 取尚未评估完的记录（t10_return 为 NULL、evaluated_at 为空或 t2 未回填）
         rows = conn.execute("""
             SELECT id, code, scan_date, entry_price, stop_loss, take_profit
             FROM recommend_outcome
             WHERE entry_price > 0
-              AND (t10_return IS NULL OR evaluated_at IS NULL)
+              AND (t10_return IS NULL OR evaluated_at IS NULL OR t2_return IS NULL)
             ORDER BY scan_date ASC
         """).fetchall()
 
@@ -121,6 +121,7 @@ def evaluate_outcomes():
                 return None
 
             t1 = _ret(1)
+            t2 = _ret(2)
             t3 = _ret(3)
             t5 = _ret(5)
             t10 = _ret(10)
@@ -174,13 +175,13 @@ def evaluate_outcomes():
 
             conn.execute("""
                 UPDATE recommend_outcome
-                SET t1_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
+                SET t1_return = ?, t2_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
                     max_return = ?, min_return = ?,
                     hit_stop = ?, hit_tp = ?,
                     exit_reason = ?, exit_date = ?, exit_return = ?,
                     evaluated_at = ?
                 WHERE id = ?
-            """, (t1, t3, t5, t10, max_ret, min_ret,
+            """, (t1, t2, t3, t5, t10, max_ret, min_ret,
                   hit_stop, hit_tp, exit_reason, exit_date, exit_return,
                   now_str, rid))
             updated += 1
@@ -272,7 +273,7 @@ def get_outcome_list(days: int = 30, limit: int = 200) -> list:
         rows = conn.execute("""
             SELECT o.code, si.name AS name, o.scan_date, o.horizon, o.strategy, o.entry_price,
                    o.stop_loss, o.take_profit, o.fusion_score,
-                   o.t1_return, o.t3_return, o.t5_return, o.t10_return,
+                   o.t1_return, o.t2_return, o.t3_return, o.t5_return, o.t10_return,
                    o.max_return, o.min_return, o.hit_stop, o.hit_tp,
                    o.exit_reason, o.exit_date, o.exit_return, o.evaluated_at
             FROM recommend_outcome o
@@ -297,3 +298,151 @@ def run():
     elapsed = time.time() - t0
     print(f"[outcome_tracker] 评估完成: {updated} 条更新，耗时 {elapsed:.1f}s")
     return updated
+
+
+# ─────────────────────────────────────────────
+# 6. 连续推荐合并（推荐复盘口径）
+# ─────────────────────────────────────────────
+
+def _is_consecutive_trade_days(conn, code: str, prev_date: str, cur_date: str) -> bool:
+    """判断 cur_date 是否恰好是 prev_date 的下一个交易日（中间无跳空）。"""
+    nxt = conn.execute(
+        "SELECT trade_date FROM daily_price WHERE code = ? AND trade_date > ? "
+        "ORDER BY trade_date ASC LIMIT 1",
+        (code, prev_date),
+    ).fetchone()
+    return nxt is not None and nxt["trade_date"] == cur_date
+
+
+def _merge_continuous_segments(rows: list, conn) -> list:
+    """把按 (code, scan_date) 升序的推荐记录合并为「连续推荐段」。
+
+    - 同一股票同一天多条记录只保留一条；
+    - 推荐日之间若跳过了交易日（中间有交易日但未被推荐），视为中断，
+      中断后再次推荐则另起一段；
+    - 每段只保留一条记录，字段以首次推荐日为准，附加连续推荐天数。
+    """
+    by_code = {}
+    for r in rows:
+        by_code.setdefault(r["code"], []).append(r)
+
+    merged = []
+    for code, recs in by_code.items():
+        # 同日去重（保留首条）
+        seen = {}
+        for r in recs:
+            seen.setdefault(r["scan_date"], r)
+        recs = [seen[d] for d in sorted(seen)]
+
+        seg = [recs[0]]
+        for r in recs[1:]:
+            if _is_consecutive_trade_days(conn, code, seg[-1]["scan_date"], r["scan_date"]):
+                seg.append(r)
+            else:
+                merged.append(_segment_to_row(seg))
+                seg = [r]
+        merged.append(_segment_to_row(seg))
+
+    return merged
+
+
+def _segment_to_row(seg: list) -> dict:
+    """把一段连续推荐压缩为一行：字段取首次推荐日，附加段信息。"""
+    first = seg[0]
+    row = dict(first)
+    row["first_scan_date"] = first["scan_date"]
+    row["last_scan_date"] = seg[-1]["scan_date"]
+    row["streak_days"] = len(seg)
+    return row
+
+
+def get_merged_outcome_list(days: int = 30, horizon: str = "short",
+                            limit: int = 500) -> list:
+    """近 N 日连续推荐合并后的明细列表（短线口径，按首次推荐日降序）。"""
+    cutoff = f"-{days} days"
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT o.code, si.name AS name, o.scan_date, o.horizon, o.strategy, o.entry_price,
+                   o.stop_loss, o.take_profit, o.fusion_score,
+                   o.t1_return, o.t2_return, o.t3_return, o.t5_return, o.t10_return,
+                   o.max_return, o.min_return, o.hit_stop, o.hit_tp,
+                   o.exit_reason, o.exit_date, o.exit_return, o.evaluated_at
+            FROM recommend_outcome o
+            LEFT JOIN stock_info si ON si.code = o.code
+            WHERE o.scan_date >= date('now', ?)
+              AND o.entry_price > 0
+              AND o.horizon = ?
+            ORDER BY o.code ASC, o.scan_date ASC
+            LIMIT ?
+        """, (cutoff, horizon, limit)).fetchall()
+        merged = _merge_continuous_segments(rows, conn)
+
+    # 按首次推荐日降序（同日按最终收益降序）
+    merged.sort(
+        key=lambda x: (
+            x["first_scan_date"],
+            x["exit_return"] if x["exit_return"] is not None else -999,
+        ),
+        reverse=True,
+    )
+    return merged
+
+
+def get_merged_summary(days: int = 30, horizon: str = "short") -> dict:
+    """近 N 日连续推荐合并后的汇总：T1/T2/T3/T5 总胜率 + 原有收益统计。"""
+    items = get_merged_outcome_list(days, horizon)
+
+    def _win_stat(key):
+        vals = [it[key] for it in items if it.get(key) is not None]
+        if not vals:
+            return {"n": 0, "win": 0, "win_rate": 0}
+        win = sum(1 for v in vals if v > 0)
+        return {"n": len(vals), "win": win, "win_rate": round(win / len(vals) * 100, 1)}
+
+    # 最终收益口径：exit_return > t5 > t3 > t2 > t1
+    returns = []
+    for it in items:
+        ret = it.get("exit_return")
+        if ret is None:
+            ret = it.get("t5_return")
+        if ret is None:
+            ret = it.get("t3_return")
+        if ret is None:
+            ret = it.get("t2_return")
+        if ret is None:
+            ret = it.get("t1_return")
+        if ret is not None:
+            returns.append(ret)
+
+    base = {
+        "total": len(items),
+        "t1": _win_stat("t1_return"),
+        "t2": _win_stat("t2_return"),
+        "t3": _win_stat("t3_return"),
+        "t5": _win_stat("t5_return"),
+    }
+    if not returns:
+        return {**base, "win_rate": 0, "avg_return": 0, "profit_factor": 0,
+                "best_return": 0, "worst_return": 0,
+                "stop_loss_count": 0, "take_profit_count": 0}
+
+    wins = [r for r in returns if r > 0]
+    losses = [r for r in returns if r <= 0]
+    avg_return = sum(returns) / len(returns)
+    win_rate = len(wins) / len(returns) * 100
+    avg_win = sum(wins) / len(wins) if wins else 0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 1
+    profit_factor = round(avg_win / avg_loss, 2) if avg_loss > 0 else 99.0
+
+    return {
+        **base,
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate": round(win_rate, 1),
+        "avg_return": round(avg_return, 2),
+        "profit_factor": profit_factor,
+        "best_return": round(max(returns), 2),
+        "worst_return": round(min(returns), 2),
+        "stop_loss_count": sum(1 for it in items if it.get("hit_stop")),
+        "take_profit_count": sum(1 for it in items if it.get("hit_tp")),
+    }

@@ -33,6 +33,7 @@ reports/
 .cache/
 .uploads/
 .workbuddy/
+.reasonix/
 logs/
 
 config/llm_config.yaml

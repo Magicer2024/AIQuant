@@ -502,6 +502,32 @@ tr:hover td {
     border-color: #00d4f0;
     color: #00d4f0;
 }
+/* ── K线弹窗 MACD 参数输入组 ── */
+.macd-params {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 2px;
+}
+.macd-params input {
+    width: 42px;
+    padding: 3px 2px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    text-align: center;
+    color: #00d4f0;
+    background: rgba(0,212,240,0.06);
+    border: 1px solid rgba(0,212,240,0.25);
+    border-radius: 3px;
+    outline: none;
+    -moz-appearance: textfield;
+}
+.macd-params input::-webkit-inner-spin-button,
+.macd-params input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.macd-params input:focus {
+    border-color: #00d4f0;
+    background: rgba(0,212,240,0.12);
+}
 /* ── K线弹窗「实时行情」跳转按钮：靠右、避开右上角关闭按钮 ── */
 .quote-link-btn {
     margin-left: auto;

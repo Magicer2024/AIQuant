@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import pandas as pd
 
-from config.strategy_params import SHORT_TREND_GATE, QUALITY_FILTER
+from config.strategy_params import SHORT_TREND_GATE, QUALITY_FILTER, get_param
 
 # ST/退市名称关键词（大写归一后匹配，"退" 为中文不受 upper 影响）
 _ST_KEYWORDS = ("ST", "退")
@@ -50,8 +50,13 @@ def trend_gate_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
     if not cfg.get("enabled", True):
         return pd.Series(True, index=df.index)
 
-    ma_n = int(cfg.get("ma", 20))
-    slope_lb = int(cfg.get("slope_lookback", 5))
+    if cfg is SHORT_TREND_GATE:
+        # 默认配置走参数覆盖层（优化器采纳建议后即时生效）
+        ma_n = int(get_param("trend_gate_ma"))
+        slope_lb = int(get_param("trend_gate_slope_lookback"))
+    else:
+        ma_n = int(cfg.get("ma", 20))
+        slope_lb = int(cfg.get("slope_lookback", 5))
     close = df["close"].astype(float)
     ma = close.rolling(ma_n).mean()
     gate = (close > ma) & (ma >= ma.shift(slope_lb))

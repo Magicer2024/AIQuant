@@ -117,7 +117,7 @@ from strategy.strategies import (
     strategy_volume_breakout, strategy_ma_convergence,
     strategy_price_volume_divergence, strategy_bottom_fishing,
     strategy_whale_accumulation, strategy_oversold_rebound,
-    fuse_signals, DEFAULT_WEIGHTS
+    fuse_signals
 )
 from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.next_day_momentum import scan_next_day_momentum
@@ -1100,7 +1100,11 @@ def sync_strategy_score(code: str, verbose: bool = False) -> bool:
         s3 = strategy_price_volume_divergence(df)
         s4 = strategy_bottom_fishing(df)
         s5 = strategy_whale_accumulation(df)
-        fused = fuse_signals([s1, s2, s3, s4, s5], weights=DEFAULT_WEIGHTS)
+        # daily_price.fusion_score 固定为纯抄底口径（回测验证过的基准，与市场状态无关），
+        # 供回测/研究脚本读取；短线推荐用的自适应口径写在 stock_signal 表。
+        from config.strategy_params import PURE_BOTTOM_WEIGHTS
+        fused = fuse_signals([s1, s2, s3, s4, s5],
+                             weights=PURE_BOTTOM_WEIGHTS, mode="weighted_avg")
         # 写入数据库（全量历史）
         update_strategy_scores_batch(code, fused)
         if verbose:
@@ -1158,30 +1162,42 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
 
     target = target if target in ("all", "watchlist") else "all"
 
-    STOP_LOSS_SC = -0.06
-    TAKE_PROFIT_SC = 0.20
+    # 止损/止盈比例走参数覆盖层（优化器采纳建议后即时生效，默认 -6%/+20%）
+    from config.strategy_params import get_param
+    STOP_LOSS_SC = float(get_param("short_stop_loss"))
+    TAKE_PROFIT_SC = float(get_param("short_take_profit"))
     START_CAPITAL_SC = 10000
     POSITION_PER_SC = 0.5
 
-    # P3: 自适应权重与阈值
-    from config.strategy_params import ADAPTIVE_WEIGHTS_ENABLED, DEFAULT_SIG_THRESHOLD
+    # ── 短线融合分口径：固定纯抄底（2026-07-31 双口径回测结论）─────────────
+    # tools/eval_fusion_mode.py 五组对照（长窗 2024-02~2026-07，组合口径 474~481 笔）：
+    #   平均+自适应(旧线上) 胜率40.08% PF0.867 回撤-50.3% 总收益-34.6%  ← 最差
+    #   平均+均衡           39.53%     0.898     -47.1%      -32.0%
+    #   取最大+自适应       41.75%     0.887     -45.0%      -36.3%
+    #   取最大+均衡         42.20%     0.923     -40.1%      -27.3%
+    #   纯抄底              44.35%     1.066     -27.2%      +29.2%  ← 唯一赚钱
+    # SHORT_ENGINE 声明的本来就是 "pure_bottom"，但历史上这条分支被自适应权重
+    # 悄悄接管，线上实际跑的恰是五组里最差的一组。故权重固定 PURE_BOTTOM_WEIGHTS，
+    # 与 daily_price.fusion_score 同口径（纯抄底下 weighted_avg 与 max 数学等价）。
+    # 自适应只保留「阈值」这一项（高波动 15→18，仍是有效的收紧手段）。
+    from config.strategy_params import (
+        ADAPTIVE_WEIGHTS_ENABLED, PURE_BOTTOM_WEIGHTS, FUSION_MODE,
+    )
+    _fusion_mode = FUSION_MODE
+    _active_weights = PURE_BOTTOM_WEIGHTS
     if ADAPTIVE_WEIGHTS_ENABLED:
         try:
-            from strategy.adaptive_weights import get_adaptive_weights, get_adaptive_threshold, detect_market_state
+            from strategy.adaptive_weights import get_adaptive_threshold, detect_market_state
             _market_state = detect_market_state()
-            _active_weights = get_adaptive_weights(_market_state)
             SIG_THRESHOLD = get_adaptive_threshold(_market_state)
-            print(f"  [自适应权重] 市场状态: {_market_state['detail']}")
-            print(f"  [自适应权重] 使用权重: {_active_weights}，阈值: {SIG_THRESHOLD}")
+            print(f"  [市场状态] {_market_state['detail']}")
+            print(f"  [短线打分] 权重: 纯抄底 {_active_weights}，"
+                  f"阈值: {SIG_THRESHOLD}，融合方式: {_fusion_mode}")
         except Exception as e:
-            print(f"  [WARN] 自适应权重加载失败，回退默认: {e}")
-            from config.strategy_params import DEFAULT_WEIGHTS
-            _active_weights = DEFAULT_WEIGHTS
-            SIG_THRESHOLD = DEFAULT_SIG_THRESHOLD
+            print(f"  [WARN] 自适应阈值加载失败，回退默认阈值: {e}")
+            SIG_THRESHOLD = float(get_param("sig_threshold"))
     else:
-        from config.strategy_params import DEFAULT_WEIGHTS
-        _active_weights = DEFAULT_WEIGHTS
-        SIG_THRESHOLD = DEFAULT_SIG_THRESHOLD
+        SIG_THRESHOLD = float(get_param("sig_threshold"))
 
     if target == "watchlist":
         if count_watchlist() == 0:
@@ -1298,7 +1314,8 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                 s3 = strategy_price_volume_divergence(df)
                 s4 = strategy_bottom_fishing(df)
                 s5 = strategy_whale_accumulation(df)
-                fused = fuse_signals([s1, s2, s3, s4, s5], weights=_active_weights)
+                fused = fuse_signals([s1, s2, s3, s4, s5],
+                                     weights=_active_weights, mode=_fusion_mode)
                 qual = quality_series(name, df, _ts).reindex(fused.index).fillna(False)
                 # 趋势闸门：排除 MA20 向下/未站上 MA20 的"一路阴跌"接飞刀信号
                 # （2026-07-29 回测：隔日OC平均 -0.043%→-0.003%，信号数 -69%）
@@ -1470,6 +1487,17 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
         print(f"  推荐结果追踪: {outcome_updated} 条评估更新")
     except Exception as e:
         print(f"  [WARN] 推荐结果追踪失败（不影响主流程）: {e}")
+
+    # ── 策略优化器：每日诊断 + 周五参数寻优（suggest 模式，best-effort）──
+    try:
+        from strategy.optimizer import run_post_sync as _optimizer_run
+        opt = _optimizer_run()
+        _diag = opt.get("diagnosis") or {}
+        print(f"  策略优化器: 诊断结论 {len(_diag.get('findings') or [])} 条"
+              + (f"，寻优建议: {(opt.get('tuning') or {}).get('suggestion') or '无'}"
+                 if opt.get("tuning") is not None else ""))
+    except Exception as e:
+        print(f"  [WARN] 策略优化器失败（不影响主流程）: {e}")
 
     return {
         "success": success,

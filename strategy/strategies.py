@@ -256,19 +256,17 @@ def strategy_whale_accumulation(df: pd.DataFrame,
 
 
 # ===================================================================
-# 默认策略融合权重（可被 quant.py 覆盖）
-# 放量突破(0.30)：核心趋势策略，权重最高
-# 量价背离(0.20)：反转信号，与突破策略互补
-# 抄底(0.20)      ：均值回归策略
-# 均线粘合(0.15)  ：整理形态，辅助参考
-# 主力建仓(0.15)  ：机构行为参考
-# 2026-04-03 更新：1年回测（2025-04~2026-04）验证结果
-#   纯主力建仓(Whale) 1年: -46.54% 最大回撤-52%（交易176笔，但均盈/均亏接近1:1，组合后亏损）
-#   纯抄底(Bottom) 1年:   -7.58%  最大回撤-32.8%（交易181笔，均盈9.87%/均亏5.86%，盈亏比1.74）
-#   → Whale在Q1 2026的+164%是极端样本外表现；长期看Bottom策略更稳健
-#   融合策略(40/0/0/30/30) 1年: -31.16%（224笔，均盈11.2%但胜率37.5%）
-# ⚠ 5%/周（年化1214%）不可能实现；当前最优可实现目标：控制回撤在-30%以内
-DEFAULT_WEIGHTS = [0.00, 0.00, 0.00, 1.00, 0.00]   # 纯抄底策略
+# 策略融合权重常量统一由 config/strategy_params.py 维护。
+# 本模块此前另有一份同名 DEFAULT_WEIGHTS = [0,0,0,1,0]（纯抄底），与
+# config.strategy_params.DEFAULT_WEIGHTS = [0.30,0.15,0.20,0.20,0.15] 同名不同值，
+# 曾在 core/sync.py 中互相遮蔽（顶层导入本模块的、函数内又局部导入 config 的），
+# 导致同一个 fusion_score 字段在两条写入路径下口径不一致。故此处不再重复定义。
+# 2026-04-03 1年回测（2025-04~2026-04）：
+#   纯主力建仓(Whale) -46.54% 最大回撤-52%（176笔，均盈/均亏≈1:1）
+#   纯抄底(Bottom)    -7.58%  最大回撤-32.8%（181笔，均盈9.87%/均亏5.86%，盈亏比1.74）← 最优
+#   融合(40/0/0/30/30) -31.16%（224笔，均盈11.2% 但胜率仅37.5%）
+# ⚠ 5%/周（年化1214%）不可能实现；当前目标：控制回撤在-30%以内
+from config.strategy_params import PURE_BOTTOM_WEIGHTS  # noqa: E402  纯抄底 [0,0,0,1,0]
 
 # ===================================================================
 # 策略6: 超跌反弹策略（用户新策略 v2）
@@ -366,18 +364,36 @@ def strategy_oversold_rebound(df: pd.DataFrame,
 
 
 def fuse_signals(dfs: List[pd.DataFrame],
-                 weights: List[float] = None) -> pd.DataFrame:
+                 weights: List[float] = None,
+                 mode: str = None) -> pd.DataFrame:
     """
-    多策略加权融合
+    多策略融合
     :param dfs: 多个策略返回的 DataFrame 列表（各含 BUY_SCORE 列，0-3分）
     :param weights: 各策略权重，默认等权 [0.2, 0.2, 0.2, 0.2, 0.2]
-                  权重总和应为 1.0，融合分 = Σ(策略分_i × 权重_i) × (10/3) × 5
-                  最终融合分 0-50
+    :param mode: 融合方式，None 表示取 config.FUSION_MODE
+        - "weighted_avg"（归一化加权平均，历史行为）
+              融合分 = Σ(策略分_i × 权重_i) / Σ权重 × 策略数
+          缺陷：单一策略再强也会被其他策略的低分稀释。例如熊市权重下
+          「抄底」打满 10/10 也只有 15 分，低于高波动阈值 18，数学上永不成信号；
+          最终入选的都是"样样中不溜"的票，与纯抄底回测占优的结论相悖。
+        - "max"（取最大值，专才不被稀释）
+              融合分 = max(策略分_i × 权重_i / max(权重)) × 5
+          权重退化为置信度折扣：权重最高的策略满分可达 50，权重减半的策略满分 25。
+          任何单一策略足够强即可独立成信号，同时保留市场状态倾向。
     :return: 含 FUSION_SCORE, BUY_SIGNAL 及各策略独立评分列的 DataFrame
              各策略评分列：VOL_SCORE, MA_SCORE, DIVERGE_SCORE, BOTTOM_SCORE, WHALE_SCORE
     """
     if not dfs:
         raise ValueError("策略列表为空")
+
+    if mode is None:
+        try:
+            from config.strategy_params import FUSION_MODE
+            mode = FUSION_MODE
+        except Exception:
+            mode = "weighted_avg"
+    if mode not in ("weighted_avg", "max"):
+        mode = "weighted_avg"
 
     result = dfs[0][["close", "volume"]].copy()
     # 保留 open 列供 T+1 回测引擎使用
@@ -400,23 +416,32 @@ def fuse_signals(dfs: List[pd.DataFrame],
         "OVERSOLD_SCORE", # 超跌反弹
     ]
 
-    # 各策略原始分(0-3) -> 映射到(0-10) -> 按权重加权求和
+    # 各策略原始分(0-3) -> 映射到(0-10)
+    max_w = max([w for w in weights if w is not None] or [0.0]) or 0.0
     fusion = None
     total_w = 0.0
     for idx, (df_strategy, w) in enumerate(zip(dfs, weights)):
         col = df_strategy["BUY_SCORE"] if "BUY_SCORE" in df_strategy.columns else None
-        if col is not None:
-            mapped_score = col.fillna(0) * (10.0 / 3.0)
-            if idx < len(score_col_names):
-                result[score_col_names[idx]] = mapped_score
+        if col is None:
+            continue
+        mapped_score = col.fillna(0) * (10.0 / 3.0)
+        if idx < len(score_col_names):
+            result[score_col_names[idx]] = mapped_score
+        if mode == "max":
+            # 权重归一到 [0,1] 作为置信度折扣，再逐列取最大（np.maximum 向量化）
+            scaled = mapped_score * (w / max_w if max_w > 0 else 0.0) * 5.0
+            fusion = scaled if fusion is None else pd.Series(
+                np.maximum(fusion.values, scaled.values), index=fusion.index)
+        else:
             scaled = mapped_score * w
-            if fusion is None:
-                fusion = scaled
-            else:
-                fusion = fusion + scaled
-            total_w += w
+            fusion = scaled if fusion is None else fusion + scaled
+        total_w += w
 
-    if fusion is not None and total_w > 0:
+    if fusion is None:
+        raw_score = pd.Series(0.0, index=result.index)
+    elif mode == "max":
+        raw_score = fusion.clip(upper=50.0)
+    elif total_w > 0:
         raw_score = (fusion / total_w * n_strategies).clip(upper=50.0)
     else:
         raw_score = pd.Series(0.0, index=result.index)

@@ -627,14 +627,21 @@ class VisualBacktestEngine:
                     daily_buys += 1
 
             # ── 4) 收盘快照 ──
+            # 停牌/数据缺口日按最近一次有效收盘价估值。旧版本直接 continue，
+            # 该仓位市值会凭空消失，权益曲线出现 20~60% 的瞬时假坑，max_drawdown
+            # 完全失真（2026-07-31 实测：同一组总收益 -31.9% 却报回撤 -71.6%）。
             position_value = 0.0
             for code, pos in positions.items():
                 df = stock_data.get(code)
-                if df is None or dt not in df.index:
-                    continue
-                close = float(df.loc[dt, "close"])
-                if close <= 0 or pd.isna(close):
-                    close = pos["entry_price"]
+                close = None
+                if df is not None and dt in df.index:
+                    c = float(df.loc[dt, "close"])
+                    if not pd.isna(c) and c > 0:
+                        close = c
+                if close is None:
+                    close = float(pos.get("last_close") or pos["entry_price"])
+                else:
+                    pos["last_close"] = close
                 position_value += pos["shares"] * close
             total_assets = cash + position_value
             equity_curve.append({
@@ -659,9 +666,16 @@ class VisualBacktestEngine:
             for code in list(positions.keys()):
                 pos = positions[code]
                 df = stock_data.get(code)
-                if df is None or last_dt not in df.index:
+                if df is None:
                     continue
-                close = float(df.loc[last_dt, "close"])
+                if last_dt in df.index:
+                    close = float(df.loc[last_dt, "close"])
+                else:
+                    # 末日停牌/数据缺口：用最近一次有效收盘价强平。旧版本 continue，
+                    # 这笔资金既不回现金也不记 trades，等于凭空蒸发。
+                    close = float(pos.get("last_close") or 0)
+                if pd.isna(close) or close <= 0:
+                    close = float(pos["entry_price"])
                 sell_price = close * (1 - p.slippage_rate)
                 proceeds = pos["shares"] * sell_price
                 commission_out = max(proceeds * p.commission_rate, 5.0)

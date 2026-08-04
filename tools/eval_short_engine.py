@@ -197,7 +197,9 @@ def _print_report(old: dict, new: dict, old_sig: int, new_sig: int,
     # go/no-go 门槛
     wr_ok = new["win_rate"] >= old["win_rate"]
     pf_ok = new["profit_factor"] >= old["profit_factor"]
-    dd_ok = new["max_drawdown"] <= old["max_drawdown"] + 0.03  # 回撤为负，允许多回撤3个百分点
+    # max_drawdown 是负数（drawdown.min()），"不恶化"= 不比基准更负。
+    # 2026-07-31 修正：原写法 new <= old + 0.03 方向反了，反而要求新方案回撤更深才 PASS。
+    dd_ok = new["max_drawdown"] >= old["max_drawdown"] - 0.03  # 允许多回撤 3 个百分点
     verdict = "GO 建议上线（触发重算）" if (wr_ok and pf_ok and dd_ok) else "NO-GO 数字未达标，交用户定夺"
     print("  上线门槛:")
     print(f"    胜率不降  : {'[PASS]' if wr_ok else '[FAIL]'}  ({old['win_rate']*100:.2f}% -> {new['win_rate']*100:.2f}%)")

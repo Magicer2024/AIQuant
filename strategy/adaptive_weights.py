@@ -134,9 +134,11 @@ def get_adaptive_threshold(market_state: Optional[dict] = None) -> float:
     """根据波动率调整融合分阈值。
 
     高波动时提高阈值（更保守），低波动时用默认阈值。
+    阈值经参数覆盖层（get_param）读取，优化器采纳建议后即时生效。
     """
+    from config.strategy_params import get_param
     if not ADAPTIVE_WEIGHTS_ENABLED:
-        return DEFAULT_SIG_THRESHOLD
+        return float(get_param("sig_threshold"))
 
     if market_state is None:
         market_state = detect_market_state()
@@ -145,14 +147,23 @@ def get_adaptive_threshold(market_state: Optional[dict] = None) -> float:
 
     # 波动率 > 2% 时提高阈值
     if volatility > HIGH_VOL_THRESHOLD:
-        return HIGH_VOL_SIG_THRESHOLD
-    return DEFAULT_SIG_THRESHOLD
+        return float(get_param("high_vol_sig_threshold"))
+    return float(get_param("sig_threshold"))
 
 
 def get_market_summary() -> dict:
-    """获取市场状态摘要（供 API 返回）。"""
+    """获取市场状态摘要（供 API 返回）。
+
+    ⚠ weights 返回的是**短线打分实际使用的权重**，不是 regime 三档权重。
+    2026-07-31 双口径回测后短线链路固定纯抄底（见 config/strategy_params.py
+    FUSION_MODE 注释的五组对照数据），自适应只保留阈值这一项。regime 三档权重
+    另放 regime_weights，仅作参考展示，不再进入打分——否则前端会显示一套
+    根本没被用到的权重。
+    """
+    from config.strategy_params import PURE_BOTTOM_WEIGHTS, SHORT_ENGINE, FUSION_MODE
+
     state = detect_market_state()
-    weights = get_adaptive_weights(state)
+    regime_weights = get_adaptive_weights(state)
     threshold = get_adaptive_threshold(state)
 
     regime_label = {
@@ -162,7 +173,10 @@ def get_market_summary() -> dict:
     }
 
     weight_labels = ["放量突破", "均线粘合", "量价背离", "抄底", "主力建仓"]
-    weight_detail = {label: w for label, w in zip(weight_labels, weights)}
+    # 超跌反弹引擎不走融合分，此时"权重"无意义
+    active_weights = None if SHORT_ENGINE == "oversold_rebound" else list(PURE_BOTTOM_WEIGHTS)
+    weight_detail = ({label: w for label, w in zip(weight_labels, active_weights)}
+                     if active_weights else {})
 
     return {
         "regime": state["regime"],
@@ -171,8 +185,12 @@ def get_market_summary() -> dict:
         "volatility": state["volatility"],
         "ma20_slope": state["ma20_slope"],
         "close_vs_ma20": state["close_vs_ma20"],
-        "weights": weights,
+        "weights": active_weights,
         "weight_detail": weight_detail,
+        "regime_weights": regime_weights,
+        "short_engine": SHORT_ENGINE,
+        "fusion_mode": FUSION_MODE,
         "sig_threshold": threshold,
+        # 现在只代表"阈值自适应"是否开启（权重不再自适应）
         "adaptive_enabled": ADAPTIVE_WEIGHTS_ENABLED,
     }

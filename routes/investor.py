@@ -1213,27 +1213,32 @@ def outcome_list():
 
 @investor_bp.route("/recommendations/history", methods=["GET"])
 def recommendations_history():
-    """历史推荐回测：过去 N 天推荐的股票，到今天的实际涨跌
+    """历史推荐回测：过去 N 天短线推荐的股票，到今天的实际涨跌
     GET /api/investor/recommendations/history?days=30
     优先从 recommend_outcome 表读取持久化数据，fallback 到实时计算。
+    口径：仅统计短线（horizon=short）推荐；同一股票连续交易日不间断
+    被推荐时合并为一段，只显示首次推荐日并给出连续推荐天数。
     """
     days = request.args.get("days", "30", type=int)
     days = max(1, min(days, 90))
 
     # 优先尝试从 recommend_outcome 读取
     try:
-        from core.outcome_tracker import get_outcome_list, get_summary
-        items = get_outcome_list(days, 200)
+        from core.outcome_tracker import get_merged_outcome_list, get_merged_summary
+        items = get_merged_outcome_list(days, "short")
         if items:
-            summary = get_summary(days)
+            summary = get_merged_summary(days, "short")
             # 转换为前端兼容格式
             results = []
             for it in items:
                 ret = it.get("exit_return") or it.get("t5_return") or it.get("t3_return") or it.get("t1_return") or 0
                 results.append({
                     "code": it["code"],
-                    "name": it.get("name"),  # get_outcome_list 已 JOIN stock_info 补股名
-                    "scan_date": it["scan_date"],
+                    "name": it.get("name"),  # get_merged_outcome_list 已 JOIN stock_info 补股名
+                    "scan_date": it["scan_date"],          # 兼容字段 = 首次推荐日
+                    "first_scan_date": it["first_scan_date"],
+                    "last_scan_date": it["last_scan_date"],
+                    "streak_days": it["streak_days"],       # 连续推荐天数
                     "entry_price": round(it["entry_price"], 2) if it.get("entry_price") else None,
                     "current_price": None,
                     "pnl_pct": ret,
@@ -1241,25 +1246,29 @@ def recommendations_history():
                     "hit_take_profit": bool(it.get("hit_tp")),
                     "fusion_score": round(it.get("fusion_score") or 0, 1),
                     "t1_return": it.get("t1_return"),
+                    "t2_return": it.get("t2_return"),
                     "t3_return": it.get("t3_return"),
                     "t5_return": it.get("t5_return"),
                     "exit_reason": it.get("exit_reason"),
                     "days_held": None,
                 })
-            results.sort(key=lambda x: x["pnl_pct"], reverse=True)
+            # 按首次推荐日降序（同日按收益降序），复盘列表以时间线为主
+            results.sort(key=lambda x: (x["first_scan_date"], x["pnl_pct"]), reverse=True)
             return ok({
                 "items": _sanitize(results),
                 "summary": summary,
                 "days": days,
                 "source": "recommend_outcome",
+                "merged": True,
             })
     except Exception:
         pass  # fallback 到实时计算
 
-    # Fallback: 实时计算（原有逻辑）
+    # Fallback: 实时计算（口径与 recommend_outcome 一致：短线 + 连续推荐合并）
+    from core.outcome_tracker import _merge_continuous_segments
 
     with get_conn() as conn:
-        # 获取最近 N 天的推荐记录（stock_signal 中有 buy_price 的）
+        # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的）
         signals = conn.execute(
             """
             SELECT s.code, s.name, s.scan_date, s.buy_price, s.stop_loss, s.take_profit,
@@ -1267,7 +1276,8 @@ def recommendations_history():
             FROM stock_signal s
             WHERE s.scan_date >= date('now', ?)
               AND s.buy_price IS NOT NULL
-            ORDER BY s.scan_date DESC
+              AND COALESCE(s.horizon, 'short') = 'short'
+            ORDER BY s.code ASC, s.scan_date ASC
             """,
             (f"-{days} days",),
         ).fetchall()
@@ -1275,62 +1285,49 @@ def recommendations_history():
         if not signals:
             return ok({"items": [], "summary": {}, "days": days})
 
-        # 按 (code, scan_date) 去重，取每只票最新一次推荐
-        seen = {}
-        for r in signals:
-            key = r["code"]
-            if key not in seen:
-                seen[key] = dict(r)
+        # 连续交易日不间断的推荐合并为一段（每段取首次推荐日 + 连续天数）
+        segments = _merge_continuous_segments(signals, conn)
 
         results = []
-        for code, sig in seen.items():
-            # 推荐日的价格
-            entry = sig.get("buy_price") or 0
+        for seg in segments:
+            code = seg["code"]
+            entry = seg.get("buy_price") or 0
             if entry <= 0:
                 continue
 
-            # 推荐日之后的最新价格
-            latest = conn.execute(
+            # 段首推荐日之后最多 5 个交易日收盘价，计算 T1/T2/T3/T5
+            prices = conn.execute(
                 """
-                SELECT close, trade_date FROM daily_price
+                SELECT trade_date, close FROM daily_price
                 WHERE code = ? AND trade_date > ?
-                ORDER BY trade_date ASC LIMIT 1
+                ORDER BY trade_date ASC LIMIT 5
                 """,
-                (code, sig["scan_date"]),
-            ).fetchone()
+                (code, seg["scan_date"]),
+            ).fetchall()
 
-            # 最新价格（不限日期）
-            latest_any = conn.execute(
-                """
-                SELECT close, trade_date FROM daily_price
-                WHERE code = ?
-                ORDER BY trade_date DESC LIMIT 1
-                """,
-                (code,),
-            ).fetchone()
+            def _ret(n):
+                if len(prices) >= n and prices[n - 1]["close"]:
+                    return round((prices[n - 1]["close"] - entry) / entry * 100, 2)
+                return None
 
-            # 用推荐日后第一个交易日的价格计算收益
-            if latest:
-                current = latest["close"]
-                current_date = latest["trade_date"]
-            elif latest_any:
-                current = latest_any["close"]
-                current_date = latest_any["trade_date"]
-            else:
-                continue
-
-            pnl_pct = round((current - entry) / entry * 100, 2) if entry > 0 else 0
+            t1, t2, t3, t5 = _ret(1), _ret(2), _ret(3), _ret(5)
+            pnl_pct = t5 if t5 is not None else (t1 if t1 is not None else 0)
             hit_stop = False
             hit_tp = False
-            if sig.get("stop_loss") and current <= sig["stop_loss"]:
-                hit_stop = True
-            if sig.get("take_profit") and current >= sig["take_profit"]:
-                hit_tp = True
+            if prices:
+                current = prices[0]["close"]
+                current_date = prices[0]["trade_date"]
+                if seg.get("stop_loss") and current <= seg["stop_loss"]:
+                    hit_stop = True
+                if seg.get("take_profit") and current >= seg["take_profit"]:
+                    hit_tp = True
+            else:
+                current_date = None
 
-            # 判断是否仍在持仓中（推荐日后 N 天内）
+            # 判断是否仍在持仓中（首次推荐日后 N 天内）
             from datetime import datetime as _dt
             try:
-                scan = _dt.strptime(sig["scan_date"], "%Y-%m-%d")
+                scan = _dt.strptime(seg["scan_date"], "%Y-%m-%d")
                 now = _dt.now()
                 days_held = (now - scan).days
             except (ValueError, TypeError):
@@ -1338,20 +1335,34 @@ def recommendations_history():
 
             results.append({
                 "code": code,
-                "name": sig.get("name"),
-                "scan_date": sig["scan_date"],
+                "name": seg.get("name"),
+                "scan_date": seg["scan_date"],
+                "first_scan_date": seg["first_scan_date"],
+                "last_scan_date": seg["last_scan_date"],
+                "streak_days": seg["streak_days"],
                 "entry_price": round(entry, 2),
-                "current_price": round(current, 2),
+                "current_price": round(prices[0]["close"], 2) if prices else None,
                 "current_date": current_date,
                 "pnl_pct": pnl_pct,
                 "hit_stop_loss": hit_stop,
                 "hit_take_profit": hit_tp,
-                "fusion_score": round(sig.get("fusion_score") or 0, 1),
+                "fusion_score": round(seg.get("fusion_score") or 0, 1),
+                "t1_return": t1,
+                "t2_return": t2,
+                "t3_return": t3,
+                "t5_return": t5,
                 "days_held": days_held,
             })
 
-        # 汇总统计
+        # 汇总统计（合并口径）
         if results:
+            def _win_stat(key):
+                vals = [r[key] for r in results if r.get(key) is not None]
+                if not vals:
+                    return {"n": 0, "win": 0, "win_rate": 0}
+                win = sum(1 for v in vals if v > 0)
+                return {"n": len(vals), "win": win, "win_rate": round(win / len(vals) * 100, 1)}
+
             wins = [r for r in results if r["pnl_pct"] > 0]
             losses = [r for r in results if r["pnl_pct"] <= 0]
             avg_return = sum(r["pnl_pct"] for r in results) / len(results)
@@ -1360,6 +1371,10 @@ def recommendations_history():
             tp_count = sum(1 for r in results if r["hit_take_profit"])
             summary = {
                 "total": len(results),
+                "t1": _win_stat("t1_return"),
+                "t2": _win_stat("t2_return"),
+                "t3": _win_stat("t3_return"),
+                "t5": _win_stat("t5_return"),
                 "win_count": len(wins),
                 "loss_count": len(losses),
                 "win_rate": round(win_rate, 1),
@@ -1372,13 +1387,14 @@ def recommendations_history():
         else:
             summary = {}
 
-        # 按收益排序
-        results.sort(key=lambda x: x["pnl_pct"], reverse=True)
+        # 按首次推荐日降序（同日按收益降序），复盘列表以时间线为主
+        results.sort(key=lambda x: (x["first_scan_date"], x["pnl_pct"]), reverse=True)
 
         return ok({
             "items": _sanitize(results),
             "summary": summary,
             "days": days,
+            "merged": True,
         })
 
 
