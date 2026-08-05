@@ -21,7 +21,7 @@ python app.py
 
 启动后访问 http://localhost:5000/ 打开仪表板，健康检查 http://localhost:5000/api/health 。
 
-首次启动会自动创建 `core/quant.db` 并开启每日 07:00 定时数据同步（scheduler/）。
+首次启动会自动创建 `core/quant.db` 并开启每日 18:00 定时数据同步（scheduler/）。
 
 ## 目录结构
 
@@ -35,7 +35,7 @@ strategy/            策略层：scorer.py（每日打分）、factor_lib、indi
                      rules_store、intent/parser（自然语言选股）
 backtest/            回测层：engine.py、service.py、conditions.py
 routes/              Flask API：system / sync / scoring / screen / backtest / investor
-scheduler/           定时任务（每日 07:00 自动同步）
+scheduler/           定时任务（每日 18:00 自动同步+重算分）
 qlib_engine/         可选 Qlib 集成（初始化失败自动降级，不影响主流程）
 ai/                  机器学习预测（RandomForest）
 config/              settings.py、strategy_params.py、thresholds.py

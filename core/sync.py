@@ -1001,7 +1001,7 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
 def sync_single_stock_to_watchlist(code: str, verbose: bool = False) -> dict:
     """
     「加入自选」后即时补拉单只股的历史 + 打分。
-    用于：用户加自选后无需等 07:00 调度，立即能在 watchlist 卡片看到数据。
+    用于：用户加自选后无需等 18:00 调度，立即能在 watchlist 卡片看到数据。
 
     返回结构（永远不抛异常）：
       {

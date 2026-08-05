@@ -84,11 +84,11 @@ if __name__ == "__main__":
 
     init_db()
 
-    # Auto-start daily sync scheduler (runs at 07:00 every trading day)
+    # Auto-start daily sync scheduler (runs at 18:00 every trading day)
     if not SCHEDULER_RUNNING["enabled"]:
         SCHEDULER_RUNNING["enabled"] = True
         start_scheduler()
-        print("[Scheduler] 每日 07:00 自动数据同步已启动")
+        print("[Scheduler] 每日 18:00 盘后自动数据同步已启动")
 
     print("AIQuant 个人股票评分系统启动...")
     print("访问 http://localhost:5000/ 打开仪表盘")

@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260719b">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260804">
 </head>
 <body>
 <div class="scanline"></div>
@@ -355,6 +355,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
+                <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">📋 一键复制</button>
                 <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:12px;padding:2px 6px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
                 <span class="text-muted" style="font-size:12px">基于量价 + 主力 + 趋势综合评估，点击查看 K 线</span>
             </div>
@@ -363,8 +364,8 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
-                <h3>出场跟踪 · 近10天推荐的出场状态</h3>
-                <span class="text-muted" style="font-size:12px" id="exitTrackHint">基于 v3 出场纪律：硬止损-6% / 浮盈+10%减半 / 回撤10%清仓 / 破MA5离场</span>
+                <h3>出场跟踪 · 7月20日起推荐的出场状态</h3>
+                <span class="text-muted" style="font-size:12px" id="exitTrackHint">按推荐自带止损/止盈价跟踪 · 买入价=推荐次日开盘价 · 短线≤10日 / 中线≤60日 / 长线不限，未卖出前持续跟踪</span>
             </div>
             <div id="exitTrackPanel">加载中…</div>
         </div>
@@ -389,14 +390,6 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
-                <h3>新手入门 · 量化指标速查</h3>
-                <span class="text-muted" style="font-size:12px">点指标看白话解释</span>
-            </div>
-            <div id="explainerGrid" class="explainer-grid"></div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
                 <h3>推荐复盘 · 过去30天推荐的真实表现与出场结果</h3>
                 <span class="text-muted" style="font-size:12px" id="recHistoryUpdatedAt"></span>
             </div>
@@ -411,6 +404,14 @@ async function loadHomeTab(container) {
                 <span class="text-muted" style="font-size:12px" id="optimizerUpdatedAt">同步后自动诊断，每周五盘后寻优，建议需人工采纳</span>
             </div>
             <div id="optimizerPanel">加载中…</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>新手入门 · 量化指标速查</h3>
+                <span class="text-muted" style="font-size:12px">点指标看白话解释</span>
+            </div>
+            <div id="explainerGrid" class="explainer-grid"></div>
         </div>
     `;
 
@@ -1158,8 +1159,10 @@ async function loadTodayPicks(isFallback) {
         }
         // 三周期分组（兼容旧结构：无 groups 时 items 视为短线组）
         const groups = data.groups || { short: data.items || [], mid: [], long: [] };
+        window._todayPicks = { date: serverDate || '', groups };  // 供「一键复制」按钮使用
         const total = HORIZON_GROUPS.reduce((sum, g) => sum + ((groups[g.key] || []).length), 0);
         if (total === 0) {
+            window._todayPicks = null;
             // 选中日期无推荐但可能存在更早的可用数据 → 回退到最新数据日重试一次
             if (dateEl && dateEl.value && !isFallback) {
                 const picked = dateEl.value;
@@ -1188,49 +1191,78 @@ async function loadTodayPicks(isFallback) {
     }
 }
 
-// P0: 出场跟踪（近10天推荐的出场状态）
+// P0: 出场跟踪（7月20日起推荐的出场状态，按短线/中线/长线三组，未卖出持续跟踪）
 async function loadExitTrack() {
     const box = document.getElementById('exitTrackPanel');
     if (!box) return;
     try {
-        const resp = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice?days=10');
+        const resp = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice');
         const d = (resp && resp.data) || {};
         const items = d.items || [];
-        const summary = d.summary || {};
+        const groups = d.groups || { short: [], mid: [], long: [] };
         if (!items.length) {
-            box.innerHTML = '<div class="empty-state">暂无需要跟踪的推荐<br><span style="color:var(--text-muted);font-size:12px">推荐后超过1个交易日才会显示出场状态</span></div>';
+            box.innerHTML = '<div class="empty-state">暂无需要跟踪的推荐<br><span style="color:var(--text-muted);font-size:12px">7月20日起暂无推荐或推荐后尚无行情</span></div>';
             return;
         }
-        // 汇总徽章
+        const horizonMeta = {
+            short: { label: '短线', icon: '⚡', hint: '持仓上限 10 个交易日' },
+            mid:   { label: '中线', icon: '📈', hint: '持仓上限 60 个交易日' },
+            long:  { label: '长线', icon: '🏔️', hint: '不限持仓期 · 趋势跟踪' },
+        };
+        // 汇总徽章（持有 / 已卖出）
+        let totalHold = 0, totalClear = 0;
+        ['short', 'mid', 'long'].forEach(hz => (groups[hz] || []).forEach(it => {
+            if (it.status === 'clear') totalClear++; else totalHold++;
+        }));
         let html = `<div class="exit-summary" style="margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap">
-            <span class="exit-sum-chip" style="background:rgba(16,185,129,0.1);color:#10b981;padding:4px 12px;border-radius:12px;font-size:12px">🟢 持有 ${summary.hold||0}</span>
-            <span class="exit-sum-chip" style="background:rgba(255,171,64,0.1);color:#ffab40;padding:4px 12px;border-radius:12px;font-size:12px">🟠 减仓 ${summary.reduce||0}</span>
-            <span class="exit-sum-chip" style="background:rgba(255,77,79,0.1);color:#ff4d4f;padding:4px 12px;border-radius:12px;font-size:12px">🔴 清仓 ${summary.clear||0}</span>
+            <span class="exit-sum-chip" style="background:rgba(16,185,129,0.1);color:#10b981;padding:4px 12px;border-radius:12px;font-size:12px">🟢 持有 ${totalHold}</span>
+            <span class="exit-sum-chip" style="background:rgba(255,77,79,0.1);color:#ff4d4f;padding:4px 12px;border-radius:12px;font-size:12px">🔴 已卖出 ${totalClear}</span>
         </div>`;
-        // 明细表格
-        html += '<div class="table-wrapper"><table><thead><tr>';
-        html += '<th>代码</th><th>名称</th><th>推荐日</th><th>买入价</th><th>持仓天数</th><th>浮盈</th><th>状态</th><th>原因</th>';
-        html += '</tr></thead><tbody>';
-        items.forEach(it => {
-            const detail = it.detail || {};
-            const pnl = detail.current_pnl_pct;
-            const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
-            const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
-            const statusIcon = it.status === 'clear' ? '🔴' : (it.status === 'reduce' ? '🟠' : '🟢');
-            const statusLabel = it.status === 'clear' ? '清仓' : (it.status === 'reduce' ? '减仓' : '持有');
-            const statusCls = it.status === 'clear' ? 'color:var(--danger)' : (it.status === 'reduce' ? 'color:var(--warning)' : 'color:var(--green, #10b981)');
-            html += `<tr>
-                <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
-                <td>${it.name||''}</td>
-                <td>${it.scan_date||''}</td>
-                <td>${it.entry_price||'--'}</td>
-                <td>${detail.hold_days||0}天</td>
-                <td class="${pnlCls}">${pnlStr}</td>
-                <td style="${statusCls};font-weight:600">${statusIcon} ${statusLabel}</td>
-                <td style="font-size:11px;color:var(--text-secondary);max-width:200px">${it.reason||''}</td>
-            </tr>`;
+        // 短线 / 中线 / 长线 三组
+        ['short', 'mid', 'long'].forEach(hz => {
+            const list = groups[hz] || [];
+            if (!list.length) return;
+            const meta = horizonMeta[hz];
+            const held = list.filter(it => it.status === 'hold').length;
+            const cleared = list.length - held;
+            html += `<div class="exit-group">
+                <div class="exit-group-head">
+                    <span class="exit-group-title">${meta.icon} ${meta.label}</span>
+                    <span class="exit-group-hint">${meta.hint}</span>
+                    <span class="exit-group-count">持有 ${held} · 已卖出 ${cleared}</span>
+                </div>
+                <div class="table-wrapper"><table><thead><tr>
+                    <th>代码</th><th>名称</th><th>推荐日</th><th>买入日</th><th>买入价</th><th>持仓天数</th><th>盈亏</th><th>状态</th><th>说明</th>
+                </tr></thead><tbody>`;
+            list.forEach(it => {
+                const detail = it.detail || {};
+                const pnl = detail.current_pnl_pct;
+                const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
+                const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
+                const sold = it.status === 'clear';
+                const statusHtml = sold
+                    ? '<span style="color:var(--danger);font-weight:600">🔴 已卖出</span>'
+                    : '<span style="color:var(--green, #10b981);font-weight:600">🟢 持有</span>';
+                const holdDays = detail.hold_days != null ? detail.hold_days + '天' : '--';
+                // 连续推荐：推荐日显示最新一次，附最早推荐日提示
+                const firstDate = detail.first_scan_date;
+                const scanHtml = (it.scan_date || '--')
+                    + (firstDate && firstDate !== it.scan_date
+                        ? `<div style="font-size:10px;color:var(--text-muted)">自 ${firstDate} 连续推荐</div>` : '');
+                html += `<tr>
+                    <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
+                    <td>${it.name||''}</td>
+                    <td>${scanHtml}</td>
+                    <td>${detail.entry_date||'--'}</td>
+                    <td>${it.entry_price||'--'}</td>
+                    <td>${holdDays}</td>
+                    <td class="${pnlCls}">${pnlStr}</td>
+                    <td>${statusHtml}</td>
+                    <td style="font-size:11px;color:var(--text-secondary);max-width:220px">${it.reason||''}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div></div>';
         });
-        html += '</tbody></table></div>';
         box.innerHTML = html;
     } catch(e) {
         box.innerHTML = '<div class="empty-state">加载失败</div>';
@@ -1324,6 +1356,25 @@ function renderPickCard(it) {
             const entry = ap.entry_price ? ap.entry_price.toFixed(2) : '--';
             const stop   = ap.stop_loss   ? ap.stop_loss.toFixed(2)   : '--';
             const tp     = ap.take_profit ? ap.take_profit.toFixed(2) : '--';
+            // 建议买入价 → 突破确认价 的价差（回放统计：价差≤1% 多为当日冲高/涨停的追高票，
+            // 次日开盘买入胜率仅约 12%，详见 tools/analyze_confirm_gap.py）
+            let gapHtml = '';
+            if (ap.entry_price) {
+                if (it.confirm_trigger) {
+                    const gapPct = (it.confirm_trigger - ap.entry_price) / ap.entry_price * 100;
+                    if (gapPct < 0) {
+                        // 理论不发生：确认线低于买入价，不显示
+                    } else if (gapPct <= 1) {
+                        gapHtml = `<div class="price-sub confirm-danger" title="近两年6.6万条短线信号回放：价差≤1%时次日开盘买入胜率仅约12%，买入价接近推荐日以来最高点，追高风险大">⚠ 买入价已在阶段高位 · 价差 ${gapPct.toFixed(1)}%</div>`;
+                    } else if (gapPct <= 5) {
+                        gapHtml = `<div class="price-sub confirm-gap" title="突破确认价相对建议买入价的上浮幅度：价差越小说明买入价越接近阶段高点，追高风险越大">价差 ${gapPct.toFixed(1)}%</div>`;
+                    } else {
+                        gapHtml = `<div class="price-sub confirm-safe" title="回放统计：价差>5%的买入价远离推荐日以来高点（多为低吸票），次日开盘买入胜率约49%，追高风险小；但若为连续大涨后的高位票请结合K线判断">✅ 距阶段高点较远 · 价差 ${gapPct.toFixed(1)}%</div>`;
+                    }
+                } else {
+                    gapHtml = `<div class="price-sub confirm-safe" title="该信号不适用突破确认（如隔日动量次日开盘入场），按建议买入价直接执行">✅ 无需突破确认 · 按建议价入场</div>`;
+                }
+            }
             const rr     = ap.risk_reward_ratio;
             const rrCls  = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
             const rrHtml = rr != null ? `<span class="rr-tag ${rrCls}">盈亏比 ${rr.toFixed(2)}</span>` : '';
@@ -1441,6 +1492,7 @@ function renderPickCard(it) {
                             ${it.confirm_trigger?(brokeOut
                                 ?`<div class="price-sub confirm-broken" title="现价已站上突破确认线（推荐后高点），回放验证突破后隔日胜率更高">🚀 已突破确认 ${it.confirm_trigger.toFixed(2)}</div>`
                                 :`<div class="price-sub confirm-waiting" title="回放验证：等收盘突破推荐后高点再入场，隔日胜率更高">突破确认 ${it.confirm_trigger.toFixed(2)}</div>`):''}
+                            ${gapHtml}
                         </div>
                         <div class="action-arrow">·</div>
                         <div class="price-cell sell">
@@ -1463,6 +1515,76 @@ function renderPickCard(it) {
                         ${rrHtml}
                     </div>
                 </div>`;
+}
+
+// ── 今日推荐：一键复制（股票+代码+突破确认+建议买入+止盈止损）──
+// 复制当前选中日期展示的推荐，按 short/mid/long 分组，每只一行便于粘贴到备忘录/Excel
+function copyTodayPicks() {
+    const store = window._todayPicks;
+    const btn = document.getElementById('btnCopyTodayPicks');
+    if (!store || !store.groups) {
+        showToast('暂无推荐数据，请先重算打分', 'error');
+        return;
+    }
+    const lines = [];
+    const dateStr = store.date ? '（' + store.date + '）' : '';
+    let count = 0;
+    HORIZON_GROUPS.forEach(g => {
+        const list = store.groups[g.key] || [];
+        if (!list.length) return;
+        count += list.length;
+        lines.push('【' + g.label + '】' + g.desc);
+        list.forEach((it, i) => {
+            const ap = it.action_plan || {};
+            const entry   = ap.entry_price   != null ? ap.entry_price.toFixed(2)   : '--';
+            const stop    = ap.stop_loss     != null ? ap.stop_loss.toFixed(2)     : '--';
+            const tp      = ap.take_profit   != null ? ap.take_profit.toFixed(2)   : '--';
+            const confirm = it.confirm_trigger != null ? it.confirm_trigger.toFixed(2) : '--';
+            lines.push((i + 1) + '. ' + (it.name || it.code) + ' ' + (it.code || '') +
+                '｜建议买入 ' + entry +
+                '｜止盈 ' + tp +
+                '｜止损 ' + stop +
+                '｜突破确认 ' + confirm);
+        });
+        lines.push('');
+    });
+    if (!count) {
+        showToast('暂无推荐数据', 'error');
+        return;
+    }
+    const text = '📋 今日推荐' + dateStr + '\n' + lines.join('\n').replace(/\n+$/, '');
+    copyTextToClipboard(text, function(ok) {
+        if (ok) {
+            if (btn) { btn.textContent = '✓ 已复制'; setTimeout(function() { btn.textContent = '📋 一键复制'; }, 2000); }
+            showToast('已复制 ' + count + ' 只推荐（' + HORIZON_GROUPS.filter(g => (store.groups[g.key] || []).length).map(g => g.label).join('+') + '）', 'success');
+        } else {
+            showToast('复制失败，请手动复制', 'error');
+        }
+    });
+}
+
+// 通用剪贴板复制（navigator.clipboard 优先，老浏览器降级 execCommand）
+function copyTextToClipboard(text, cb) {
+    function fallback() {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            cb && cb(ok);
+        } catch (e) {
+            cb && cb(false);
+        }
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(function() { cb && cb(true); }, fallback);
+    } else {
+        fallback();
+    }
 }
 
 // 渲染持仓出场诊断徽章（清仓/减仓/持有）
@@ -1672,13 +1794,17 @@ async function loadRecHistory() {
             return;
         }
 
-        // 汇总卡片：T1/T2/T3/T5 总胜率 + 原有收益统计
+        // 汇总卡片：T1/T2/T3/T5 总胜率 + 平均收益 + 原有收益统计
         if (summaryEl && summary.total) {
             const tStat = (k, label) => {
                 const s = summary[k];
-                if (!s) return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:26px">--</div><div class="lbl">${label} 胜率</div></div>`;
+                if (!s || !s.n) return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:26px">--</div><div class="lbl">${label} 胜率</div></div>`;
                 const color = s.win_rate >= 50 ? 'var(--green, #10b981)' : 'var(--danger)';
-                return `<div class="metric-card"><div class="val" style="color:${color};font-size:26px">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span></div></div>`;
+                const avg = s.avg_return;
+                const avgHtml = avg != null
+                    ? `<div style="font-size:11px;margin-top:3px" class="${avg>=0?'idx-up':'idx-down'}">${label} 平均收益 ${avg>=0?'+':''}${avg}%</div>`
+                    : '';
+                return `<div class="metric-card"><div class="val" style="color:${color};font-size:26px">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span></div>${avgHtml}</div>`;
             };
             const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
             const avgSign = summary.avg_return >= 0 ? '+' : '';
@@ -2058,7 +2184,7 @@ async function maybeAutoSync() {
     try {
         const resp = await RequestManager.fetch('sync-auto-status', API + '/sync/auto-status');
         if (resp && resp.running) {
-            // 同步已经在跑（可能是调度器 07:00 跑的，或其他 tab 触发的），只挂上进度展示
+            // 同步已经在跑（可能是调度器 18:00 跑的，或其他 tab 触发的），只挂上进度展示
             showSyncProgress();
             pollSyncProgress(onAutoSyncDone);
             return;

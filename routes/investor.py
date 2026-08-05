@@ -160,17 +160,70 @@ def _ensure_personal_tables():
 # 1. 今日推荐：直接告诉散户“买什么、什么价买、什么价卖、什么价止损”
 # ─────────────────────────────────────────────
 
-def _get_exit_advice(d: dict) -> Optional[dict]:
-    """P0: 对推荐日后 10 天内的票评估出场状态。
+# 出场跟踪起始日：该日期（含）起的推荐纳入跟踪，此前的推荐放弃；无结束时间限制
+EXIT_TRACK_START_DATE = "2026-07-20"
 
+
+def _split_continuous_segments(seg: list, df, horizon: str) -> list:
+    """将一段连续推荐按卖出断点拆分。
+
+    段内持仓若已在某交易日卖出（触发止损/止盈/到期），卖出日（含）之后的新推荐
+    属于新一轮交易，不能与卖出前的推荐合并展示（如：07-31 推荐、08-03 更新止损、
+    08-04 触发止损卖出，则 08-04 的新推荐应独立成段）。递归拆分直至无断点。
+    """
+    if len(seg) <= 1 or df is None or df.empty:
+        return [seg]
+    import pandas as pd
+    from strategy.exit_advisor import evaluate_exit_by_prices, HORIZON_MAX_HOLD
+
+    first, last = seg[0], seg[-1]
+    if hasattr(df.index, 'strftime'):
+        after = df[df.index > pd.Timestamp(first["scan_date"])]
+    else:
+        after = df[df.index > first["scan_date"]]
+    if after.empty:
+        return [seg]
+    _f = after.iloc[0]
+    entry_price = float(_f["open"]) if _f["open"] else (
+        float(_f["close"]) or first["buy_price"])
+
+    # 用段内最新止损/止盈评估整段持仓
+    adv = evaluate_exit_by_prices(
+        entry_price=entry_price,
+        entry_date=first["scan_date"],
+        df=df,
+        stop_loss=last["stop_loss"],
+        take_profit=last["take_profit"],
+        max_hold_days=HORIZON_MAX_HOLD.get(horizon),
+    )
+    exit_date = (adv.get("detail") or {}).get("exit_date")
+    if not exit_date:
+        return [seg]   # 未卖出，整段保留
+
+    # 卖出日（含）当天及之后的新推荐 → 新一轮交易，从该处拆开
+    split_at = None
+    for i, s in enumerate(seg):
+        if s["scan_date"] >= exit_date:
+            split_at = i
+            break
+    if split_at is None or split_at == 0:
+        return [seg]
+    # 注意：返回的是「段列表」——前半段包成单元素列表再与递归结果拼接
+    return [seg[:split_at]] + _split_continuous_segments(seg[split_at:], df, horizon)
+
+
+def _get_exit_advice(d: dict) -> Optional[dict]:
+    """P0: 对推荐日后 14 天内的票评估出场状态（与出场跟踪同口径）。
+
+    买入价 = 推荐日后首个交易日开盘价；卖出条件 = 推荐自带止损/止盈价 + 周期持仓上限。
     返回 None（新推荐，无需出场评估）或 {status, reason, detail}。
     """
     scan_date = d.get("scan_date")
-    entry = d.get("buy_price") or d.get("signal_price") or 0
-    if not scan_date or not entry or entry <= 0:
+    code = d.get("code")
+    if not scan_date or not code:
         return None
 
-    # 只对推荐日后 10 天内的票评估
+    # 只对推荐日后 14 天内的票评估
     try:
         from datetime import datetime as _dt
         scan_dt = _dt.strptime(str(scan_date)[:10], "%Y-%m-%d")
@@ -181,21 +234,37 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
         return None
 
     try:
-        from strategy.exit_advisor import evaluate_exit
+        from strategy.exit_advisor import evaluate_exit_by_prices, HORIZON_MAX_HOLD
         import pandas as pd
-        code = d.get("code")
-        if not code:
-            return None
         with get_conn() as conn:
             rows = conn.execute("""
-                SELECT trade_date, close, high, low
+                SELECT trade_date, open, close, high, low
                 FROM daily_price WHERE code = ?
                 ORDER BY trade_date ASC
             """, (code,)).fetchall()
         if not rows:
             return None
         df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
-        advice = evaluate_exit(entry_price=entry, entry_date=str(scan_date)[:10], df=df)
+        if hasattr(df.index, 'strftime'):
+            after = df[df.index > pd.Timestamp(str(scan_date)[:10])]
+        else:
+            after = df[df.index > str(scan_date)[:10]]
+        if after.empty:
+            entry_price = d.get("buy_price") or d.get("signal_price") or 0
+        else:
+            first = after.iloc[0]
+            entry_price = float(first["open"]) if first["open"] else (
+                float(first["close"]) or d.get("buy_price") or 0)
+        if not entry_price or entry_price <= 0:
+            return None
+        advice = evaluate_exit_by_prices(
+            entry_price=entry_price,
+            entry_date=str(scan_date)[:10],
+            df=df,
+            stop_loss=d.get("stop_loss"),
+            take_profit=d.get("take_profit"),
+            max_hold_days=HORIZON_MAX_HOLD.get(d.get("horizon") or "short"),
+        )
         return advice
     except Exception:
         return None
@@ -549,23 +618,31 @@ def available_dates():
 
 @investor_bp.route("/exit_advice", methods=["GET"])
 def exit_advice():
-    """出场建议：对近 N 个交易日的推荐评估出场状态
-    GET /api/investor/exit_advice?days=10
-    返回每条推荐的出场状态：hold/reduce/clear + 原因 + 详情
-    """
-    days = request.args.get("days", 10, type=int)
-    days = max(1, min(days, 30))
+    """出场跟踪：对 2026-07-20 起推荐的出场状态（按 short/mid/long 三周期分组）
 
+    GET /api/investor/exit_advice
+    口径：与「今日推荐」对齐（每组每天 fusion_score 前 8）；起始日为 EXIT_TRACK_START_DATE，
+         此前的推荐放弃，无结束时间限制——未卖出的持续跟踪直到卖出；
+         同一股票同一周期在交易日上连续推荐时合并为一条：推荐日取最新一次、
+         持仓天数从最早一次累计（买入价=最早推荐日次日开盘价）、止损/止盈按最新一次判定；
+         开始持有 = 推荐日，买入价 = 推荐日之后首个交易日的开盘价；
+         卖出条件 = 推荐自带止损/止盈价 + 按周期持仓上限（短线10/中线60/长线不限）。
+    返回 {items(平铺), groups:{short,mid,long}, summary, start_date}，状态 hold/clear。
+    """
     try:
-        from strategy.exit_advisor import evaluate_exit
+        from strategy.exit_advisor import evaluate_exit_by_prices, HORIZON_MAX_HOLD
         from core.db import get_conn as _get_conn
         import pandas as pd
 
+        # 板块限制：与「今日推荐」口径一致
+        board_filter = ""
+        if MAIN_BOARD_ONLY:
+            board_filter = "".join(
+                f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+
         with _get_conn() as conn:
-            # 取近 N 个交易日的推荐记录
-            # 注意：stock_signal 每天写入近乎全市场打分（数千条均带 buy_price），
-            # 必须与「今日推荐」口径对齐：每天每周期只取 fusion_score 前 8 名
-            signals = conn.execute("""
+            # 近 N 个交易日的推荐记录（与「今日推荐」对齐：每天每周期 fusion_score 前 8）
+            signals = conn.execute(f"""
                 SELECT code, name, scan_date, buy_price,
                        stop_loss, take_profit, fusion_score, horizon, strategy
                 FROM (
@@ -578,78 +655,150 @@ def exit_advice():
                                ORDER BY COALESCE(s.fusion_score, 0) DESC
                            ) AS rn
                     FROM stock_signal s
-                    WHERE s.scan_date >= date('now', ?)
+                    WHERE s.scan_date >= ?
                       AND s.buy_price IS NOT NULL
                       AND s.buy_price > 0
                       AND s.name NOT LIKE '%ST%'
                       AND s.name NOT LIKE '%退%'
+                      {board_filter}
                 )
                 WHERE rn <= 8
                 ORDER BY scan_date DESC
-            """, (f"-{days} days",)).fetchall()
+            """, (EXIT_TRACK_START_DATE,)).fetchall()
 
             if not signals:
-                return ok({"items": [], "count": 0, "days": days})
+                return ok({"items": [], "groups": {"short": [], "mid": [], "long": []},
+                           "count": 0, "start_date": EXIT_TRACK_START_DATE,
+                           "summary": {"hold": 0, "clear": 0}})
 
-            # 按 (code, scan_date) 去重
+            # 按 (code, scan_date, horizon) 去重
             seen = set()
             unique_signals = []
             for s in signals:
-                key = (s["code"], s["scan_date"])
+                key = (s["code"], s["scan_date"], s["horizon"])
                 if key not in seen:
                     seen.add(key)
                     unique_signals.append(s)
 
+            # 按 code 缓存日线（连续分段拆分与评估复用），避免重复查询
+            _df_cache: dict = {}
+
+            # ── 连续推荐合并：同 (code, horizon) 且推荐日按交易日连续 → 合并为一段 ──
+            # 段内：推荐日展示最新一次，持仓天数从最早一次累计，止损/止盈按最新一次判定；
+            # 但段内持仓若中途已卖出，卖出日（含）之后的新推荐拆分为新一轮交易
+            trade_dates = [r["trade_date"] for r in conn.execute(
+                "SELECT DISTINCT trade_date FROM daily_price ORDER BY trade_date ASC"
+            ).fetchall()]
+            td_index = {d: i for i, d in enumerate(trade_dates)}
+
+            by_key: dict = {}
+            for s in unique_signals:
+                by_key.setdefault((s["code"], s["horizon"]), []).append(s)
+
+            raw_segments = []   # 每段 = [最早推荐 ... 最新推荐]（scan_date 升序）
+            for sigs in by_key.values():
+                sigs.sort(key=lambda x: x["scan_date"])
+                seg = [sigs[0]]
+                for s in sigs[1:]:
+                    prev = seg[-1]
+                    # 连续 = 两个推荐日在交易日历中相邻（中间没有其他交易日）
+                    consecutive = (
+                        prev["scan_date"] in td_index
+                        and s["scan_date"] in td_index
+                        and td_index[s["scan_date"]] == td_index[prev["scan_date"]] + 1
+                    )
+                    if consecutive:
+                        seg.append(s)
+                    else:
+                        raw_segments.append(seg)
+                        seg = [s]
+                raw_segments.append(seg)
+
+            # 按卖出断点拆分后展开（卖出后的新推荐独立成段）
+            segments = []
+            for seg in raw_segments:
+                code = seg[0]["code"]
+                if code not in _df_cache:
+                    rows = conn.execute("""
+                        SELECT trade_date, open, close, high, low
+                        FROM daily_price
+                        WHERE code = ?
+                        ORDER BY trade_date ASC
+                    """, (code,)).fetchall()
+                    _df_cache[code] = (
+                        pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+                        if rows else None
+                    )
+                segments.extend(_split_continuous_segments(seg, _df_cache.get(code), seg[0]["horizon"]))
+
             results = []
-            for sig in unique_signals:
-                code = sig["code"]
-                scan_date = sig["scan_date"]
-                entry_price = sig["buy_price"]
+            for seg in segments:
+                first = seg[0]      # 最早推荐：持仓起算日 + 真实建仓买入价
+                last = seg[-1]      # 最新推荐：展示推荐日 + 最新止损/止盈判定
+                code = last["code"]
+                horizon = last["horizon"]
 
-                # 加载该股日线数据
-                rows = conn.execute("""
-                    SELECT trade_date, close, high, low
-                    FROM daily_price
-                    WHERE code = ?
-                    ORDER BY trade_date ASC
-                """, (code,)).fetchall()
-
-                if not rows:
+                df = _df_cache.get(code)
+                if df is None or df.empty:
                     continue
 
-                df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+                # 买入价 = 最早推荐日的下一个交易日开盘价（真实建仓成本）
+                if hasattr(df.index, 'strftime'):
+                    after = df[df.index > pd.Timestamp(first["scan_date"])]
+                else:
+                    after = df[df.index > first["scan_date"]]
+                if after.empty:
+                    # 尚未到买入日（最早推荐日即最新交易日）：还未买入，不显示
+                    continue
+                _f = after.iloc[0]
+                entry_price = float(_f["open"]) if _f["open"] else (
+                    float(_f["close"]) or first["buy_price"])
+                entry_date = str(after.index[0])[:10]
 
-                # 评估出场状态
-                advice = evaluate_exit(
+                # 持仓从最早推荐日起算；止损/止盈按最新推荐判定
+                advice = evaluate_exit_by_prices(
                     entry_price=entry_price,
-                    entry_date=scan_date,
+                    entry_date=first["scan_date"],
                     df=df,
+                    stop_loss=last["stop_loss"],
+                    take_profit=last["take_profit"],
+                    max_hold_days=HORIZON_MAX_HOLD.get(horizon),
                 )
+                detail = dict(advice.get("detail") or {})
+                if entry_date is not None:
+                    detail["entry_date"] = entry_date
+                if len(seg) > 1:
+                    detail["first_scan_date"] = first["scan_date"]  # 连续推荐起点
 
                 results.append({
                     "code": code,
-                    "name": sig["name"],
-                    "scan_date": scan_date,
-                    "horizon": sig["horizon"],
-                    "strategy": sig["strategy"],
+                    "name": last["name"],
+                    "scan_date": last["scan_date"],   # 推荐日 = 最新一次推荐
+                    "horizon": horizon,
+                    "strategy": last["strategy"],
                     "entry_price": round(entry_price, 2),
-                    "fusion_score": round(sig["fusion_score"] or 0, 1),
+                    "fusion_score": round(last["fusion_score"] or 0, 1),
                     "status": advice["status"],
                     "reason": advice["reason"],
-                    "detail": advice["detail"],
+                    "detail": detail,
                 })
 
-        # 排序：推荐日降序（最新在前），同一天内 clear > reduce > hold
-        status_order = {"clear": 0, "reduce": 1, "hold": 2}
-        results.sort(key=lambda x: (x["scan_date"], -status_order.get(x["status"], 3)), reverse=True)
+        # 排序：推荐日降序（最新在前），同一天内 clear > hold
+        status_order = {"clear": 0, "hold": 1}
+        results.sort(key=lambda x: (x["scan_date"], -status_order.get(x["status"], 2)), reverse=True)
+
+        # 按周期分组
+        groups = {"short": [], "mid": [], "long": []}
+        for r in results:
+            groups.setdefault(r["horizon"], []).append(r)
 
         return ok(_sanitize({
             "items": results,
+            "groups": groups,
             "count": len(results),
-            "days": days,
+            "start_date": EXIT_TRACK_START_DATE,
             "summary": {
                 "hold": sum(1 for r in results if r["status"] == "hold"),
-                "reduce": sum(1 for r in results if r["status"] == "reduce"),
                 "clear": sum(1 for r in results if r["status"] == "clear"),
             },
         }))
@@ -1359,9 +1508,12 @@ def recommendations_history():
             def _win_stat(key):
                 vals = [r[key] for r in results if r.get(key) is not None]
                 if not vals:
-                    return {"n": 0, "win": 0, "win_rate": 0}
+                    return {"n": 0, "win": 0, "win_rate": 0, "avg_return": 0}
                 win = sum(1 for v in vals if v > 0)
-                return {"n": len(vals), "win": win, "win_rate": round(win / len(vals) * 100, 1)}
+                avg = sum(vals) / len(vals)
+                return {"n": len(vals), "win": win,
+                        "win_rate": round(win / len(vals) * 100, 1),
+                        "avg_return": round(avg, 2)}
 
             wins = [r for r in results if r["pnl_pct"] > 0]
             losses = [r for r in results if r["pnl_pct"] <= 0]

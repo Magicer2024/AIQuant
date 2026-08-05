@@ -75,12 +75,26 @@ def auto_sync_status():
     判断是否需要自动同步（供前端首页调用）。
     规则：
       - 如果当前正在同步，running=True
+      - last_time 以 sync_log 表为准（持久化真相：手动/定时/命令行同步都会落库），
+        避免进程内 SYNC_STATUS 在重启或非调度器路径同步时丢失导致误报「从未同步」
       - 如果 last_time 为空（从未同步过），needs_sync=True
       - 如果 last_time 的日期 ≠ 今天，needs_sync=True
       - 其他情况 needs_sync=False
     """
     running = bool(_sync_progress["running"] or SYNC_STATUS.get("running"))
-    last_time = SYNC_STATUS.get("last_time")
+    last_time = None
+    try:
+        from core.db import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(sync_time) AS t FROM sync_log WHERE sync_type = 'daily_sync'"
+            ).fetchone()
+            last_time = row["t"] if row and row["t"] else None
+    except Exception:
+        last_time = None
+    if not last_time:
+        # 兜底：进程内状态（老逻辑，可能为 None）
+        last_time = SYNC_STATUS.get("last_time")
     needs_sync = True
     if last_time:
         try:
@@ -131,6 +145,10 @@ def start_sync():
             _sync_progress["message"] = f"同步失败: {e}"
         finally:
             _sync_progress["running"] = False
+            # 回写进程内状态，保持与 sync_log 一致（scheduler/state 供定时任务与文档沿用）
+            SYNC_STATUS["running"] = False
+            SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            SYNC_STATUS["last_result"] = _sync_progress["message"] or SYNC_STATUS.get("last_result", "")
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

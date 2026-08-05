@@ -35,7 +35,7 @@ python tests/test_em_speed.py     # 手动跑东财接口测速
 | `strategy/` | `scorer.py`（回测/因子流式行情加载工具，仅供 backtest 复用）、`factor_lib.py`、`indicators.py`、`rules_store.py`（含 derive_horizon）、`strategies.py`（短线 5 信号融合）、`mid_long.py`（中线综合/长线趋势扫描）、`strategy.py`（中线综合评分库，被 mid_long 调用）、`intent/parser.py`（自然语言选股） |
 | `backtest/` | `engine.py`（可视化回测引擎，BacktestParams 含 risk_free_rate）、`rule_engine.py`（策略规则一键回测+沪深300基准）、`service.py`（任务封装，rule_id 分发 + fitness 回写）、`conditions.py`（条件构建）、`nl_parser.py`（自然语言策略→条件+参数，LLM 主路径+本地正则兑底） |
 | `routes/` | Flask Blueprint：`system` / `sync` / `scoring` / `screen` / `backtest` / `investor` |
-| `scheduler/` | `runner.py` 每日 07:00 自动同步，`state.py` 共享状态 |
+| `scheduler/` | `runner.py` 每日 18:00 盘后自动同步+重算分，`state.py` 共享状态 |
 | `qlib_engine/` | 可选 Qlib 集成；`app.py` 启动时 try/except 初始化，失败自动降级不影响主流程 |
 | `ai/` | `features.py` 特征工程 + `predictor.py`（RandomForest，模型存 `ai/models/`） |
 | `config/` | `settings.py`（同步/回测/挖掘参数）、`strategy_params.py`、`thresholds.py`、`personal_config.py` |

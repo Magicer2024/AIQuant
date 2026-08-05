@@ -813,6 +813,25 @@ tr:hover td {
     border-radius: 4px;
     animation: breakoutPulse 1.6s ease-in-out infinite;
 }
+/* ── 建议买入价 vs 突破确认价 价差提示（回放统计：价差越小追高风险越大）── */
+.price-sub.confirm-gap {
+    display: inline-block; margin-top: 2px; padding: 1px 6px;
+    color: var(--text-muted); font-size: 11px;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+    border-radius: 4px;
+}
+.price-sub.confirm-danger {
+    display: inline-block; margin-top: 2px; padding: 1px 6px;
+    color: #ff6b6b; font-weight: 600;
+    background: rgba(255,77,79,0.12); border: 1px solid rgba(255,77,79,0.4);
+    border-radius: 4px;
+}
+.price-sub.confirm-safe {
+    display: inline-block; margin-top: 2px; padding: 1px 6px;
+    color: #00e676; font-weight: 600;
+    background: rgba(0,230,118,0.10); border: 1px solid rgba(0,230,118,0.35);
+    border-radius: 4px;
+}
 @keyframes breakoutPulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(0,230,118,0.35); }
     50% { box-shadow: 0 0 8px 2px rgba(0,230,118,0.18); }
@@ -947,6 +966,29 @@ tr:hover td {
     color: #ff4d4f;
     border: 1px solid rgba(255,77,79,0.3);
 }
+
+/* ── P0: 出场跟踪分组（短线/中线/长线） ── */
+.exit-group {
+    margin-bottom: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.015);
+}
+.exit-group-head {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 8px; flex-wrap: wrap;
+}
+.exit-group-title {
+    font-size: 13px; font-weight: 700; color: var(--text-primary);
+}
+.exit-group-hint {
+    font-size: 11px; color: var(--text-muted);
+}
+.exit-group-count {
+    margin-left: auto; font-size: 11px; color: var(--text-secondary);
+}
+.exit-group .table-wrapper { margin: 0; }
 
 /* ── 3 个挂单位置 ── */
 .entry-strategy {

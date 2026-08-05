@@ -195,6 +195,170 @@ def evaluate_exit(
     }
 
 
+# 三周期持仓上限：短线 10 个交易日 / 中线 60 个交易日 / 长线不限（None）
+HORIZON_MAX_HOLD: dict = {"short": 10, "mid": 60, "long": None}
+
+
+def evaluate_exit_by_prices(
+    entry_price: float,
+    entry_date: str,
+    df: pd.DataFrame,
+    *,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
+    max_hold_days: Optional[int] = None,
+) -> dict:
+    """按推荐自带止损/止盈价逐日模拟出场状态（出场跟踪新口径）。
+
+    口径：
+      - 推荐日(entry_date)起持有，买入价 = 推荐日后首个交易日开盘价(entry_price)
+      - A股 T+1：买入日当天不可卖出（只计入持仓），从买入日后第 2 个交易日开始逐日检查
+      - 卖出判定统一用当日收盘价（不做盘中插针触发），触发按收盘价卖出：
+          1. 收盘价跌破止损价       → 卖出（止损）
+          2. 收盘价达到止盈价       → 卖出（止盈）
+          3. 持仓达到 max_hold_days → 卖出（到期；None 表示不限）
+          4. 均未触发               → 持续持有
+      - 已卖出返回 status='clear'，仍持有返回 status='hold'
+
+    Args:
+        entry_price: 买入价（推荐日后首个交易日开盘价）
+        entry_date: 推荐日期 (YYYY-MM-DD)
+        df: 该股日线 DataFrame（含 open/high/low/close 列，日期索引升序）
+        stop_loss: 绝对止损价（推荐自带），None 则不检查
+        take_profit: 绝对止盈价（推荐自带），None 则不检查
+        max_hold_days: 最长持仓交易日数，None 表示不限
+
+    Returns:
+        dict: {
+            status: "hold" | "clear",
+            reason: str,
+            detail: {
+                entry_date, entry_price, hold_days, current_price,
+                current_pnl_pct, highest_since_entry, stop_loss, take_profit,
+                exit_date, exit_price, exit_reason
+            }
+        }
+    """
+    if df is None or df.empty or entry_price <= 0:
+        return {
+            "status": "hold",
+            "reason": "数据不足，暂无法评估",
+            "detail": {"entry_price": round(entry_price, 2) if entry_price else None},
+        }
+
+    # 防御：非法止损/止盈价（<=0 或止盈低于止损）视为未设置，避免历史脏数据误触发
+    if stop_loss is not None and stop_loss <= 0:
+        stop_loss = None
+    if take_profit is not None and take_profit <= 0:
+        take_profit = None
+    if stop_loss is not None and take_profit is not None and take_profit <= stop_loss:
+        take_profit = None
+
+    # 推荐日之后的交易日（含买入日）
+    if hasattr(df.index, 'strftime'):
+        after = df[df.index > pd.Timestamp(entry_date)]
+    else:
+        after = df[df.index > entry_date]
+
+    if after.empty:
+        return {
+            "status": "hold",
+            "reason": "推荐后尚无交易日，等待买入",
+            "detail": {
+                "entry_date": None,
+                "entry_price": round(entry_price, 2),
+                "hold_days": 0,
+                "current_price": round(entry_price, 2),
+                "current_pnl_pct": 0.0,
+                "highest_since_entry": None,
+                "stop_loss": round(stop_loss, 2) if stop_loss else None,
+                "take_profit": round(take_profit, 2) if take_profit else None,
+                "exit_date": None,
+                "exit_price": None,
+                "exit_reason": None,
+            },
+        }
+
+    # ── 逐日模拟（A股 T+1：买入日当天不可卖出，最早次日才能出场） ──
+    # 卖出判定统一用当日收盘价（不做盘中插针触发）：收盘价破止损/达止盈按收盘价卖出
+    hold_days = 0
+    highest = None
+    exit_date = None
+    exit_price = None
+    exit_reason = None
+    for i, (ts, row) in enumerate(after.iterrows(), start=1):
+        close = float(row["close"])
+        high = float(row["high"]) if "high" in after.columns and pd.notna(row.get("high")) else close
+        if highest is None or high > highest:
+            highest = high
+        hold_days = i
+
+        # T+1 规则：买入日（第 1 个交易日）当天买入不可卖出，只累计持仓，不检查出场
+        if i == 1:
+            continue
+
+        # 1. 止损：收盘价跌破止损价 → 按收盘价卖出
+        if stop_loss is not None and close <= stop_loss:
+            exit_date, exit_price, exit_reason = ts, close, f"收盘跌破止损价 {stop_loss:.2f}"
+            break
+        # 2. 止盈：收盘价达到止盈价 → 按收盘价卖出
+        if take_profit is not None and close >= take_profit:
+            exit_date, exit_price, exit_reason = ts, close, f"收盘达到止盈价 {take_profit:.2f}"
+            break
+        # 3. 超期（到期卖出）
+        if max_hold_days is not None and i >= max_hold_days:
+            exit_date, exit_price, exit_reason = ts, close, f"持仓满 {i} 个交易日，到期卖出"
+            break
+
+    entry_date_str = str(after.index[0])[:10]
+    if exit_date is not None:
+        current_price = float(exit_price)
+        current_pnl = (current_price - entry_price) / entry_price
+        exit_date_str = str(exit_date)[:10]
+        return {
+            "status": "clear",
+            "reason": f"已卖出（{exit_reason}）",
+            "detail": {
+                "entry_date": entry_date_str,
+                "entry_price": round(entry_price, 2),
+                "hold_days": hold_days,
+                "current_price": round(current_price, 2),
+                "current_pnl_pct": round(current_pnl * 100, 2),
+                "highest_since_entry": round(highest, 2) if highest else None,
+                "stop_loss": round(stop_loss, 2) if stop_loss else None,
+                "take_profit": round(take_profit, 2) if take_profit else None,
+                "exit_date": exit_date_str,
+                "exit_price": round(current_price, 2),
+                "exit_reason": exit_reason,
+            },
+        }
+
+    # 仍在持有
+    current_price = float(after.iloc[-1]["close"])
+    current_pnl = (current_price - entry_price) / entry_price
+    if current_pnl >= 0:
+        reason = f"持有（浮盈 +{current_pnl*100:.1f}%）"
+    else:
+        reason = f"持有（浮亏 {current_pnl*100:.1f}%，未触及止损）"
+    return {
+        "status": "hold",
+        "reason": reason,
+        "detail": {
+            "entry_date": entry_date_str,
+            "entry_price": round(entry_price, 2),
+            "hold_days": hold_days,
+            "current_price": round(current_price, 2),
+            "current_pnl_pct": round(current_pnl * 100, 2),
+            "highest_since_entry": round(highest, 2) if highest else None,
+            "stop_loss": round(stop_loss, 2) if stop_loss else None,
+            "take_profit": round(take_profit, 2) if take_profit else None,
+            "exit_date": None,
+            "exit_price": None,
+            "exit_reason": None,
+        },
+    }
+
+
 def _was_partial_done_before(after: pd.DataFrame, entry_price: float, partial_tp: float) -> bool:
     """检查在今天之前是否已经触发过减半（即之前的交易日是否已达到 partial_tp）。
 

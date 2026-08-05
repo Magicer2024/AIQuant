@@ -14,10 +14,23 @@ from scheduler.runner import start_scheduler
 def system_status():
     """Get system status"""
     from routes.sync import _sync_progress
+    # last_time 以 sync_log 表为准（持久化真相），兜底进程内状态
+    last_time = None
+    try:
+        from core.db import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(sync_time) AS t FROM sync_log WHERE sync_type = 'daily_sync'"
+            ).fetchone()
+            last_time = row["t"] if row and row["t"] else None
+    except Exception:
+        last_time = None
+    if not last_time:
+        last_time = SYNC_STATUS.get("last_time")
     return ok({
         "sync": {
             "running": SYNC_STATUS["running"] or _sync_progress["running"],
-            "last_time": SYNC_STATUS.get("last_time"),
+            "last_time": last_time,
             "last_result": SYNC_STATUS.get("last_result", ""),
         },
         "scheduler": {

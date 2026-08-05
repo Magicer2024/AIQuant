@@ -2,8 +2,7 @@
 scheduler/runner.py -- background sync task and scheduler
 
 调度策略：
-  - 07:00  盘前同步（自选股增量）
-  - 15:30  盘后同步（全市场收盘数据 + 策略分重算）
+  - 18:00  盘后同步（自选股增量 + 策略分重算）
   - 失败后指数退避重试（30min → 60min → 120min，最多 3 次）
 """
 import threading
@@ -115,16 +114,15 @@ def _schedule_retry(delay_seconds: int):
 
 
 def start_scheduler():
-    """启动定时同步调度器（07:00 盘前 + 15:30 盘后）"""
+    """启动定时同步调度器（每日 18:00 盘后同步 + 策略分重算）"""
     def _sched_loop():
         while SCHEDULER_RUNNING["enabled"]:
             schedule.run_pending()
             time.sleep(60)
 
     schedule.clear()
-    schedule.every().day.at("07:00").do(_job_sync)
-    schedule.every().day.at("15:30").do(_job_sync)
-    print("[Scheduler] 每日 07:00 / 15:30 自动数据同步")
+    schedule.every().day.at("18:00").do(_job_sync)
+    print("[Scheduler] 每日 18:00 盘后自动数据同步")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)

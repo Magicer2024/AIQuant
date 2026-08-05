@@ -395,9 +395,12 @@ def get_merged_summary(days: int = 30, horizon: str = "short") -> dict:
     def _win_stat(key):
         vals = [it[key] for it in items if it.get(key) is not None]
         if not vals:
-            return {"n": 0, "win": 0, "win_rate": 0}
+            return {"n": 0, "win": 0, "win_rate": 0, "avg_return": 0}
         win = sum(1 for v in vals if v > 0)
-        return {"n": len(vals), "win": win, "win_rate": round(win / len(vals) * 100, 1)}
+        avg = sum(vals) / len(vals)
+        return {"n": len(vals), "win": win,
+                "win_rate": round(win / len(vals) * 100, 1),
+                "avg_return": round(avg, 2)}
 
     # 最终收益口径：exit_return > t5 > t3 > t2 > t1
     returns = []
