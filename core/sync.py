@@ -121,7 +121,7 @@ from strategy.strategies import (
 )
 from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.next_day_momentum import scan_next_day_momentum
-from strategy.rec_filters import trend_gate_series, quality_series, passes_quality
+from strategy.rec_filters import trend_gate_series, quality_series, passes_quality, chase_filter_series
 from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM
 
 # ─────────────────────────────────────────────
@@ -1320,6 +1320,9 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                 # 趋势闸门：排除 MA20 向下/未站上 MA20 的"一路阴跌"接飞刀信号
                 # （2026-07-29 回测：隔日OC平均 -0.043%→-0.003%，信号数 -69%）
                 gate = trend_gate_series(df).reindex(fused.index).fillna(False)
+                # 追高否决：连板天数>=3 / 涨停打开 / 近3日急涨>=25% → 不推荐
+                # （2026-08-05：修复"连板启动期被闸门挡、涨停打开放量日反而高分进推荐"问题）
+                chase = chase_filter_series(df).reindex(fused.index).fillna(False)
                 for _, row in fused.iterrows():
                     fs = float(row.get("FUSION_SCORE", 0) or 0)
                     if fs < SIG_THRESHOLD:
@@ -1328,6 +1331,8 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                     if not bool(qual.get(row.name, False)):
                         continue
                     if not bool(gate.get(row.name, False)):
+                        continue
+                    if not bool(chase.get(row.name, False)):
                         continue
                     trade_date = str(row.name.date()) if hasattr(row.name, "date") else str(row.name)[:10]
                     price = round(float(row["close"]), 2)
@@ -1377,6 +1382,10 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                     continue
                 # 质量过滤（ST/流动性/市值），逻辑本身不改
                 if not passes_quality(name, df, _ts):
+                    continue
+                # 追高否决（2026-08-05：与短线同口径——连板/涨停打开/急涨后不推长线建仓，
+                # 000815 三连板后的 long 41.67 分即因此不再写入）
+                if not chase_filter(df):
                     continue
                 sig_records.append({
                     "scan_date": sig["trade_date"],

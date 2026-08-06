@@ -70,6 +70,7 @@ python tests/test_em_speed.py     # 手动跑东财接口测速
 
 - **db.py 函数迁移中**：`upsert_daily_price`/`get_daily_price` 等已标 deprecated，新代码优先用 `core/repository/` 对应模块；deprecated 函数仍可工作。
 - **写库路径**：行情写入统一走 `core/sync.py::_batch_write_daily_price`（含 data_cleaner 行级校验 + 成交量手→股换算），不要绕过。
+- **追高否决过滤（chase filter）**：短线写库前（`recalc_all_scores` 纯抄底分支）除趋势闸门/质量过滤外，还须过 `strategy/rec_filters.py::chase_filter_series`（config `CHASE_FILTER`）：连续涨停≥3 当日、近 5 日内出现 3 连板冷却期、当日涨停打开（盘中触板未封住）、近 3 日涨幅≥25%，任一命中即不写 stock_signal。背景：000815 三连板启动期被趋势闸门挡掉、涨停打开放量日反而高分进推荐；持仓口径回测被过滤信号胜率 27.9%/均值-2.6%/止损率 64%（远差于保留信号），过滤后信号池均值由负转正。改阈值在 config/strategy_params.py，勿把连板阈值调 >3。
 - **em_guard 三道防线**：所有东财接口调用必须经 `cached_fetch`（TTL 缓存 → 窗口频控 → 每日配额），超限返回 stale 数据而非失败。
 - **JSON 安全**：Flask jsonify 不序列化自定义枚举与 NaN，统一用 `utils/serialization.py` 与 `utils/api.py` 的 ok/fail；枚举显式 `.value`。
 - **测试约定**：`tests/` 内文件用 `sys.path.insert(0, dirname(dirname(__file__)))` 引入项目根；需要真实库的测试用 `pytest.mark.skipif` 按 quant.db 是否存在跳过；网络基准（test_em_speed）模块级 skip，仅手动运行。

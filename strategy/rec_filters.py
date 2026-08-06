@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import pandas as pd
 
-from config.strategy_params import SHORT_TREND_GATE, QUALITY_FILTER, get_param
+from config.strategy_params import SHORT_TREND_GATE, QUALITY_FILTER, CHASE_FILTER, get_param
 
 # ST/退市名称关键词（大写归一后匹配，"退" 为中文不受 upper 影响）
 _ST_KEYWORDS = ("ST", "退")
@@ -121,4 +121,76 @@ def passes_quality(name, df: pd.DataFrame, total_shares: float = None,
     latest_close 仅为兼容旧签名保留；市值按当日收盘序列计算，无需外部传入。
     """
     s = quality_series(name, df, total_shares, cfg)
+    return bool(s.iloc[-1]) if len(s) else False
+
+
+# ─────────────────────────────────────────────
+# 追高否决：连板天数 / 涨停打开 / 近3日急涨
+# ─────────────────────────────────────────────
+
+def chase_filter_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
+    """
+    逐日追高否决布尔序列（True=可推荐）。任一项命中即 False：
+      1. 当日连续涨停 >= max_consecutive_limit（默认 3 连板当日否决）
+      2. 近 cooldown_days 个交易日内出现过 >= cooldown_consecutive 连板
+         （连板后遗症冷却期：三连板后的第4天起数日仍是高位，000815 8-05 即此情形）
+      3. 当日盘中触板（high >= prev_close*(1+9.5%)）但收盘未封住（涨停打开，分歧/出货形态）
+      4. 近3日涨幅 >= max_ret_3d（默认 25%）
+    数据缺失时按"不否决"处理（保留信号），与质量过滤的降级方向相反：
+    追高否决宁可漏杀不可误杀——它防的是高位接盘，缺数据时不臆断。
+    禁用时全 True。仅支持单股票 df（与 trend_gate_series 同约定）。
+    """
+    cfg = cfg or CHASE_FILTER
+    if df is None or len(df) == 0:
+        return pd.Series(dtype=bool)
+    if not cfg.get("enabled", True):
+        return pd.Series(True, index=df.index)
+
+    close = df["close"].astype(float)
+    if "pct_change" in df.columns:
+        pct = df["pct_change"].astype(float)
+    else:
+        pct = close.pct_change() * 100.0
+    high = df["high"].astype(float) if "high" in df.columns else close
+
+    ok = pd.Series(True, index=df.index)
+
+    # 连续涨停天数（涨停段内计数）
+    limit_pct = float(cfg.get("limit_pct", 9.8))
+    is_limit = (pct >= limit_pct).astype(int)
+    seg = (is_limit != is_limit.shift(1)).cumsum()
+    streak = is_limit.groupby(seg).cumsum()
+
+    # 1) 当日连板否决
+    max_consec = int(cfg.get("max_consecutive_limit", 3))
+    if max_consec >= 1:
+        ok &= streak < max_consec
+
+    # 2) 连板后遗症冷却期：近 cooldown_days 个交易日内出现过 >= cooldown_consecutive 连板
+    cooldown_consec = int(cfg.get("cooldown_consecutive", 3))
+    cooldown_days = int(cfg.get("cooldown_days", 0))
+    if cooldown_consec >= 1 and cooldown_days >= 1:
+        recent_max = streak.rolling(cooldown_days, min_periods=1).max()
+        ok &= recent_max < cooldown_consec
+
+    # 3) 涨停打开：盘中触板但收盘未封住
+    if cfg.get("reject_limit_open", True):
+        prev_close = close.shift(1)
+        touched = high >= prev_close * (1 + (limit_pct - 0.3) / 100.0)  # 盘中 >= +9.5%
+        sealed = pct >= limit_pct                                        # 收盘封住
+        limit_open = touched & (~sealed) & prev_close.notna()
+        ok &= ~limit_open.fillna(False)
+
+    # 4) 近3日涨幅
+    max_ret3 = float(cfg.get("max_ret_3d", 0.25))
+    if max_ret3 > 0:
+        ret3 = close / close.shift(3) - 1.0
+        ok &= ret3.fillna(0.0) < max_ret3
+
+    return ok.reindex(df.index).fillna(False).astype(bool)
+
+
+def chase_filter(df: pd.DataFrame, cfg: dict = None) -> bool:
+    """最新交易日是否通过追高否决（True=可推荐）"""
+    s = chase_filter_series(df, cfg)
     return bool(s.iloc[-1]) if len(s) else False
