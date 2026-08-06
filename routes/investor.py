@@ -1413,19 +1413,26 @@ def recommendations_history():
     except Exception:
         pass  # fallback 到实时计算
 
-    # Fallback: 实时计算（口径与 recommend_outcome 一致：短线 + 连续推荐合并）
+    # Fallback: 实时计算（口径与 recommend_outcome 一致：短线 + 连续推荐合并 + 主板过滤）
     from core.outcome_tracker import _merge_continuous_segments
+
+    # 板块限制：与今日推荐同口径（小资金仅推主板）
+    board_filter = ""
+    if MAIN_BOARD_ONLY:
+        board_filter = "".join(
+            f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
 
     with get_conn() as conn:
         # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的）
         signals = conn.execute(
-            """
+            f"""
             SELECT s.code, s.name, s.scan_date, s.buy_price, s.stop_loss, s.take_profit,
                    s.fusion_score
             FROM stock_signal s
             WHERE s.scan_date >= date('now', ?)
               AND s.buy_price IS NOT NULL
               AND COALESCE(s.horizon, 'short') = 'short'
+              {board_filter}
             ORDER BY s.code ASC, s.scan_date ASC
             """,
             (f"-{days} days",),

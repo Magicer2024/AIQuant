@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Optional
 
 from core.db import get_conn
+from config.personal_config import MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES
 
 
 # ─────────────────────────────────────────────
@@ -27,12 +28,17 @@ def insert_new_outcomes(days_back: int = 60):
     """将 stock_signal 中近 N 天、尚未录入 recommend_outcome 的推荐写入。
 
     去重逻辑：UNIQUE(code, scan_date, horizon)，INSERT OR IGNORE。
-    口径：stock_signal 每天写入近乎全市场打分，只有每天每周期
-    fusion_score 前 8 名才是真正的「推荐」（与今日推荐面板一致）。
+    口径：与「今日推荐」面板一致（config/personal_config.py 的主板过滤 +
+    每周期 fusion_score 前 8 名才是真正的「推荐」）。
     """
     cutoff = f"-{days_back} days"
+    # 板块限制：与 routes/investor.py 的今日推荐同口径（小资金仅推主板）
+    board_filter = ""
+    if MAIN_BOARD_ONLY:
+        board_filter = "".join(
+            f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
     with get_conn() as conn:
-        conn.execute("""
+        conn.execute(f"""
             INSERT OR IGNORE INTO recommend_outcome
                 (code, scan_date, horizon, strategy, entry_price,
                  stop_loss, take_profit, fusion_score)
@@ -58,6 +64,7 @@ def insert_new_outcomes(days_back: int = 60):
                   AND s.buy_price > 0
                   AND s.name NOT LIKE '%ST%'
                   AND s.name NOT LIKE '%退%'
+                  {board_filter}
             )
             WHERE rn <= 8
         """, (cutoff,))
