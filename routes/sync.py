@@ -87,7 +87,8 @@ def auto_sync_status():
         from core.db import get_conn
         with get_conn() as conn:
             row = conn.execute(
-                "SELECT MAX(sync_time) AS t FROM sync_log WHERE sync_type = 'daily_sync'"
+                "SELECT MAX(sync_time) AS t FROM sync_log "
+                "WHERE sync_type IN ('daily_sync', 'scheduler_all')"
             ).fetchone()
             last_time = row["t"] if row and row["t"] else None
     except Exception:

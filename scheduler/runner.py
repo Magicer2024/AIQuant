@@ -2,7 +2,7 @@
 scheduler/runner.py -- background sync task and scheduler
 
 调度策略：
-  - 18:00  盘后同步（自选股增量 + 策略分重算）
+  - 18:00  盘后同步（全市场行情 + 策略分重算）
   - 失败后指数退避重试（30min → 60min → 120min，最多 3 次）
 """
 import threading
@@ -18,18 +18,19 @@ _BASE_RETRY_DELAY = 30 * 60  # 30 分钟
 
 
 def run_sync_blocking():
-    """Background thread: 自选股同步 + 盘后全市场同步
+    """Background thread: 盘后全市场同步
 
     流程：
       1) update_stock_list() —— 拉全 A 列表写入 stock_info
-      2) 检查自选股列表
-      3) daily_sync_by_date(target="watchlist")
-      4) 失败时指数退避重试
+      2) daily_sync_by_date(target="all") —— 东财一次 HTTP 拉全 A 当日行情
+         写入 daily_price 并触发策略分重算 + latest_price 刷新
+      3) 失败时指数退避重试
     """
     global _retry_count
     try:
         from core.sync import daily_sync_by_date, is_trading_day, update_stock_list
-        from core.db import init_db, count_watchlist, log_sync
+        from core.db import init_db, log_sync
+        from core.repository.sync_repo import db_stats
 
         init_db()
         today = date.today().strftime("%Y-%m-%d")
@@ -45,45 +46,34 @@ def run_sync_blocking():
         try:
             update_stock_list()
         except Exception as e:
-            print(f"[Scheduler] update_stock_list 失败（继续执行自选同步）: {e}")
+            print(f"[Scheduler] update_stock_list 失败（继续执行全市场同步）: {e}")
 
-        # 1) 自选股空校验
-        if count_watchlist() == 0:
-            SYNC_STATUS["last_result"] = "自选列表为空，跳过数据同步（请先添加自选股）"
-            SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            SYNC_STATUS["running"] = False
-            _retry_count = 0
-            return
-
-        # 2) 自选股按日同步
-        SYNC_STATUS["last_result"] = "自选股按日同步中..."
+        # 1) 全市场按日同步（东财一次 HTTP 拉全 A 当日行情）
+        SYNC_STATUS["last_result"] = "全市场同步中..."
         t0 = time.time()
         result = daily_sync_by_date(
             trade_dates=None,
             verbose=False,
-            target="watchlist",
+            target="all",
         )
         elapsed = round(time.time() - t0, 1)
 
-        if result.get("skipped") == "empty_watchlist":
-            SYNC_STATUS["last_result"] = "自选列表为空，跳过"
-        else:
-            rows = result.get('rows', 0)
-            SYNC_STATUS["last_result"] = (
-                f"自选同步完成 [watchlist]: {rows} 行, 耗时 {elapsed}s"
+        rows = result.get('rows', 0)
+        SYNC_STATUS["last_result"] = (
+            f"全市场同步完成 [all]: {rows} 行, 耗时 {elapsed}s"
+        )
+        # 写入 sync_log 表（持久化同步记录）
+        try:
+            log_sync(
+                sync_type="scheduler_all",
+                total=db_stats()["股票列表数"],
+                success=rows,
+                failed=0,
+                duration_s=elapsed,
+                note=f"target=all, dates={result.get('dates', [])}",
             )
-            # 写入 sync_log 表（持久化同步记录）
-            try:
-                log_sync(
-                    sync_type="scheduler_watchlist",
-                    total=count_watchlist(),
-                    success=rows,
-                    failed=0,
-                    duration_s=elapsed,
-                    note=f"target=watchlist, dates={result.get('dates', [])}",
-                )
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _retry_count = 0  # 成功后重置重试计数
