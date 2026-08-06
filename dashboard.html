@@ -1103,7 +1103,7 @@ async function showFactorDetail(code, name) {
 
     if (!rows.length) {
         showModal((name || code) + ' 融合分详情',
-            '<div class="empty-state">暂无融合分数据</div>');
+            '<div class="empty-state">暂无融合分数据</div>', 'min(620px, 92vw)');
         return;
     }
 
@@ -1124,7 +1124,7 @@ async function showFactorDetail(code, name) {
         '<div class="factor-bars">' + bars + '</div>' +
         '<div id="factorTrendChart" style="width:100%;height:280px;margin-top:12px;"></div>' +
         '</div>';
-    showModal((name || code) + ' 融合分详情', body);
+    showModal((name || code) + ' 融合分详情', body, 'min(620px, 92vw)');
 
     var dates = rows.map(function(r) { return r.trade_date; });
     var series = rows.map(function(r) { return r.fusion_score; });
@@ -2231,11 +2231,12 @@ async function ensureTodayRecs(silent) {
         if (silent) showToast('同步行情完成，开始重算今日打分…', 'info', 3500);
         // 触发重算（异步任务），拿到 task_id 后轮询
         const r = await RequestManager.fetch('recalc-start-auto', API + '/sync/recalc', { method: 'POST' });
-        if (!r || !r.task_id) {
+        const tid = r && r.data && r.data.task_id;
+        if (!tid) {
             showToast('自动重算启动失败，请手动点击"立即重算打分"', 'warning', 4000);
             return;
         }
-        pollRecalcTask(r.task_id, function(ok, msg) {
+        pollRecalcTask(tid, function(ok, msg) {
             showToast(ok ? ('今日推荐已更新 · ' + (msg || '')) : ('重算失败: ' + (msg || '')), ok ? 'success' : 'error');
             // 重算完后，如果用户在首页就刷新一下数据
             if (typeof currentTab !== 'undefined' && currentTab === 'home') {
@@ -2440,7 +2441,7 @@ async function homeRecalc() {
             return;
         }
         showToast('打分重算已启动…', 'info', 2500);
-        pollRecalcTask(r.task_id, function(ok, msg) {
+        pollRecalcTask(r.data && r.data.task_id, function(ok, msg) {
             setInlineProgress(ok ? 'recalc-finish' : null, null, null, msg || '');
             if (ok) setTimeout(() => setInlineProgress(null), 5000);
             if (btn)  { btn.disabled  = false; btn.textContent  = '立即重算打分'; }
@@ -2496,7 +2497,7 @@ function closeModal() {
     }
 }
 
-function showModal(title, bodyHtml) {
+function showModal(title, bodyHtml, width) {
     let modal = document.getElementById('compareModal');
     if (!modal) {
         modal = document.createElement('div');
@@ -2505,7 +2506,10 @@ function showModal(title, bodyHtml) {
         modal.onclick = function(e) { if (e.target === modal) closeModal(); };
         document.body.appendChild(modal);
     }
-    modal.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border-glow);box-shadow:var(--shadow-hover);border-radius:8px;padding:24px;max-width:90vw;max-height:80vh;overflow:auto;">
+    const boxStyle = width
+        ? `width:${width};min-width:0;max-width:90vw;max-height:80vh;overflow:auto;`
+        : 'max-width:90vw;max-height:80vh;overflow:auto;';
+    modal.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border-glow);box-shadow:var(--shadow-hover);border-radius:8px;padding:24px;${boxStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
             <h3 style="margin:0;color:var(--text);">${title}</h3>
             <button class="btn btn-danger btn-sm" onclick="closeModal()">关闭</button>
