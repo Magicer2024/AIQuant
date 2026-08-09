@@ -274,8 +274,11 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         "min": 0.04, "max": 0.40, "label": "短线止盈比例",
     },
     "short_max_hold_days": {
-        # 买入次日收盘了结（T+1 制度下最早可卖日）；同步改 exit_advisor.HORIZON_MAX_HOLD["short"]
-        "default": 1, "type": int,
+        # 2026-08-09 由 1 调整为 3：P0-1.1 的 1 天基于 v1 诊断（v1 T+3 转负才快进快出）；
+        # v2 转正后 edge 在 T+3/T+5（回测 OC：T+1 +0.10% → T+3 +0.181% → T+5 +0.226%），
+        # 8-04/8-05 实盘验证 T1 负（-0.52%/-1.43%）但 T2/T3 回正（+1.10%/+1.24%）——
+        # 1 天了结恰卖在回踩确认期最低点。3 天吃满 T+3 edge，止损/止盈不变。
+        "default": 3, "type": int,
         "min": 1, "max": 10, "label": "短线最大持仓天数",
     },
 }

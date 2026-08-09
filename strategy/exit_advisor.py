@@ -195,10 +195,10 @@ def evaluate_exit(
     }
 
 
-# 三周期持仓上限：短线 1 个交易日（买入次日了结，T+1 制度下最早可卖日；
-# 对应 TUNABLE_PARAMS.short_max_hold_days 默认值，改参数需同步本处）
+# 三周期持仓上限：短线 3 个交易日（v2 引擎 edge 在 T+3/T+5，见
+# TUNABLE_PARAMS.short_max_hold_days 注释；2026-08-09 由 1→3）
 # / 中线 60 个交易日 / 长线不限（None）
-HORIZON_MAX_HOLD: dict = {"short": 1, "mid": 60, "long": None}
+HORIZON_MAX_HOLD: dict = {"short": 3, "mid": 60, "long": None}
 
 
 def get_max_hold(horizon: str) -> Optional[int]:
