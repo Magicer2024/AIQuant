@@ -115,6 +115,11 @@ def main():
     p_v2, S_v2 = pool(cand_v2, dev_v2)
     print("=" * 72)
     print("P1-2.1 回测对比：已反弹版(OLD) vs 买回踩平滑版(v2)，diag 同口径 OC")
+    print("-" * 72)
+    print("口径说明：最近 ~35 个有后续行情的 short scan_date；候选=fs>=15 且")
+    print("gate&chase&ext（无 quality 过滤、非 Top8，全部候选）；OC=次日开盘买/")
+    print("信号日+N 收盘卖。⚠ 数值高于全量 Top8 口径（tools/backtest_engine_compare.py")
+    print("48.6%/+0.100%）系时间窗（近期行情）+ 非 Top8 + 无 quality 所致，二者方向一致。")
     print("=" * 72)
     for tag, p, S in [("OLD 已反弹", p_old, S_old), ("v2  买回踩", p_v2, S_v2)]:
         if not S["oc1"]:

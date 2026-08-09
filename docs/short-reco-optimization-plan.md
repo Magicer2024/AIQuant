@@ -1,24 +1,34 @@
 # 短线推荐系统优化修改方案
 
-> 文档性质：可执行方案（非诊断报告）。每一项都给出**改动文件 + 函数 + 行号 + 具体改法 + 验证指标**。
-> 配套诊断脚本：`tools/diag_short_reco.py`（多 cohort OC 口径，纯读取，可复用验证）。
+> 文档性质：可执行方案（非诊断报告）。每一项都给出**改动文件 + 函数 + 行号 + 具体改法 + 验证指标**。  
+> 配套诊断脚本：`tools/diag_short_reco.py`（多 cohort OC 口径，纯读取，可复用验证）。  
 > 诊断结论数据见文末附录。
+
+
 
 ---
 
 ## 0. 执行状态（2026-08-09 更新）
 
-| 编号 | 状态 | 说明 |
-|---|---|---|
-| P0-1.1 | ✅ 已落地 | 参数改为 **止损 -5% / 止盈 +8% / 持仓 1 天**（原方案 3 天；取 1 天因诊断 edge 在 T+1 附近，-3.5% 止损贴"易被洗出"阈值故取 -5%）；`HORIZON_MAX_HOLD["short"]=1`；增量重算 108.8s，落库止损/止盈已验证 -5%/+8% |
-| P0-1.2 | ✅ 已落地（仅硬否决） | `EXTENSION_FILTER` + `extension_filter_series` 加入过滤链（chase 之后）；重算后最大偏离 +38.3%→+11.7%、>8% 占比 26.9%→18.4%。**软降权（RSI×0.6）未实现**——RSI>70 仅占候选 1.4%，影响面可忽略；且 ×0.6 会造成 daily_price（回测口径）与 stock_signal（推荐口径）分裂 |
+| 编号     | 状态                | 说明                                                                                                                                                                                                                                                                                                                                             |
+| ------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0-1.1 | ✅ 已落地             | 参数改为 **止损 -5% / 止盈 +8% / 持仓 1 天**（原方案 3 天；取 1 天因诊断 edge 在 T+1 附近，-3.5% 止损贴"易被洗出"阈值故取 -5%）；`HORIZON_MAX_HOLD["short"]=1`；增量重算 108.8s，落库止损/止盈已验证 -5%/+8%                                                                                                                                                                                         |
+| P0-1.2 | ✅ 已落地（仅硬否决）       | `EXTENSION_FILTER` + `extension_filter_series` 加入过滤链（chase 之后）；重算后最大偏离 +38.3%→+11.7%、>8% 占比 26.9%→18.4%。**软降权（RSI×0.6）未实现**——RSI>70 仅占候选 1.4%，影响面可忽略；且 ×0.6 会造成 daily_price（回测口径）与 stock_signal（推荐口径）分裂                                                                                                                                        |
 | P1-2.1 | ✅ 已转正（2026-08-09） | 平滑回踩 v2（非文档二值化——二值化会锐减候选；平滑版候选量减半更温和）：`strategy/strategies.py::strategy_bottom_fishing_v2`，`SHORT_ENGINE="pure_bottom_v2"` 已为线上默认。`recalc_all_scores` 全量重算后 diag 实盘历史验证与回测吻合：T+1 OC 胜率 **55.4%**/+0.158%（回测预测 55.5%/+0.211%）、T+3 -0.588%（回测 -0.585%）、最新日候选 MA20 偏离均值 +3.11%、>8% 占比 1.6%（v1 时代 26.9%）。回滚：切回 `pure_bottom` + `recalc_all_scores` |
-| P1-2.2 | ❌ 砍掉 | 与 2.1/3.1 同源（都治"买高位"）但最间接，且只改 stock_signal 会造成回测口径分裂 |
-| P1-2.3 | ✅ 已落地 | cold/cool 时 short 组 limit 减半、cold 强制 wait（investor.py 分组处）；接口验证通过 |
-| P2-3.1 | ❌ 回测证伪 | `tools/_eval_adj_sort.py` 39 cohort：adj 排序 T+1 OC 49.0%/+0.243% **劣于** fusion 排序 53.5%/+0.639%——fusion 排序本身有选择力，惩罚中间区间损失 alpha；另原方案"daily_price 已有 ma20 列"为事实错误（表结构无该列） |
-| P2-3.2 | ✅ 已落地 | gap guard 改为：跳空 > 止盈价（≈+8%）→ `sell`（错过不追）；平开/小涨保持 `buy`；止盈缺失回退旧 2.5% 阈值 |
+| P1-2.2 | ❌ 砍掉              | 与 2.1/3.1 同源（都治"买高位"）但最间接，且只改 stock_signal 会造成回测口径分裂                                                                                                                                                                                                                                                                                           |
+| P1-2.3 | ✅ 已落地             | cold/cool 时 short 组 limit 减半、cold 强制 wait（investor.py 分组处）；接口验证通过                                                                                                                                                                                                                                                                              |
+| P2-3.1 | ❌ 回测证伪            | `tools/_eval_adj_sort.py` 39 cohort：adj 排序 T+1 OC 49.0%/+0.243% **劣于** fusion 排序 53.5%/+0.639%——fusion 排序本身有选择力，惩罚中间区间损失 alpha；另原方案"daily_price 已有 ma20 列"为事实错误（表结构无该列）                                                                                                                                                                        |
+| P2-3.2 | ✅ 已落地             | gap guard 改为：跳空 > 止盈价（≈+8%）→ `sell`（错过不追）；平开/小涨保持 `buy`；止盈缺失回退旧 2.5% 阈值                                                                                                                                                                                                                                                                        |
+| P0-1.3 | ✅ 手段A / ❌ 手段B,C   | 手段A=V2买回踩已转正，且本次全量回测确认优于 v1（T+5 +0.226% vs +0.133%）；手段B=放宽趋势闸门 本次回测证伪（v2-relaxed 的 T+3/T+5 略劣于 strict，**不建议**）；手段C=rank_score 扩展度调整 与 P2-3.1 同源已证伪，不实施                                                                                                                                                                                         |
+| 回测对照   | ✅ 完成              | `tools/backtest_engine_compare.py`：v1/v2/v2r 三组全链路离线复算（4372 股全历史，v2 候选 76971 样本），确认 ① v2 优于 v1 ② 放宽闸门不优于 strict ③ v2 下融合分排序正向（用户"排序反向"质疑在 v2 现状下不成立）                                                                                                                                                                                           |
 
-实施差异：阶段二只做 2.3；2.1 保留为回测实验（`tools/_eval_pullback.py` 可复用灰度验证）；阶段三 3.1 证伪不实施。
+| 收尾 A1 | ✅ 已补齐 | P0-1.1 改动 C：`_calc_signal` 补 `horizon` 参数，short+buy 时 reasons 提示"短线快进快出：买入次日收盘了结"（接口已验证） |
+| 收尾 B1 | ✅ 已修复 | `exit_advisor.get_max_hold()`：短线持仓上限动态读 `TUNABLE_PARAMS.short_max_hold_days`（DB 可覆盖），消除 `HORIZON_MAX_HOLD` 硬编码双源漂移 |
+| 收尾 B2 | ✅ 已回填 | stock_signal 76373 条 strategy=NULL 历史残留（1993~2026-07）回填为独立标签 **`历史短线`**（非 `短线融合`，避免污染现行 diag/回测口径；回填后 diag 复验口径不变 55.4%/+0.158%） |
+| 收尾 A2 | ✅ 已验证 | 组合口径（10 日持有 simple 出场，近 1 年全池，`eval_short_engine.py --engine v1/v2`）：v2 年化 **+9.44%**（PF 1.072）仍赚钱但**略逊 v1**（+13.65%/1.102）；OC 口径 v2 优、组合口径 v1 优——线上已执行快进快出（1 天了结），以 OC 口径为准，v2 正确 |
+| 收尾 B3 | ✅ 已标注 | `_eval_pullback.py` 输出加口径说明（近 35 cohort/非 Top8/无 quality vs 全量 Top8 的 48.6% 差异来源），防止 55.5% 被误读 |
+
+实施差异（2026-08-09 校准）：P0-1.1 / P0-1.2 / P0-1.3手段A(v2) / P1-2.3 / P2-3.2 均已落地；P1-2.2（新鲜度衰减）砍掉、P2-3.1（扩展度排序）与 P0-1.3手段B/C 经回测证伪不实施。详见下方改动总览表与详细项状态标注。
 
 ---
 
@@ -27,7 +37,8 @@
 **目标**：把短线推荐从"接反弹高位、持亏"转为"买回踩、快进快出、低扩展度入场"。
 
 **硬边界**（不改）：
-- 引擎 `SHORT_ENGINE="pure_bottom"` + `PURE_BOTTOM_WEIGHTS=[0,0,0,1,0]` + `FUSION_MODE="max"` 不动——双口径回测证明这是唯一赚钱组合，替换风险高。
+
+- 引擎路径 `SHORT_ENGINE="pure_bottom_v2"`（2026-08-09 转正接管线上，由 v1"已反弹"升级为"买回踩平滑版"）+ `PURE_BOTTOM_WEIGHTS=[0,0,0,1,0]` + `FUSION_MODE="max"` 不动——双口径回测证明纯抄底是唯一赚钱组合，权重/融合模式替换风险高。v2 仅重定时"反弹强度"分（`strategy/strategies.py:220`），不改变权重与融合模式。
 - 所有可调参数走 `TUNABLE_PARAMS` 覆盖层（`strategy_param_override` 表），支持 DB 即时覆盖 + `invalidate_param_cache()` 回滚；新增过滤用 `enabled` 开关一键降级。
 
 **优先级约定**：P0=配置/UI 层低风险改动，立即生效；P1=需回测验证的打分/算法改动；P2=排序/语义优化。
@@ -36,37 +47,49 @@
 
 ## 1. 改动总览
 
-| 优先级 | 编号 | 改动 | 文件 / 函数 | 风险 |
-|---|---|---|---|---|
-| **P0** | 1.1 | 执行期对齐：短线改为快进快出，止盈/止损收紧、持仓上限 10→3 天 | `strategy_params.py`·`exit_advisor.py`·`investor.py` | 低 |
-| **P0** | 1.2 | 扩展/超买否决：价>MA20×1.12 硬否决，RSI>72 软降权 | `strategy_params.py`·`rec_filters.py`·`sync.py` | 低 |
-| **P0** | 1.3 | **融合分/排序分重定义（核心）**：抄底打分从"奖励已反弹"改为"低扩展度+刚启动"，并放宽趋势闸门让买回踩票进库 | `strategies.py`·`rec_filters.py`·`sync.py` | 中（需回测） |
-| **P1** | 2.1 | 新鲜度衰减：反弹/上行成熟天数对融合分打折 | `sync.py::_build_signal_records` | 中 |
-| **P1** | 2.2 | 稳健 regime 门控：cold 时短线推荐数量减半 | `investor.py::today_recommendations` | 低 |
-| **P2** | 3.1 | 分离触发与排序：落库按信号触发，推荐按"扩展度调整分"排序（低扩展度优先） | `investor.py::today_recommendations` | 低 |
-| **P2** | 3.2 | 重做 gap guard 语义：跳空过大才放弃，平开按原计划买 | `investor.py::_build_item` | 低 |
+| 优先级    | 编号  | 改动                                         | 文件 / 函数                                              | 风险     | 状态            |
+| ------ | --- | ------------------------------------------ | ---------------------------------------------------- | ------ | ------------- |
+| **P0** | 1.1 | 执行期对齐：短线快进快出，止损 -6%→-5%、止盈 +20%→+8%、持仓 1 天 | `strategy_params.py`·`exit_advisor.py`·`investor.py` | 低      | ✅ 已落地         |
+| **P0** | 1.2 | 扩展度硬否决：价>MA20×1.12 否决（软降权 RSI×0.6 未实现）     | `strategy_params.py`·`rec_filters.py`                | 低      | ✅ 已落地（仅硬否决）   |
+| **P0** | 1.3 | 融合分重定义：v2 买回踩已转正；放宽闸门与 rank_score 排序经回测证伪  | `strategies.py`(v2)                                  | 已落地/证伪 | ✅ 手段A / ❌ B,C |
+| **P1** | 2.2 | 新鲜度衰减（与 2.1/3.1 同源治"买高位"）                  | `sync.py::_build_signal_records`                     | 中      | ❌ 砍掉          |
+| **P1** | 2.3 | 稳健 regime 门控：cold/cool 时短线减半、cold 强制 wait  | `investor.py::today_recommendations`                 | 低      | ✅ 已落地         |
+| **P2** | 3.1 | 扩展度调整排序（低扩展度优先）                            | `investor.py::today_recommendations`                 | 低      | ❌ 回测证伪        |
+| **P2** | 3.2 | 重做 gap guard 语义：跳空过大才放弃，平开按原计划买            | `investor.py::_build_item`                           | 低      | ✅ 已落地         |
+
+> 编号说明：P1-2.1（买回踩 v2）已并入 P0-1.3 手段A 转正，故总览 P1 行自 2.2 起。
 
 ---
 
-## 1.5 关键发现（2026-08-09）：融合分排序无效 / 反向
+## 1.5 关键发现：融合分排序方向性（v1 反向 / v2 已修复）
 
-用户质疑"策略融合把后期会涨的票排后面了"——**被数据证实，且比'排后面'更彻底**。
+用户质疑"策略融合把后期会涨的票排后面了"——**该质疑在 v1（已反弹）引擎下成立，但在 v2（买回踩，现状）下已不成立**。
 
-**验证**（`tools/diag_fusion_rank.py`，落库短线票按 fusion_score 分三档，3351 cohort，n≈14万，T+1 开盘买 OC 口径）：
+**① v1 引擎下排序反向（8-08 `tools/diag_fusion_rank.py`，当时 stock_signal 为 v1 落库，按 fusion_score 分三档，3351 cohort，n≈14万，T+1 开盘买 OC 口径）：**
 
-| 档位 | T+1 | T+3 | T+5 |
-|---|---|---|---|
+| 档位   | T+1             | T+3             | T+5             |
+| ---- | --------------- | --------------- | --------------- |
 | 高融合分 | 46.7% / +0.063% | 45.4% / -0.039% | 44.8% / -0.167% |
-| 中 | 47.6% / +0.064% | 46.1% / +0.035% | 45.8% / -0.026% |
+| 中    | 47.6% / +0.064% | 46.1% / +0.035% | 45.8% / -0.026% |
 | 低融合分 | 48.1% / +0.060% | 47.5% / +0.075% | 47.0% / +0.051% |
 
-→ **融合分越高，后续越差**（T+3/T+5 低分档显著优于高分档，T+5 仅低分档仍为正）。当前 Top8 按融合分排序，选出的恰是"已反弹最猛"、边际空间最小的票。
+→ v1 下**融合分越高后续越差**（T+5 仅低分档仍为正）。根因：v1 的 `score_rebound` 奖励"已反弹5%"，融合分高=已涨得多=扩展度高=未来空间小；且严格趋势闸门在落库前排除"底部未拐头"票。
 
-**两层病灶**：
-1. **融合分定义错位**：`fusion_score = bottom_score 派生`，`bottom_score` 的 `score_rebound=(rebound_ratio/0.05).clip(0,1)` 奖励"已反弹5%"+放量 → 融合分高 = 已涨得多 = 扩展度高 = 未来空间小，与"选未来会涨"语义相反。
-2. **趋势闸门在落库前直接排除低位票**：`trend_gate_series`（`rec_filters.py:62`）要求 `close>MA20 且 MA20 向上`。还在底部、MA20 未拐头的票**根本不进 stock_signal**——不是排后面，是消失。真正"后期会涨"的低位启动票连候选资格都没有。
+**② v2 引擎下排序正向（本次 `tools/backtest_engine_compare.py`，4372 股全历史离线复算，v2 候选 76971 样本，全局分三档）：**
 
-**结论**：融合分/排序分重定义从 P1（治本可选）**提升为 P0-1.3 核心必做**；且不能只在读取端调排序（原 P2-3.1），要从融合/落库端就引入"低扩展度+刚启动"信号，并放宽趋势闸门让买回踩票能进库。详见下节。
+| 档位   | T+1             | T+3             | T+5             | MA20偏离 |
+| ---- | --------------- | --------------- | --------------- | ------ |
+| 高融合分 | 49.1% / +0.138% | 48.9% / +0.221% | 47.6% / +0.233% | +3.21% |
+| 中    | 48.6% / +0.071% | 47.9% / +0.163% | 47.8% / +0.247% | +3.53% |
+| 低融合分 | 48.1% / +0.092% | 47.5% / +0.158% | 47.2% / +0.196% | +4.17% |
+
+→ v2 下**高融合分档 T+3/T+5 反而最优、扩展度最低**。因为 v2 的 `score_rebound` 改为"上行趋势中回踩支撑"且内部要求 MA20 向上，融合分高=强趋势+好位置，语义已对齐"选未来会涨"。
+
+**结论**：
+
+- 用户担忧在 **v1 体验**下真实存在，但 v2 转正后已被修复——现状（v2）下融合分排序是**正向**的，不需要再做"低扩展度调整排序 / 重做融合分"那类改动（原 P2-3.1 已证伪、P0-1.3 手段C 同源不实施）。
+- 真正落地且有效的，是 P0-1.3 的**手段A（v2 买回踩）**；手段B（放宽趋势闸门）本次回测证伪，不实施（见下节与附录回测数据）。
+- 8-08 的 `diag_fusion_rank.py` 结论仅适用于 v1 落库时期，v2 转正后不再适用，应以 `backtest_engine_compare.py` 为准。
 
 ---
 
@@ -76,31 +99,33 @@
 
 **根因**：诊断证明 edge 只在隔夜（T+1 OC 均值 +0.08%），持到 T+3/T+5 转负（-3.86%@T+5）。但当前参数把短线当 5-10 日波段推：`HORIZON_MAX_HOLD["short"]=10`、止盈 +20%、止损 -6%，等于主动走进负收益区。
 
-**改动 A — 参数默认值**（`config/strategy_params.py` 的 `TUNABLE_PARAMS`，约 247-254 行）：
+**改动 A — 参数默认值（已落地，`config/strategy_params.py` 的 `TUNABLE_PARAMS`，248-281 行）：**
 
 ```python
 "short_stop_loss": {
-    "default": -0.035, "type": float,          # 原 -0.06，收紧到 -3.5%
+    "default": -0.05, "type": float,           # 原 -0.06，收紧到 -5%（盈亏比 8/5=1.6 稳过 avoid 一票否决；-3.5% 贴近"易被洗出"阈值，故取 -5%）
     "min": -0.12, "max": -0.02, "label": "短线止损比例",
 },
 "short_take_profit": {
     "default": 0.08, "type": float,            # 原 0.20，快进快出 +8%
     "min": 0.04, "max": 0.40, "label": "短线止盈比例",
 },
-"short_max_hold_days": {                        # 新增
-    "default": 3, "type": int,
+"short_max_hold_days": {                        # 新增（已落地 default=1）
+    "default": 1, "type": int,                  # T+1 制度下最早可卖日即了结
     "min": 1, "max": 10, "label": "短线最大持仓天数",
 },
 ```
+
 > 注意：若 `strategy_param_override` 表已写入旧值，需同步更新或清空该表，否则 DB 覆盖优先于代码默认值。
 
-**改动 B — 持仓上限**（`strategy/exit_advisor.py:199`）：
+**改动 B — 持仓上限（已落地，`strategy/exit_advisor.py:201`）：**
 
 ```python
-HORIZON_MAX_HOLD: dict = {"short": 3, "mid": 60, "long": None}   # short 10→3
+HORIZON_MAX_HOLD: dict = {"short": 1, "mid": 60, "long": None}   # short 10→1（对应 TUNABLE_PARAMS.short_max_hold_days）
 ```
 
 **改动 C — 信号灯语义**（`routes/investor.py::156 _calc_signal`）：当 `horizon=="short"` 且 `level=="buy"` 时：
+
 - `reasons.append("短线动量反转：T+1/T+3 了结，不恋战")`
 - 新增：若 `latest` 相对 `entry` 涨幅 ≥ `short_take_profit` → 返回 `level="sell"`（止盈离场）而非继续持有，避免"买了就一直拿"。
 - 在 `today_recommendations` 调用 `_calc_signal` 处（约 649 行）传入 `horizon=d.get("horizon")` 参数（当前签名无 horizon，需补）。
@@ -113,39 +138,37 @@ HORIZON_MAX_HOLD: dict = {"short": 3, "mid": 60, "long": None}   # short 10→3
 
 **根因**：最新候选 26.9% 高于 MA20 超 8%、最大 +38.3%；低位组（<MA20 2%）T+1 OC 52.2%/+0.28% 优于高位组 48.3%/+0.04%。缺扩展度否决是主缺口。
 
-**改动 A — 新增配置**（`config/strategy_params.py`，紧跟 `CHASE_FILTER` 之后，约 162 行后）：
+**改动 A — 新增配置（已落地，`config/strategy_params.py`，177-180 行）：**
 
 ```python
 EXTENSION_FILTER = {
     "enabled": True,
     "max_pct_above_ma20": 0.12,   # 价 > MA20×1.12 → 硬否决（易均值回归尾部）
-    "max_rsi14": 72.0,            # RSI(14) > 72 → 软降权（fusion ×0.6，保留动量尾）
+    # 原方案含 max_rsi14=72.0 软降权(fusion×0.6)，因软降权未实现且影响面可忽略
+    # （RSI>70 仅占候选 1.4%），最终未落地——仅硬否决生效。
 }
 ```
 
-**改动 B — 新增过滤器**（`strategy/rec_filters.py`，在 `chase_filter_series` 后新增）：
+**改动 B — 新增过滤器（已落地，`strategy/rec_filters.py:204` `extension_filter_series`）**：
 
 ```python
 def extension_filter_series(df, cfg=None):
-    """扩展度否决：低价位/低 RSI 优先。True=可推荐。"""
+    """扩展度否决：价相对 MA20 偏离过大则不可推荐。True=可推荐。"""
     cfg = cfg or EXTENSION_FILTER
     if not cfg.get("enabled", True):
         return pd.Series(True, index=df.index)
     close = df["close"].astype(float)
     ma20 = close.rolling(20).mean()
     above = (close / ma20 - 1.0).fillna(99)          # 偏离度
-    rsi = _rsi14(df)                                   # 需补一个 RSI(14) 辅助函数
     ok = above < float(cfg.get("max_pct_above_ma20", 0.12))
     return ok.reindex(df.index).fillna(False).astype(bool)
-
-def extension_soft_penalty(df, cfg=None) -> pd.Series:
-    """RSI>阈值时返回折扣系数（1.0 或 0.6），供融合分乘用。"""
-    ...
+# 注：原方案的 extension_soft_penalty(RSI>72 → fusion×0.6) 未实现，函数不存在。
 ```
 
-**改动 C — 融合前调用**（`core/sync.py::_build_signal_records`，约 1269-1299 行融合分计算处）：
-- 融合前：对未通过 `extension_filter_series` 的交易日，`fuse` 结果置 0（硬否决）。
-- 融合后：若命中 `extension_soft_penalty`（RSI>72），`fusion_score *= 0.6`。
+**改动 C — 融合前调用（已落地，`core/sync.py::_build_signal_records`）：**
+
+- 融合前：对未通过 `extension_filter_series` 的交易日，`fuse` 结果置 0（硬否决，已生效）。
+- 融合后 RSI>72 软降权（fusion×0.6）**未实现**——`extension_soft_penalty` 未编写，且 RSI>70 仅占候选 1.4%，影响可忽略，故不补。
 
 **验证指标**：diag harness 加"剔除 >MA20×1.12 候选"对照组，预期整体 T+1 OC 均值从 **+0.08%** 提升（高位组被砍）。
 
@@ -157,39 +180,52 @@ def extension_soft_penalty(df, cfg=None) -> pd.Series:
 
 **这是本轮最核心、必须做的改动**——它直接回应"策略融合是否需要调整"的质疑。包含三个手段：
 
-**手段 A — 抄底打分重定时（买回踩不买反弹）**（`strategy/strategies.py::strategy_bottom_fishing`，203-205 行）：
+> ★ **落地状态（2026-08-09 回测对照后）**：
+>
+> - **手段A（买回踩重定时）= ✅ 已落地且确认有效**：即现网 `strategy_bottom_fishing_v2` + `SHORT_ENGINE="pure_bottom_v2"`。全量回测确认 v2 Top8 全面优于 v1（T+5 +0.226% vs +0.133%，候选 MA20 偏离 +5.11%→+3.64%）。
+> - **手段B（放宽趋势闸门）= ❌ 回测证伪，不实施**：本次 v2-relaxed（允许回踩至 MA20 下方 2%）引入更多低位票（候选 +22%），但 T+3/T+5 反而略劣于 strict（+0.181%→+0.159%、+0.226%→+0.206%）。"站上 MA20"是有效确认信号，放宽到跌破反而引入假支撑。
+> - **手段C（rank_score 扩展度调整排序）= ❌ 不实施**：与已证伪的 P2-3.1 同源；且 v2 下融合分排序本身正向（见 1.5），无需排序端调整。
+> - 即 P0-1.3 实际只落地了**手段A**，B/C 经回测否定后不做。
+
+**手段 A — 抄底打分重定时（买回踩不买反弹，已落地为 v2）**（`strategy/strategies.py::strategy_bottom_fishing_v2`，220-266 行）：
 
 ```python
-# 现状（信号滞后于反弹，融合分奖励高位）：
+# v1（已替换下线）：奖励"已反弹5%"，信号滞后于反弹
 rebound_ratio = ((d["close"] - low_10d) / low_10d.clip(lower=1e-9)).clip(lower=0)
 score_rebound = (rebound_ratio / 0.05).clip(lower=0, upper=1.0)
 
-# 拟改为（买回踩不买反弹）：上行趋势中刚回踩至支撑
+# v2（现状，已转正）：回踩支撑平滑分——不再奖励"已反弹越多"
 ma20 = d["close"].rolling(20).mean()
-in_uptrend    = ma20 >= ma20.shift(5)                       # 趋势向上
-near_support  = ((d["close"] - low_10d) / low_10d.clip(lower=1e-9)).between(0.01, 0.04)
-score_rebound = (in_uptrend & near_support).astype(float)  # 仅比10日低高1~4%才满分
+up_trend = (ma20 >= ma20.shift(5)).astype(float)          # 趋势向上才计分
+r = ((d["close"] - low_10d) / low_10d.clip(lower=1e-9)).clip(lower=0)
+w1 = (r / 0.04).clip(upper=1.0)                            # 0~4% 线性 0→1（甜蜜区）
+w2 = (1 - (r - 0.04) / 0.06).clip(lower=0, upper=1)        # 4%~10% 线性 1→0，>10% 归零
+score_rebound = (w1.where(r <= 0.04, w2).fillna(0.0) * up_trend)
 ```
 
-**手段 B — 放宽趋势闸门**（让买回踩票进库）：`rec_filters.py:62` 当前 `gate = (close > ma) & (ma >= ma.shift(slope_lb))` 要求 MA20 已明显向上。改为允许"MA20 走平/微向上 + 价格回踩至 MA20 附近（close ∈ [ma×0.98, ma×1.03]）"即通过，捕捉"刚启动、还没大涨"的票。新参数 `SHORT_TREND_GATE.allow_pullback=True` + `pullback_band=0.03`。
+> 说明：早期方案曾设想"二值化 between(0.01,0.04) 才满分"，但会锐减候选；最终采用平滑版（候选量减半更温和），与执行状态表一致。
 
-**手段 C — 落库即带"扩展度/未来空间"维度**：在 `_build_signal_records` 落库时，除 `fusion_score` 外新增派生字段 `rank_score = fusion_score × 低扩展度系数`（价/MA20 越接近 1 系数越高），让低扩展度票即使融合分略低也能在排序端进位（与 P2-3.1 衔接，从源头解决"排后面"）。
+**手段 B — ❌ 放宽趋势闸门（回测证伪，不实施）**：原计划让买回踩票进库：`rec_filters.py:62` 当前 `gate = (close > ma) & (ma >= ma.shift(slope_lb))` 要求 MA20 已明显向上。改为允许"MA20 走平/微向上 + 价格回踩至 MA20 附近（close ∈ [ma×0.98, ma×1.03]）"即通过。但本次回测（见附录）证明放宽后 T+3/T+5 略劣于 strict，**不实施**。
 
-**⚠ 上线前必须回测**：用 `tools/eval_short_engine.py` 或 diag harness 对照"已反弹"版 vs "买回踩+放宽闸门"版的 OC 多 cohort（≥30 日）胜率/均值，确认 T+1 不劣化且 T+3/T+5 提升，才替换。改动可用新函数名（如 `strategy_bottom_fishing_v2`）灰度，由 `SHORT_ENGINE` 开关切换；闸门放宽用 `SHORT_TREND_GATE.allow_pullback` 开关一键回滚。
+**手段 C — ❌ 落库即带"扩展度/未来空间"维度（不实施）**：原计划在 `_build_signal_records` 落库时，除 `fusion_score` 外新增派生字段 `rank_score = fusion_score × 低扩展度系数`。与已证伪的 P2-3.1 同源，且 v2 下融合分排序本身正向，无需排序端调整，**不实施**。
 
----
-
-### 【P1-2.2】新鲜度衰减
-
-**做法**（`core/sync.py::_build_signal_records`）：记录融合分时计算"反弹/上行成熟天数"（close 距 `low_10d` 触底后的交易日数），>3 日对 `fusion_score` 乘衰减系数 `0.9^(days-3)`，抑制"推荐已走完的票"。需在落库字段新增或复用 `trigger_list` 备注。
-
-**验证**：diag harness 对比"带衰减"前后 Top8 的反弹成熟天数分布。
+**上线结论（2026-08-09 回测对照）**：v2 已通过 `tools/backtest_engine_compare.py` 全量验证——Top8 真实表现 T+5 +0.226% 优于 v1 +0.133%，候选 MA20 偏离 +5.11%→+3.64%；手段B（放宽闸门）证伪、手段C（rank_score）与证伪的 P2-3.1 同源不做。v2 由 `SHORT_ENGINE="pure_bottom_v2"` 开关切换；如需回滚改回 `"pure_bottom"` 并重跑 `recalc_all_scores`。
 
 ---
 
-### 【P1-2.3】稳健 regime 门控
+### 【P1-2.2】新鲜度衰减 —— ❌ 已砍掉，不实施
 
-**现状**：`_compute_market_regime`（`investor.py:63`）已是多日 composite（非单日），但诊断显示 34 cohort 方差仍大，最差 cohort T+1 胜率仅 ~40%。
+**原做法**（`core/sync.py::_build_signal_records`）：记录"反弹/上行成熟天数"（close 距 `low_10d` 触底后的交易日数），>3 日对 `fusion_score` 乘衰减 `0.9^(days-3)`，抑制"推荐已走完的票"。
+
+**砍掉原因**：与 P1-2.1(v2 买回踩) / P2-3.1(扩展度排序) 同源治"买高位"，但最间接；且只对 `stock_signal` 打折会造成"daily_price（回测口径）与 stock_signal（推荐口径）分裂"，徒增验证成本。v2 转正后"买高位"问题已被"买回踩"自然缓解，无需单独衰减。
+
+---
+
+### 【P1-2.3】稳健 regime 门控 —— ✅ 已落地
+
+**现状**：`_compute_market_regime`（`investor.py:63`）已是多日 composite（近 5 日涨跌家数比 + 宽度 + 指数斜率，10 分钟缓存，非单日"一天定生死"），但诊断显示 34 cohort 方差仍大，最差 cohort T+1 胜率仅 ~40%。
+
+**改动（已落地，`investor.py:713-729`）**：当 `market_regime in ("cold","cool")` 时，`short` 组 `limit` 减半（`items[:max(1, limit//2)]`）；`regime=="cold"` 时整组 `level` 强制 `wait`。接口验证通过。
 
 **改动**（`investor.py::today_recommendations`，约 716 行分组处）：当 `market_regime in ("cold","cool")` 时，`short` 组 `limit` 减半（如 8→4），避免最差 cohort 满仓推荐；`regime=="cold"` 时整组 `level` 强制 `wait`。
 
@@ -197,60 +233,88 @@ score_rebound = (in_uptrend & near_support).astype(float)  # 仅比10日低高1~
 
 ---
 
-### 【P2-3.1】扩展度调整排序
+### 【P2-3.1】扩展度调整排序 —— ❌ 回测证伪，不实施
 
-**做法**（`investor.py::today_recommendations`，约 466 行 `ORDER BY fusion_score DESC`）：
-改为按 `extension_adj_score = fusion_score × (1 - clamp((price/ma20-1) - 0.08, 0, 0.3)/0.3 × 0.4)` 排序。
-`daily_price` 已有 `ma20` 列，可 `LEFT JOIN daily_price` 取最新 `ma20` 与 `close` 在 SQL/Python 侧算 adj_score 后重排。`limit*3` 候选池保留，先 adj 再截前 limit。
+**原做法**：`today_recommendations`（约 466 行 `ORDER BY fusion_score DESC`）改为按 `extension_adj_score = fusion_score × (1 - clamp((price/ma20-1) - 0.08, 0, 0.3)/0.3 × 0.4)` 排序。
 
-**验证**：对比改动前后 Top8 的平均 MA20 偏离（预期下降）。
+> 注：原方案写"`daily_price` 已有 `ma20` 列"为**事实错误**——`daily_price` 表无 ma20 列，代码用 SQL 窗口函数（`AVG(close) OVER(...ROWS 19 PRECEDING)`）实时算；这点不影响证伪结论，但避免误导后续实现。
 
----
-
-### 【P2-3.2】重做 gap guard 语义
-
-**现状**（`investor.py:661-671`）：T+1 相对信号日收盘涨 >2.5% → 降级 `wait`。但隔夜跳空恰是唯一正 edge，好日子里它砍掉该赚的钱。
-
-**改动**（`_build_item` 内 gap guard 段）：
-- 跳空 > `short_take_profit`（如 +8%）→ `level="sell"`（已错过，不追，等回踩）；
-- 平开或小涨（<2.5%）→ 保持 `buy`，挂 `entry`（信号价）或回踩支撑，不再 `wait`；
-- 即把"涨了就 wait（错过 edge）"改为"跳空过大才放弃，平开按原计划买"。
-
-**验证**：diag harness 对比"原 wait 语义" vs "新语义"的 T+1 OC 收益。
+**证伪结论**（`tools/_eval_adj_sort.py`，39 cohort）：adj 排序 T+1 OC 49.0%/+0.243% **劣于** fusion 排序 53.5%/+0.639%——fusion 排序本身有选择力，惩罚中间区间反而损失 alpha；且 v2 下融合分排序已正向（见 1.5），无需排序端调整。
 
 ---
 
-## 3. 实施顺序与回滚
+### 【P2-3.2】重做 gap guard 语义 —— ✅ 已落地
 
-| 阶段 | 内容 | 回滚方式 |
-|---|---|---|
-| 阶段一 | P0-1.1 + P0-1.2（配置+过滤+UI） | 改 `TUNABLE_PARAMS` 默认值 / 清 `strategy_param_override`；`EXTENSION_FILTER.enabled=False` 一键降级；`HORIZON_MAX_HOLD` 改回 10 |
-| 阶段二 | P1-2.1（回测通过后，灰度 `v2` 引擎）+ P1-2.2 + P1-2.3 | `SHORT_ENGINE` 开关切回 `pure_bottom`；regime 门控 `enabled` 关 |
-| 阶段三 | P2-3.1 + P2-3.2 | 排序改回 `fusion_score`；gap guard 改回原阈值 |
+**改动**（`investor.py::_build_item`，658-675 行）：原 `T1_GAP_GUARD`（涨 >2.5% 降级 wait）语义已改为——
 
-**统一验证 harness**：任何优化决策都跑 `tools/diag_short_reco.py` 多 cohort OC 口径复验，避免单日好行情误导（单日 cohort 曾现 80.6% 胜率，34 日聚合后拉平到 50.2%）。
+- 跳空 > `short_take_profit`（≈+8%，即已越过止盈位）→ `level="sell"`（已错过买点不追，等回踩）；
+- 平开或小涨（<止盈价）→ 保持 `buy`，挂 `entry`（信号价）或回踩支撑，不再 `wait`；
+- 即把"涨了就 wait（错过 edge）"改为"跳空过大才放弃，平开按原计划买"。旧 `T1_GAP_GUARD`（max_gap_pct=2.5）逻辑已下线，改用止盈价作阈值。
+
+---
+
+## 3. 实施顺序与回滚（2026-08-09 最终状态）
+
+| 阶段  | 内容                                                         | 状态                     | 回滚方式                                                                                                                      |
+| --- | ---------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 阶段一 | P0-1.1 执行期对齐 + P0-1.2 扩展度硬否决                               | ✅ 已落地                  | `TUNABLE_PARAMS` 改默认值 / 清 `strategy_param_override`；`EXTENSION_FILTER.enabled=False` 降级；`HORIZON_MAX_HOLD["short"]` 改回 10 |
+| 阶段二 | P0-1.3手段A（v2 引擎）+ P1-2.3 regime 门控                         | ✅ 已落地（v2 转正）；P1-2.2 砍掉 | `SHORT_ENGINE` 切回 `pure_bottom` + `recalc_all_scores`；regime 门控 `enabled` 关                                               |
+| 阶段三 | P2-3.2 gap guard 重做                                        | ✅ 已落地                  | gap guard 改回原阈值语义                                                                                                         |
+| 不实施 | P0-1.3手段B/C（放宽闸门 / rank_score）、P1-2.2（新鲜度衰减）、P2-3.1（扩展度排序） | ❌ 回测证伪 / 砍掉            | —                                                                                                                         |
+
+**统一验证 harness**：回测决策跑 `tools/backtest_engine_compare.py`（全链路离线复算）与 `tools/diag_short_reco.py`（多 cohort OC 口径）；避免单日好行情误导（单日 cohort 曾现 80.6% 胜率，34 日聚合后拉平到 50.2%）。
 
 ---
 
 ## 4. 风险与开放问题
 
-1. **回测口径冲突**：组合口径（持有10日）下纯抄底年化 +10.81% 唯一赚钱；但隔日 OC 口径下持有越久越亏。P0-1.1 是把线上执行从"组合口径假设"对齐到"真实 OC 口径"——逻辑自洽，但需确认不破坏既有的组合口径绩效叙事。
+1. **回测口径冲突（基于 v1 时代数据）**：组合口径（持有10日）下纯抄底 v1 年化 +10.81% 唯一赚钱；但隔日 OC 口径下持有越久越亏。P0-1.1 把线上执行从"组合口径假设"对齐到"真实 OC 口径"（持仓 1 天），逻辑自洽；v2 转正后 OC 口径 T+5 已转正（+0.226%，见附录 A），组合口径绩效叙事需重测确认。**2026-08-09 已重测**（`eval_short_engine.py --engine v1/v2 --exit simple --max-hold 10`，近 1 年全池）：组合口径下 **v2 年化 +9.44%（PF 1.072）仍赚钱，但略逊 v1（+13.65%/1.102）**——组合（波段持有）口径 v1 更优、OC（快进快出）口径 v2 更优。线上已执行 1 天了结（OC 口径），v2 正确；若未来回归 10 日波段持有，需重估 v1。
 2. **行业字段恒为空**：`stock_info.industry` 未填充，行业配额/行业中性化类优化暂不可行。
 3. **NEXT_DAY_MOMENTUM 并行线**：`隔日动量`策略（龙虎榜净买）已是 OC 口径、止盈 +6.5%/止损 -4%，与 P0-1.1 思路一致，可作为"快进快出"范本参考，不参与本方案改动。
+
+---
+
+## 附录 A：回测对照数据（2026-08-09 跑 `tools/backtest_engine_compare.py`）
+
+**方法**：从 `daily_price` 离线复刻 `core/sync.py::_build_signal_records` 纯抄底落库逻辑（`fuse_signals(PURE_BOTTOM_WEIGHTS,"max")` → `FUSION_SCORE=BUY_SCORE×16.67`，候选=`FUSION≥15 & 质量 & 闸门 & 追高 & 扩展度`），仅切换 `bottom_fn` 与 `gate` 两变量；每日候选按融合分降序取 Top8，算 T+1/T+3/T+5 开盘买(OC)真实收益，多 cohort 聚合。4372 股全历史，v2 候选 76971 样本。纯读取。
+
+**一、每日 Top8 推荐真实表现（OC 开盘买）**
+
+| 引擎                | 候选数    | 推荐数    | T+1 胜率/均值           | T+3 胜率/均值           | T+5 胜率/均值           | 候选MA20偏离   |
+| ----------------- | ------ | ------ | ------------------- | ------------------- | ------------------- | ---------- |
+| v1 已反弹+严格         | 128941 | 126028 | 48.1% / +0.092%     | 47.3% / +0.131%     | 46.9% / +0.133%     | +5.11%     |
+| **v2 买回踩+严格（现状）** | 78383  | 76971  | **48.6% / +0.100%** | **48.1% / +0.181%** | **47.5% / +0.226%** | **+3.64%** |
+| v2 买回踩+放宽闸        | 95626  | 93822  | 48.6% / +0.097%     | 48.0% / +0.159%     | 47.5% / +0.206%     | +3.07%     |
+
+→ **v2 现状全面优于 v1**（T+5 均值 +0.133%→+0.226%，近翻倍；扩展度更低、候选减半更聚焦）。**放宽闸门引入更多低位票，但 T+3/T+5 略劣于 strict，不建议。**
+
+**二、候选按融合分全局分三档（验证"排序反向"质疑）**
+
+| 引擎     | 档位    | T+1                 | T+3                 | T+5                 | MA20偏离     |
+| ------ | ----- | ------------------- | ------------------- | ------------------- | ---------- |
+| v1     | 高     | 47.8% / +0.138%     | 47.2% / +0.225%     | 46.6% / +0.199%     | +5.91%     |
+| v1     | 中     | 47.9% / +0.076%     | 46.8% / +0.084%     | 46.7% / +0.095%     | +5.65%     |
+| v1     | 低     | 48.6% / +0.063%     | 47.8% / +0.083%     | 47.4% / +0.106%     | +3.78%     |
+| **v2** | **高** | **49.1% / +0.138%** | **48.9% / +0.221%** | **47.6% / +0.233%** | **+3.21%** |
+| v2     | 中     | 48.6% / +0.071%     | 47.9% / +0.163%     | 47.8% / +0.247%     | +3.53%     |
+| v2     | 低     | 48.1% / +0.092%     | 47.5% / +0.158%     | 47.2% / +0.196%     | +4.17%     |
+
+→ **v2 下高融合分档 T+3/T+5 最优、扩展度最低** → 排序正向。用户"融合分把后期会涨的票排后面"的担忧在 v2 现状下**不成立**（v1 下方向性弱且口径敏感，且 v1 已替换）。
 
 ---
 
 ## 附录：诊断关键数据（2026-08-08 跑 `tools/diag_short_reco.py`）
 
 **A. 推荐时点位置（最新日 2026-08-07，212 候选）**
+
 - 价相对 MA20 偏离均值 **+6.3%**，>8% 占 26.9%（最大 +38.3%）
 - 相对 10 日最低反弹均值 **+9.4%**，>5% 占 **73.6%**
 - RSI(14) 均值 56.0，>70 仅 1.4%
 
 **B. 推荐后真实表现（聚合 34 历史日，n=10166，T+1=次日开盘买）**
 
-| 周期 | OC 胜率/均值 | CC 胜率/均值 |
-|---|---|---|
+| 周期  | OC 胜率/均值       | CC 胜率/均值       |
+| --- | -------------- | -------------- |
 | T+1 | 50.2% / +0.08% | 44.5% / -0.82% |
 | T+3 | 44.0% / -1.41% | 40.6% / -2.30% |
 | T+5 | 40.9% / -3.00% | 38.5% / -3.86% |

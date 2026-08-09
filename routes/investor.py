@@ -153,7 +153,8 @@ def _compute_market_regime(conn):
     return regime
 
 
-def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_up):
+def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_up,
+                 horizon=None):
     """根据评分 / 盈亏比 / 大盘冷热 / 持仓联动 / 趋势，返回操作信号灯。
 
     注意：fusion_score 量纲为 0~50（strategies.py 中 clip(upper=50)），
@@ -224,11 +225,15 @@ def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_
                 "warnings": warnings + ["不操作，等趋势明朗"],
             }
     else:
+        _extra = ["未持仓，可建仓"]
+        if horizon == "short":
+            # P0-1.1 改动 C：短线快进快出提示（持仓上限 1 天，买入次日收盘了结）
+            _extra.append("短线快进快出：买入次日收盘了结，不恋战")
         return {
             "level": "buy",
             "emoji": "🟢",
             "label": "可建仓",
-            "reasons": reasons + ["未持仓，可建仓"],
+            "reasons": reasons + _extra,
             "warnings": warnings,
         }
 
@@ -291,7 +296,7 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
     if len(seg) <= 1 or df is None or df.empty:
         return [seg]
     import pandas as pd
-    from strategy.exit_advisor import evaluate_exit_by_prices, HORIZON_MAX_HOLD
+    from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
 
     first, last = seg[0], seg[-1]
     if hasattr(df.index, 'strftime'):
@@ -311,7 +316,7 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
         df=df,
         stop_loss=last["stop_loss"],
         take_profit=last["take_profit"],
-        max_hold_days=HORIZON_MAX_HOLD.get(horizon),
+        max_hold_days=get_max_hold(horizon),
     )
     exit_date = (adv.get("detail") or {}).get("exit_date")
     if not exit_date:
@@ -351,7 +356,7 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
         return None
 
     try:
-        from strategy.exit_advisor import evaluate_exit_by_prices, HORIZON_MAX_HOLD
+        from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
         import pandas as pd
         with get_conn() as conn:
             rows = conn.execute("""
@@ -380,7 +385,7 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
             df=df,
             stop_loss=d.get("stop_loss"),
             take_profit=d.get("take_profit"),
-            max_hold_days=HORIZON_MAX_HOLD.get(d.get("horizon") or "short"),
+            max_hold_days=get_max_hold(d.get("horizon") or "short"),
         )
         return advice
     except Exception:
@@ -653,6 +658,7 @@ def today_recommendations():
                 market_regime=market_regime,
                 is_held=is_held,
                 trend_up=trend_up,
+                horizon=d.get("horizon"),
             )
             # ── 追高守卫（P2-3.2 重做，2026-08）：跳空过大才放弃，平开按原计划买 ──
             # 旧语义：T+1 相对信号日收盘涨 >2.5% → 降级 wait。但隔夜跳空恰是唯一正
@@ -766,7 +772,7 @@ def exit_advice():
     返回 {items(平铺), groups:{short,mid,long}, summary, start_date}，状态 hold/clear。
     """
     try:
-        from strategy.exit_advisor import evaluate_exit_by_prices, HORIZON_MAX_HOLD
+        from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
         from core.db import get_conn as _get_conn
         import pandas as pd
 
@@ -898,7 +904,7 @@ def exit_advice():
                     df=df,
                     stop_loss=last["stop_loss"],
                     take_profit=last["take_profit"],
-                    max_hold_days=HORIZON_MAX_HOLD.get(horizon),
+                    max_hold_days=get_max_hold(horizon),
                 )
                 detail = dict(advice.get("detail") or {})
                 if entry_date is not None:

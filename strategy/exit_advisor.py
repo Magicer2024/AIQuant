@@ -201,6 +201,18 @@ def evaluate_exit(
 HORIZON_MAX_HOLD: dict = {"short": 1, "mid": 60, "long": None}
 
 
+def get_max_hold(horizon: str) -> Optional[int]:
+    """持仓上限：短线优先读 TUNABLE_PARAMS.short_max_hold_days（DB 可覆盖，60s TTL），
+    读取失败/非短线回退 HORIZON_MAX_HOLD 常量（单一事实来源，避免双源漂移）。"""
+    if horizon == "short":
+        try:
+            from config.strategy_params import get_param
+            return int(get_param("short_max_hold_days"))
+        except Exception:
+            pass
+    return HORIZON_MAX_HOLD.get(horizon)
+
+
 def evaluate_exit_by_prices(
     entry_price: float,
     entry_date: str,

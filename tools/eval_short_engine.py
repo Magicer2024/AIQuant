@@ -30,7 +30,8 @@ from backtest.engine import (
     _add_indicators,
     _load_stock_info,
 )
-from strategy.strategies import strategy_bottom_fishing, strategy_oversold_rebound
+from strategy.strategies import (strategy_bottom_fishing, strategy_bottom_fishing_v2,
+                                 strategy_oversold_rebound)
 from strategy.rec_filters import trend_gate_series, quality_series
 from config.strategy_params import OVERSOLD_REBOUND_V4
 from backtest.oversold_sim import run_v3_portfolio
@@ -82,12 +83,13 @@ def _build_stock_data(daily: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 # 两套入场信号掩码
 # ─────────────────────────────────────────────
 
-def _old_signals(stock_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.Series]:
-    """OLD：纯抄底 BUY_SIGNAL"""
+def _old_signals(stock_data: Dict[str, pd.DataFrame], engine: str = "v1") -> Dict[str, pd.Series]:
+    """OLD：纯抄底 BUY_SIGNAL（engine=v1 已反弹 / v2 买回踩，A2 组合口径对照）"""
+    fn = strategy_bottom_fishing_v2 if engine == "v2" else strategy_bottom_fishing
     out: Dict[str, pd.Series] = {}
     for code, df in stock_data.items():
         try:
-            res = strategy_bottom_fishing(df)
+            res = fn(df)
             out[code] = res["BUY_SIGNAL"].reindex(df.index, fill_value=False)
         except Exception:
             out[code] = pd.Series(False, index=df.index)
@@ -173,10 +175,11 @@ def _fmt(v, kind: str) -> str:
 
 
 def _print_report(old: dict, new: dict, old_sig: int, new_sig: int,
-                  params: BacktestParams, exit_mode: str = "simple"):
+                  params: BacktestParams, exit_mode: str = "simple",
+                  engine: str = "v1"):
     print("=" * 62)
     print("  短线引擎回测对比  OLD(纯抄底)  vs  NEW(超跌反弹v3+闸门+质量)")
-    print("=" * 62)
+    print(f"  OLD 引擎: {engine}")
     print(f"  窗口: {params.start_date} ~ {params.end_date}")
     if exit_mode == "v3":
         v3 = OVERSOLD_REBOUND_V4
@@ -224,6 +227,8 @@ def main():
     ap.add_argument("--max-hold", type=int, default=10, help="最长持仓天数")
     ap.add_argument("--exit", choices=["v3", "simple"], default="v3",
                     help="出场口径：v3=移动止盈/分批止盈/40%单仓/大盘择时（默认）；simple=固定止损止盈")
+    ap.add_argument("--engine", choices=["v1", "v2"], default="v1",
+                    help="OLD 引擎：v1=已反弹（默认）/ v2=买回踩（A2 组合口径对照）")
     args = ap.parse_args()
 
     end = args.end or _latest_trade_date()
@@ -257,8 +262,8 @@ def main():
     print(f"[3/5] 计算指标...")
     stock_data = _build_stock_data(daily)
 
-    print(f"[4/5] 生成两套入场信号...")
-    old_sig = _old_signals(stock_data)
+    print(f"[4/5] 生成两套入场信号（OLD 引擎={args.engine}）...")
+    old_sig = _old_signals(stock_data, engine=args.engine)
     new_sig = _new_signals(stock_data, name_map, mktcap_map)
 
     params = BacktestParams(
@@ -285,7 +290,8 @@ def main():
         new_metrics = _run(params, stock_data, new_sig, info_map)
 
     _print_report(old_metrics, new_metrics,
-                  _count_signals(old_sig), _count_signals(new_sig), params, args.exit)
+                  _count_signals(old_sig), _count_signals(new_sig), params, args.exit,
+                  args.engine)
 
 
 if __name__ == "__main__":
