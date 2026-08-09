@@ -27,9 +27,13 @@ from config.personal_config import MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES
 def insert_new_outcomes(days_back: int = 60):
     """将 stock_signal 中近 N 天、尚未录入 recommend_outcome 的推荐写入。
 
-    去重逻辑：UNIQUE(code, scan_date, horizon)，INSERT OR IGNORE。
     口径：与「今日推荐」面板一致（config/personal_config.py 的主板过滤 +
     每周期 fusion_score 前 8 名才是真正的「推荐」）。
+
+    2026-08-09 修复：原 INSERT OR IGNORE 按 (code, scan_date, horizon) 去重追加，
+    多次重算（v1/v2 引擎、不同过滤链）的 Top8 并集在表内累积，short 组每天
+    19~28 条。改为窗口内「先清空再重写」：recommend_outcome 恒等于当前
+    stock_signal 的每日每组 Top8（收益字段清空后由 evaluate_outcomes 重新评估）。
     """
     cutoff = f"-{days_back} days"
     # 板块限制：与 routes/investor.py 的今日推荐同口径（小资金仅推主板）
@@ -38,6 +42,10 @@ def insert_new_outcomes(days_back: int = 60):
         board_filter = "".join(
             f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
     with get_conn() as conn:
+        # 先清窗口内旧记录（Top8 随引擎/过滤链变化而更新，旧记录一并移除）
+        conn.execute(
+            "DELETE FROM recommend_outcome WHERE scan_date >= date('now', ?)",
+            (cutoff,))
         conn.execute(f"""
             INSERT OR IGNORE INTO recommend_outcome
                 (code, scan_date, horizon, strategy, entry_price,

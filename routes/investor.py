@@ -1559,17 +1559,26 @@ def recommendations_history():
             f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
 
     with get_conn() as conn:
-        # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的）
+        # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的；
+        # 每日取 fusion_score Top8，与 recommend_outcome/今日推荐同口径）
         signals = conn.execute(
             f"""
-            SELECT s.code, s.name, s.scan_date, s.buy_price, s.stop_loss, s.take_profit,
-                   s.fusion_score
-            FROM stock_signal s
-            WHERE s.scan_date >= date('now', ?)
-              AND s.buy_price IS NOT NULL
-              AND COALESCE(s.horizon, 'short') = 'short'
-              {board_filter}
-            ORDER BY s.code ASC, s.scan_date ASC
+            SELECT code, name, scan_date, buy_price, stop_loss, take_profit, fusion_score
+            FROM (
+                SELECT s.code, s.name, s.scan_date, s.buy_price, s.stop_loss, s.take_profit,
+                       s.fusion_score,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.scan_date
+                           ORDER BY COALESCE(s.fusion_score, 0) DESC
+                       ) AS rn
+                FROM stock_signal s
+                WHERE s.scan_date >= date('now', ?)
+                  AND s.buy_price IS NOT NULL
+                  AND COALESCE(s.horizon, 'short') = 'short'
+                  {board_filter}
+            )
+            WHERE rn <= 8
+            ORDER BY code ASC, scan_date ASC
             """,
             (f"-{days} days",),
         ).fetchall()
