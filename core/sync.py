@@ -67,6 +67,9 @@ def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") ->
     if source == "akshare" and "volume" in df.columns:
         # akshare stock_zh_a_hist: volume 单位是"手"(1手=100股)，转成股
         df["volume"] = df["volume"].fillna(0) * 100
+    elif source == "tencent_direct":
+        # 腾讯直连（core/tx_kline.py）：模块内已统一 volume=股 / amount=元，无需换算
+        pass
     elif source == "tencent":
         # 腾讯 stock_zh_a_hist_tx: amount 单位是"万元"，转成元
         if "amount" in df.columns:
@@ -116,13 +119,26 @@ def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") ->
 from strategy.strategies import (
     strategy_volume_breakout, strategy_ma_convergence,
     strategy_price_volume_divergence, strategy_bottom_fishing,
+    strategy_bottom_fishing_v2,
     strategy_whale_accumulation, strategy_oversold_rebound,
     fuse_signals
 )
 from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.next_day_momentum import scan_next_day_momentum
-from strategy.rec_filters import trend_gate_series, quality_series, passes_quality, chase_filter_series
+from strategy.rec_filters import (
+    trend_gate_series, quality_series, passes_quality,
+    chase_filter_series, chase_filter, extension_filter_series,
+)
 from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM
+
+# 短线抄底引擎选择：pure_bottom = v1 已反弹（线上默认，双口径回测验证组合）；
+# pure_bottom_v2 = 买回踩平滑版（P1-2.1 灰度，tools/_eval_pullback.py 34 cohort：
+# T+1 OC 胜率 51.5%→55.5%、均值 +0.104%→+0.211%、候选量约减半）。
+# ⚠ 切换 v2 后必须跑 sync_strategy_score 全市场重算 daily_price 分数列——
+#   增量信号路径（reuse_scores=True）复用 daily_price.bottom_score，不重算策略分，
+#   否则 v2 引擎实际读到 v1 分数；回滚切回 pure_bottom 后同样需重算。
+_BOTTOM_FISH_FN = (strategy_bottom_fishing_v2 if SHORT_ENGINE == "pure_bottom_v2"
+                   else strategy_bottom_fishing)
 
 # ─────────────────────────────────────────────
 # 配置
@@ -136,22 +152,14 @@ INTER_BATCH_DELAY = 0.5         # 每批次间隔（秒）
 # 交易日判断工具
 # ─────────────────────────────────────────────
 def is_trading_day(today: str = None) -> bool:
-    """判断指定日期是否为A股交易日
+    """判断指定日期是否为A股交易日（带缓存，避免每次调用打 akshare 网络接口）
 
     :param today: 日期字符串，默认为今天
     """
     if today is None:
         today = date.today().strftime("%Y-%m-%d")
-    try:
-        import akshare as ak
-        df = ak.tool_trade_date_hist_sina()
-        trade_dates = set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
-        return today in trade_dates
-    except Exception:
-        # 接口失败时按工作日 fallback（使用查询日期而非今天）
-        from datetime import datetime
-        queried_dt = datetime.strptime(today, "%Y-%m-%d").date()
-        return queried_dt.weekday() < 5
+    from core.trade_calendar import is_trading_day as _is_td
+    return _is_td(today)
 
 
 def is_after_market_close() -> bool:
@@ -836,7 +844,19 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
     total_n = len(stocks)
 
     def _fallback_sync(code: str, start_date: str, end_date: str) -> bool:
-        """尝试 akshare → 腾讯财经 两级备用数据源"""
+        """尝试 腾讯直连 → akshare → 腾讯(akshare封装) 三级备用数据源"""
+        # 腾讯直连（core/tx_kline.py）：与东财完全异构、免费无 token、盘后当天可用；
+        # 优先级高于 akshare（akshare 底层多为东财，东财整体挂时同源失效）。
+        try:
+            from core.tx_kline import fetch_kline_range
+            df = fetch_kline_range(code, start_date, end_date)
+            if df is not None and not df.empty:
+                # _write_daily_price 契约：df 索引为日期（与 baostock/akshare 路径一致）
+                _write_daily_price(code, df.set_index("trade_date"),
+                                   source="tencent_direct")
+                return True
+        except Exception:
+            pass
         try:
             if _sync_one_stock_akshare(code, start_date, end_date, verbose=False):
                 return True
@@ -1098,7 +1118,7 @@ def sync_strategy_score(code: str, verbose: bool = False) -> bool:
         s1 = strategy_volume_breakout(df)
         s2 = strategy_ma_convergence(df)
         s3 = strategy_price_volume_divergence(df)
-        s4 = strategy_bottom_fishing(df)
+        s4 = _BOTTOM_FISH_FN(df)
         s5 = strategy_whale_accumulation(df)
         # daily_price.fusion_score 固定为纯抄底口径（回测验证过的基准，与市场状态无关），
         # 供回测/研究脚本读取；短线推荐用的自适应口径写在 stock_signal 表。
@@ -1148,6 +1168,450 @@ def sync_market_cap(codes: list = None, progress_cb=None) -> int:
 # ─────────────────────────────────────────────
 # 全市场重算打分（异步友好版本）
 # ─────────────────────────────────────────────
+
+# stock_signal 写入 SQL（全量/增量共用，字段顺序与表结构一致）
+_SIGNAL_INSERT_SQL = """
+    INSERT OR REPLACE INTO stock_signal
+      (scan_date, trade_date, code, name, price, fusion_score,
+       vol_score, ma_score, diverge_score, bottom_score, whale_score,
+       trigger_list, buy_price, stop_loss, take_profit,
+       buy_volume, buy_money, sent_wechat, created_at,
+       horizon, strategy)
+    VALUES
+      (:scan_date, :trade_date, :code, :name, :price, :fusion_score,
+       :vol_score, :ma_score, :diverge_score, :bottom_score, :whale_score,
+       :trigger_list, :buy_price, :stop_loss, :take_profit,
+       :buy_volume, :buy_money, :sent_wechat, :created_at,
+       :horizon, :strategy)
+"""
+
+
+def _resolve_sig_threshold():
+    """
+    解析短线 SIG_THRESHOLD（与 recalc_all_scores 同口径）：
+    自适应开启时按 20 日波动率取两档阈值，异常/关闭时回退参数覆盖层。
+    返回 (threshold, market_state)，market_state 为 None 表示未启用自适应。
+    """
+    from config.strategy_params import get_param, ADAPTIVE_WEIGHTS_ENABLED
+    if ADAPTIVE_WEIGHTS_ENABLED:
+        try:
+            from strategy.adaptive_weights import get_adaptive_threshold, detect_market_state
+            _market_state = detect_market_state()
+            return float(get_adaptive_threshold(_market_state)), _market_state
+        except Exception as e:
+            print(f"  [WARN] 自适应阈值加载失败，回退默认阈值: {e}")
+            return float(get_param("sig_threshold")), None
+    return float(get_param("sig_threshold")), None
+
+
+def _build_signal_records(df, code, name, total_shares, sig_threshold,
+                          stop_loss_sc, take_profit_sc, lhb_row=None,
+                          scan_date=None, reuse_scores=False) -> list:
+    """
+    对单只股票的日线 df 生成 stock_signal 记录列表（与 recalc_all_scores 同口径）。
+
+    短线段：
+      - scan_date 为 "YYYY-MM-DD" 时，只生成该日期的记录（增量模式，每日盘后）；
+      - scan_date 为 None 时，对全部历史命中日生成（全量重算模式，供回测读历史）。
+    中/长线与隔日动量（龙虎榜）恒只评估 df 最新交易日（信号持续期长，逐日写库会膨胀）。
+
+    :param reuse_scores: True 时短线复用 daily_price 已算好的分数列（仅限单日评估，
+        须在 sync_strategy_score 写库之后调用，否则回退全量重算）。
+    :return: list[dict]（stock_signal 行），可能为空
+    """
+    import json as _json
+    if df is None or len(df) < 30:
+        return []
+    records = []
+    START_CAPITAL_SC = 10000
+    POSITION_PER_SC = 0.5
+
+    if SHORT_ENGINE == "oversold_rebound":
+        # ── 短线：超跌反弹v3 + 趋势闸门 + 质量过滤 ──
+        reb = strategy_oversold_rebound(df)
+        gate = trend_gate_series(df).reindex(reb.index).fillna(False)
+        qual = quality_series(name, df, total_shares).reindex(reb.index).fillna(False)
+        for dt, r in reb.iterrows():
+            trade_date = str(dt.date()) if hasattr(dt, "date") else str(dt)[:10]
+            if scan_date is not None and trade_date != scan_date:
+                continue
+            if not bool(r.get("BUY_SIGNAL", False)):
+                continue
+            if not bool(gate.get(dt, False)) or not bool(qual.get(dt, False)):
+                continue
+            score4 = float(r.get("BUY_SCORE", 0) or 0)
+            fs = round(score4 / 4.0 * 50.0, 2)  # 0~4 → 0~50 量纲对齐
+            price = round(float(r["close"]), 2)
+            buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
+            buy_volume = int(buy_money // (price * 100) * 100)
+            stop_loss = round(price * (1 + stop_loss_sc), 2)
+            take_profit = round(price * (1 + take_profit_sc), 2)
+            trigger_list = [
+                f"超跌反弹v3 评分 {score4:.1f}/4",
+                "站上MA20且均线向上",
+                "非ST/流动性达标",
+            ]
+            records.append({
+                "scan_date": trade_date,
+                "trade_date": trade_date,
+                "code": code,
+                "name": name or code,
+                "price": price,
+                "fusion_score": fs,
+                "vol_score": 0,
+                "ma_score": 0,
+                "diverge_score": 0,
+                "bottom_score": round(score4, 1),
+                "whale_score": 0,
+                "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
+                "buy_price": price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "buy_volume": buy_volume,
+                "buy_money": buy_money,
+                "sent_wechat": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "horizon": "short",
+                "strategy": "超跌反弹v3",
+            })
+    else:
+        # ── 短线：纯抄底融合分（SHORT_ENGINE="pure_bottom" 一键回退）──
+        # 权重固定 PURE_BOTTOM_WEIGHTS（2026-07-31 双口径回测唯一赚钱组合），
+        # 与 daily_price.fusion_score 同口径；自适应只保留「阈值」这一项。
+        from config.strategy_params import PURE_BOTTOM_WEIGHTS, FUSION_MODE
+        _SCORE_COLS = {"vol_score", "ma_score", "diverge_score",
+                       "bottom_score", "whale_score", "fusion_score"}
+        if reuse_scores and scan_date is not None and _SCORE_COLS.issubset(df.columns):
+            # 增量模式：复用 daily_price 分数列（sync_strategy_score 已在同流程写库，
+            # 纯抄底权重下 weighted_avg 与 max 数学等价 → 与全量重算口径一致），
+            # 只取目标日一行，避免对全历史重算 5 策略（全市场耗时约 2 分钟 → 秒级）。
+            _target = df.index[df.index == pd.Timestamp(scan_date)]
+            if len(_target) == 0:
+                return records
+            _r = df.loc[_target[0]]
+            fused = pd.DataFrame([{
+                "VOL_SCORE": float(_r.get("vol_score") or 0),
+                "MA_SCORE": float(_r.get("ma_score") or 0),
+                "DIVERGE_SCORE": float(_r.get("diverge_score") or 0),
+                "BOTTOM_SCORE": float(_r.get("bottom_score") or 0),
+                "WHALE_SCORE": float(_r.get("whale_score") or 0),
+                "FUSION_SCORE": float(_r.get("fusion_score") or 0),
+                "close": float(_r["close"]),
+            }], index=[_target[0]])
+        else:
+            # 全量重算 / 分数列缺失时的回退：对全历史重算 5 策略 + 融合
+            s1 = strategy_volume_breakout(df)
+            s2 = strategy_ma_convergence(df)
+            s3 = strategy_price_volume_divergence(df)
+            s4 = _BOTTOM_FISH_FN(df)
+            s5 = strategy_whale_accumulation(df)
+            fused = fuse_signals([s1, s2, s3, s4, s5],
+                                 weights=PURE_BOTTOM_WEIGHTS, mode=FUSION_MODE)
+        qual = quality_series(name, df, total_shares).reindex(fused.index).fillna(False)
+        # 趋势闸门：排除 MA20 向下/未站上 MA20 的"一路阴跌"接飞刀信号
+        # （2026-07-29 回测：隔日OC平均 -0.043%→-0.003%，信号数 -69%）
+        gate = trend_gate_series(df).reindex(fused.index).fillna(False)
+        # 追高否决：连板天数>=3 / 涨停打开 / 近3日急涨>=25% → 不推荐
+        # （2026-08-05：修复"连板启动期被闸门挡、涨停打开放量日反而高分进推荐"问题）
+        chase = chase_filter_series(df).reindex(fused.index).fillna(False)
+        # 扩展度否决：价 > MA20×1.12 硬否决（2026-08 P0-1.2，diag 实测高位组
+        # T+1 OC 48.3%/+0.04% 劣于低位组 52.2%/+0.28%；enabled=False 一键降级）
+        ext = extension_filter_series(df).reindex(fused.index).fillna(False)
+        for _, row in fused.iterrows():
+            trade_date = str(row.name.date()) if hasattr(row.name, "date") else str(row.name)[:10]
+            if scan_date is not None and trade_date != scan_date:
+                continue
+            fs = float(row.get("FUSION_SCORE", 0) or 0)
+            if fs < sig_threshold:
+                continue
+            # 质量过滤（ST/流动性/市值），清理 picks，逻辑本身不改
+            if not bool(qual.get(row.name, False)):
+                continue
+            if not bool(gate.get(row.name, False)):
+                continue
+            if not bool(chase.get(row.name, False)):
+                continue
+            if not bool(ext.get(row.name, False)):
+                continue
+            price = round(float(row["close"]), 2)
+            buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
+            buy_volume = int(buy_money // (price * 100) * 100)
+            stop_loss = round(price * (1 + stop_loss_sc), 2)
+            take_profit = round(price * (1 + take_profit_sc), 2)
+            trigger_list = []
+            if float(row.get("VOL_SCORE", 0) or 0) >= 2.0:
+                trigger_list.append("放量突破")
+            if float(row.get("MA_SCORE", 0) or 0) >= 2.0:
+                trigger_list.append("均线粘合")
+            if float(row.get("DIVERGE_SCORE", 0) or 0) >= 2.0:
+                trigger_list.append("量价背离")
+            if float(row.get("BOTTOM_SCORE", 0) or 0) >= 2.0:
+                trigger_list.append("抄底")
+            if float(row.get("WHALE_SCORE", 0) or 0) >= 2.0:
+                trigger_list.append("主力建仓")
+            records.append({
+                "scan_date": trade_date,
+                "trade_date": trade_date,
+                "code": code,
+                "name": name or code,
+                "price": price,
+                "fusion_score": round(fs, 2),
+                "vol_score": round(float(row.get("VOL_SCORE", 0) or 0), 1),
+                "ma_score": round(float(row.get("MA_SCORE", 0) or 0), 1),
+                "diverge_score": round(float(row.get("DIVERGE_SCORE", 0) or 0), 1),
+                "bottom_score": round(float(row.get("BOTTOM_SCORE", 0) or 0), 1),
+                "whale_score": round(float(row.get("WHALE_SCORE", 0) or 0), 1),
+                "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
+                "buy_price": price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "buy_volume": buy_volume,
+                "buy_money": buy_money,
+                "sent_wechat": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "horizon": "short",
+                "strategy": "短线融合",
+            })
+
+    # ── 中/长线信号：只评估最新交易日，命中各写一条 ──
+    for _scan in (scan_mid_term, scan_long_term):
+        sig = _scan(df)
+        if not sig:
+            continue
+        # 质量过滤（ST/流动性/市值），逻辑本身不改
+        if not passes_quality(name, df, total_shares):
+            continue
+        # 追高否决（2026-08-05：与短线同口径——连板/涨停打开/急涨后不推长线建仓，
+        # 000815 三连板后的 long 41.67 分即因此不再写入）
+        if not chase_filter(df):
+            continue
+        records.append({
+            "scan_date": sig["trade_date"],
+            "trade_date": sig["trade_date"],
+            "code": code,
+            "name": name or code,
+            "price": sig["buy_price"],
+            "fusion_score": sig["fusion_score"],
+            "vol_score": 0,
+            "ma_score": 0,
+            "diverge_score": 0,
+            "bottom_score": 0,
+            "whale_score": 0,
+            "trigger_list": _json.dumps(sig["triggers"], ensure_ascii=False),
+            "buy_price": sig["buy_price"],
+            "stop_loss": sig["stop_loss"],
+            "take_profit": sig["take_profit"],
+            "buy_volume": 0,
+            "buy_money": 0,
+            "sent_wechat": 0,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "horizon": sig["horizon"],
+            "strategy": sig["strategy"],
+        })
+
+    # ── 隔日动量（龙虎榜净买占比）：仅最新交易日、可交易子集 ──
+    # 追加在短线记录之后：同 horizon 同票 INSERT OR REPLACE 时动量信号胜出
+    if lhb_row:
+        nd_sig = scan_next_day_momentum(
+            df, lhb_row, name, total_shares, params=NEXT_DAY_MOMENTUM)
+        if nd_sig and passes_quality(name, df, total_shares):
+            records.append({
+                "scan_date": nd_sig["trade_date"],
+                "trade_date": nd_sig["trade_date"],
+                "code": code,
+                "name": name or code,
+                "price": nd_sig["buy_price"],
+                "fusion_score": nd_sig["fusion_score"],
+                "vol_score": 0,
+                "ma_score": 0,
+                "diverge_score": 0,
+                "bottom_score": 0,
+                "whale_score": 0,
+                "trigger_list": _json.dumps(nd_sig["triggers"], ensure_ascii=False),
+                "buy_price": nd_sig["buy_price"],
+                "stop_loss": nd_sig["stop_loss"],
+                "take_profit": nd_sig["take_profit"],
+                "buy_volume": 0,
+                "buy_money": 0,
+                "sent_wechat": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "horizon": nd_sig["horizon"],
+                "strategy": nd_sig["strategy"],
+            })
+
+    return records
+
+
+def _run_post_recalc_hooks() -> dict:
+    """推荐闭环钩子（best-effort）：常驻规则扫描 + outcome 追踪 + 策略优化器。
+
+    供全量 recalc_all_scores 与每日增量 recalc_incremental_signals 共用，
+    任一步失败不影响主流程。
+    """
+    result = {"rule_hits": 0, "outcome_updated": 0, "diagnosis_findings": 0}
+    try:
+        from strategy.rule_scanner import scan_active_rules
+        rule_result = scan_active_rules()
+        result["rule_hits"] = rule_result.get("hits", 0)
+        print(f"  常驻规则扫描完成: {rule_result.get('rules', 0)} 条规则 / "
+              f"{result['rule_hits']} 条命中写入 strategy_signals")
+    except Exception as e:
+        print(f"  [WARN] 常驻规则扫描失败（不影响主流程）: {e}")
+    try:
+        from core.outcome_tracker import insert_new_outcomes, evaluate_outcomes
+        insert_new_outcomes()
+        result["outcome_updated"] = evaluate_outcomes()
+        print(f"  推荐结果追踪: {result['outcome_updated']} 条评估更新")
+    except Exception as e:
+        print(f"  [WARN] 推荐结果追踪失败（不影响主流程）: {e}")
+    try:
+        from strategy.optimizer import run_post_sync as _optimizer_run
+        opt = _optimizer_run()
+        _diag = opt.get("diagnosis") or {}
+        result["diagnosis_findings"] = len(_diag.get("findings") or [])
+        print(f"  策略优化器: 诊断结论 {result['diagnosis_findings']} 条"
+              + (f"，寻优建议: {(opt.get('tuning') or {}).get('suggestion') or '无'}"
+                 if opt.get("tuning") is not None else ""))
+    except Exception as e:
+        print(f"  [WARN] 策略优化器失败（不影响主流程）: {e}")
+    return result
+
+
+def recalc_incremental_signals(trade_dates: list[str] | None = None,
+                               verbose: bool = True,
+                               progress_callback=None,
+                               target: str = "all") -> dict:
+    """
+    增量重算 stock_signal：只对最近交易日重新评估并重写该日信号，
+    历史日的信号保留不动（供回测读取）。
+
+    定位：每日盘后调度（daily_sync_by_date 之后）的推荐刷新入口，
+    替代分钟级全量 recalc_all_scores。仅当发生数据回填/修正时，
+    才需要全量 recalc_all_scores 重算历史。
+
+    :param trade_dates: 交易日列表（'%Y%m%d' 或 '%Y-%m-%d'），取最后一个作为信号评估日
+    :param target: "all"（全市场，默认）/ "watchlist"（仅自选股）
+    :return: {"scan_date": ..., "signals": N, "codes": M, "elapsed_s": ...}
+    """
+    start = time.time()
+    target = target if target in ("all", "watchlist") else "all"
+    if not trade_dates:
+        return {"scan_date": None, "signals": 0, "codes": 0,
+                "elapsed_s": 0.0, "target": target}
+
+    # 统一信号评估日格式为 YYYY-MM-DD（与 daily_price.trade_date 存储格式一致）
+    scan_date = str(trade_dates[-1])
+    if len(scan_date) == 8 and scan_date.isdigit():
+        scan_date = f"{scan_date[:4]}-{scan_date[4:6]}-{scan_date[6:]}"
+
+    # 受影响股票 = 该日有行情写入的股票（停牌股当日无行情，本就无需当日信号）
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT code FROM daily_price WHERE trade_date=?",
+            (scan_date,),
+        ).fetchall()
+    codes = [r["code"] for r in rows]
+    if target == "watchlist":
+        wl_set = set(get_watchlist_codes())
+        codes = [c for c in codes if c in wl_set]
+    if not codes:
+        if verbose:
+            print(f"  [增量信号] {scan_date} 无受影响股票，跳过")
+        return {"scan_date": scan_date, "signals": 0, "codes": 0,
+                "elapsed_s": round(time.time() - start, 1), "target": target}
+
+    # 名称映射（stock_signal.name 字段；缺映射时用 code 兜底，不影响过滤）
+    try:
+        stocks_df = get_all_stocks()
+        name_map = dict(zip(stocks_df["code"], stocks_df["name"])) if not stocks_df.empty else {}
+    except Exception:
+        name_map = {}
+
+    # 阈值/止损止盈（与全量 recalc_all_scores 同口径）
+    from config.strategy_params import get_param
+    STOP_LOSS_SC = float(get_param("short_stop_loss"))
+    TAKE_PROFIT_SC = float(get_param("short_take_profit"))
+    SIG_THRESHOLD, _market_state = _resolve_sig_threshold()
+    if verbose and _market_state is not None:
+        print(f"  [增量信号] {scan_date} 市场状态 {_market_state['detail']}，"
+              f"阈值 {SIG_THRESHOLD}，止损 {STOP_LOSS_SC:.0%} 止盈 {TAKE_PROFIT_SC:.0%}")
+
+    # 质量过滤所需总股本映射 + 龙虎榜预加载
+    from core.db import get_market_cap_map
+    try:
+        _mktcap_map = get_market_cap_map()
+    except Exception:
+        _mktcap_map = {}
+    _lhb_map = {}
+    if NEXT_DAY_MOMENTUM.get("enabled"):
+        try:
+            _lhb_date = get_latest_lhb_date()
+            if _lhb_date:
+                _lhb_map = get_lhb_map_for_date(_lhb_date)
+                if verbose:
+                    print(f"  [增量信号] 预加载龙虎榜 {_lhb_date}：{len(_lhb_map)} 只")
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 隔日动量龙虎榜预加载失败: {e}")
+
+    sig_records = []
+    n_success = 0
+    for i, code in enumerate(codes):
+        if verbose and (i + 1) % 500 == 0:
+            print(f"    增量信号进度: {i+1}/{len(codes)}")
+        if progress_callback and (i + 1) % 200 == 0:
+            progress_callback(int((i + 1) / len(codes) * 100),
+                              f"增量信号 {i+1}/{len(codes)}，已生成 {len(sig_records)} 条")
+        try:
+            # 增量只评估最新交易日：读取 scan_date 前 ~700 自然日窗口即可
+            # （覆盖长线 250 日回撤 + MA120 斜率 + 中线 80 日 + 短线滚动窗口；
+            #  滚动指标在 scan_date 处与全历史读取完全一致，I/O 与计算量大幅下降）
+            _start = (pd.Timestamp(scan_date) - timedelta(days=700)).strftime("%Y-%m-%d")
+            df = get_daily_price(code, start_date=_start)
+            if df is None or len(df) < 30:
+                continue
+            # 停牌密集股窗口内行数可能不足 scan_long_term 的 min_rows=250，
+            # 回退全历史读取，保证长线评估口径与全量重算完全一致
+            if len(df) < 260:
+                df = get_daily_price(code)
+                if df is None or len(df) < 30:
+                    continue
+            _ts = (_mktcap_map.get(code) or {}).get("total_shares")
+            _recs = _build_signal_records(
+                df, code, name_map.get(code) or code, _ts,
+                SIG_THRESHOLD, STOP_LOSS_SC, TAKE_PROFIT_SC,
+                lhb_row=_lhb_map.get(code), scan_date=scan_date,
+                reuse_scores=True)
+            sig_records.extend(_recs)
+            n_success += 1
+        except Exception as e:
+            if verbose:
+                print(f"  [{code}] 增量信号生成失败: {e}")
+
+    # 重写当日信号（历史日保留不动）：
+    # 当日 short/mid/long/动量全部由本次增量重新生成，语义与全量 recalc 的
+    # "当日候选完全由当日过滤链决定"一致；target=all 时清当日全部，watchlist 时只清自选股。
+    with get_conn() as conn:
+        conn.execute("BEGIN TRANSACTION")
+        if target == "all":
+            conn.execute("DELETE FROM stock_signal WHERE scan_date=?", (scan_date,))
+        else:
+            ph = ",".join("?" * len(codes))
+            conn.execute(
+                f"DELETE FROM stock_signal WHERE scan_date=? AND code IN ({ph})",
+                [scan_date] + codes)
+        if sig_records:
+            conn.executemany(_SIGNAL_INSERT_SQL, sig_records)
+        conn.commit()
+
+    elapsed = time.time() - start
+    if verbose:
+        print(f"  增量信号重算完成: {len(sig_records)} 条"
+              f"（{scan_date}，{n_success}/{len(codes)} 只，耗时 {elapsed:.1f}s）")
+    return {"scan_date": scan_date, "signals": len(sig_records),
+            "codes": n_success, "elapsed_s": round(elapsed, 1), "target": target}
+
+
 def recalc_all_scores(progress_callback=None, target: str = "all"):
     """
     对数据库中所有股票的历史评分进行全量补算，
@@ -1158,8 +1622,6 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
                    watchlist 模式下，stock_signal 也只写自选股命中
     :return: dict with total, success, failed, signals, elapsed_s, target
     """
-    import json as _json
-
     target = target if target in ("all", "watchlist") else "all"
 
     # 止损/止盈比例走参数覆盖层（优化器采纳建议后即时生效，默认 -6%/+20%）
@@ -1180,24 +1642,14 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     # 悄悄接管，线上实际跑的恰是五组里最差的一组。故权重固定 PURE_BOTTOM_WEIGHTS，
     # 与 daily_price.fusion_score 同口径（纯抄底下 weighted_avg 与 max 数学等价）。
     # 自适应只保留「阈值」这一项（高波动 15→18，仍是有效的收紧手段）。
-    from config.strategy_params import (
-        ADAPTIVE_WEIGHTS_ENABLED, PURE_BOTTOM_WEIGHTS, FUSION_MODE,
-    )
+    from config.strategy_params import PURE_BOTTOM_WEIGHTS, FUSION_MODE
     _fusion_mode = FUSION_MODE
     _active_weights = PURE_BOTTOM_WEIGHTS
-    if ADAPTIVE_WEIGHTS_ENABLED:
-        try:
-            from strategy.adaptive_weights import get_adaptive_threshold, detect_market_state
-            _market_state = detect_market_state()
-            SIG_THRESHOLD = get_adaptive_threshold(_market_state)
-            print(f"  [市场状态] {_market_state['detail']}")
-            print(f"  [短线打分] 权重: 纯抄底 {_active_weights}，"
-                  f"阈值: {SIG_THRESHOLD}，融合方式: {_fusion_mode}")
-        except Exception as e:
-            print(f"  [WARN] 自适应阈值加载失败，回退默认阈值: {e}")
-            SIG_THRESHOLD = float(get_param("sig_threshold"))
-    else:
-        SIG_THRESHOLD = float(get_param("sig_threshold"))
+    SIG_THRESHOLD, _market_state = _resolve_sig_threshold()
+    if _market_state is not None:
+        print(f"  [市场状态] {_market_state['detail']}")
+        print(f"  [短线打分] 权重: 纯抄底 {_active_weights}，"
+              f"阈值: {SIG_THRESHOLD}，融合方式: {_fusion_mode}")
 
     if target == "watchlist":
         if count_watchlist() == 0:
@@ -1249,9 +1701,6 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
         ok = sync_strategy_score(code, verbose=False)
         if ok:
             success += 1
-            df = get_daily_price(code)
-            if df is not None:
-                total_days += len(df)
         else:
             failed += 1
             continue
@@ -1261,185 +1710,14 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
             if df is None or len(df) < 30:
                 continue
             _ts = (_mktcap_map.get(code) or {}).get("total_shares")
-            if SHORT_ENGINE == "oversold_rebound":
-                # ── 短线：超跌反弹v3 + 趋势闸门 + 质量过滤 ──
-                reb = strategy_oversold_rebound(df)
-                gate = trend_gate_series(df).reindex(reb.index).fillna(False)
-                qual = quality_series(name, df, _ts).reindex(reb.index).fillna(False)
-                for dt, r in reb.iterrows():
-                    if not bool(r.get("BUY_SIGNAL", False)):
-                        continue
-                    if not bool(gate.get(dt, False)) or not bool(qual.get(dt, False)):
-                        continue
-                    score4 = float(r.get("BUY_SCORE", 0) or 0)
-                    fs = round(score4 / 4.0 * 50.0, 2)  # 0~4 → 0~50 量纲对齐
-                    trade_date = str(dt.date()) if hasattr(dt, "date") else str(dt)[:10]
-                    price = round(float(r["close"]), 2)
-                    buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
-                    buy_volume = int(buy_money // (price * 100) * 100)
-                    stop_loss = round(price * (1 + STOP_LOSS_SC), 2)
-                    take_profit = round(price * (1 + TAKE_PROFIT_SC), 2)
-                    trigger_list = [
-                        f"超跌反弹v3 评分 {score4:.1f}/4",
-                        "站上MA20且均线向上",
-                        "非ST/流动性达标",
-                    ]
-                    sig_records.append({
-                        "scan_date": trade_date,
-                        "trade_date": trade_date,
-                        "code": code,
-                        "name": name or code,
-                        "price": price,
-                        "fusion_score": fs,
-                        "vol_score": 0,
-                        "ma_score": 0,
-                        "diverge_score": 0,
-                        "bottom_score": round(score4, 1),
-                        "whale_score": 0,
-                        "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
-                        "buy_price": price,
-                        "stop_loss": stop_loss,
-                        "take_profit": take_profit,
-                        "buy_volume": buy_volume,
-                        "buy_money": buy_money,
-                        "sent_wechat": 0,
-                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "horizon": "short",
-                        "strategy": "超跌反弹v3",
-                    })
-            else:
-                # ── 短线：纯抄底融合分（SHORT_ENGINE="pure_bottom" 一键回退）──
-                s1 = strategy_volume_breakout(df)
-                s2 = strategy_ma_convergence(df)
-                s3 = strategy_price_volume_divergence(df)
-                s4 = strategy_bottom_fishing(df)
-                s5 = strategy_whale_accumulation(df)
-                fused = fuse_signals([s1, s2, s3, s4, s5],
-                                     weights=_active_weights, mode=_fusion_mode)
-                qual = quality_series(name, df, _ts).reindex(fused.index).fillna(False)
-                # 趋势闸门：排除 MA20 向下/未站上 MA20 的"一路阴跌"接飞刀信号
-                # （2026-07-29 回测：隔日OC平均 -0.043%→-0.003%，信号数 -69%）
-                gate = trend_gate_series(df).reindex(fused.index).fillna(False)
-                # 追高否决：连板天数>=3 / 涨停打开 / 近3日急涨>=25% → 不推荐
-                # （2026-08-05：修复"连板启动期被闸门挡、涨停打开放量日反而高分进推荐"问题）
-                chase = chase_filter_series(df).reindex(fused.index).fillna(False)
-                for _, row in fused.iterrows():
-                    fs = float(row.get("FUSION_SCORE", 0) or 0)
-                    if fs < SIG_THRESHOLD:
-                        continue
-                    # 质量过滤（ST/流动性/市值），清理 picks，逻辑本身不改
-                    if not bool(qual.get(row.name, False)):
-                        continue
-                    if not bool(gate.get(row.name, False)):
-                        continue
-                    if not bool(chase.get(row.name, False)):
-                        continue
-                    trade_date = str(row.name.date()) if hasattr(row.name, "date") else str(row.name)[:10]
-                    price = round(float(row["close"]), 2)
-                    buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
-                    buy_volume = int(buy_money // (price * 100) * 100)
-                    stop_loss = round(price * (1 + STOP_LOSS_SC), 2)
-                    take_profit = round(price * (1 + TAKE_PROFIT_SC), 2)
-                    trigger_list = []
-                    if float(row.get("VOL_SCORE", 0) or 0) >= 2.0:
-                        trigger_list.append("放量突破")
-                    if float(row.get("MA_SCORE", 0) or 0) >= 2.0:
-                        trigger_list.append("均线粘合")
-                    if float(row.get("DIVERGE_SCORE", 0) or 0) >= 2.0:
-                        trigger_list.append("量价背离")
-                    if float(row.get("BOTTOM_SCORE", 0) or 0) >= 2.0:
-                        trigger_list.append("抄底")
-                    if float(row.get("WHALE_SCORE", 0) or 0) >= 2.0:
-                        trigger_list.append("主力建仓")
-                    sig_records.append({
-                        "scan_date": trade_date,
-                        "trade_date": trade_date,
-                        "code": code,
-                        "name": name or code,
-                        "price": price,
-                        "fusion_score": round(fs, 2),
-                        "vol_score": round(float(row.get("VOL_SCORE", 0) or 0), 1),
-                        "ma_score": round(float(row.get("MA_SCORE", 0) or 0), 1),
-                        "diverge_score": round(float(row.get("DIVERGE_SCORE", 0) or 0), 1),
-                        "bottom_score": round(float(row.get("BOTTOM_SCORE", 0) or 0), 1),
-                        "whale_score": round(float(row.get("WHALE_SCORE", 0) or 0), 1),
-                        "trigger_list": _json.dumps(trigger_list, ensure_ascii=False),
-                        "buy_price": price,
-                        "stop_loss": stop_loss,
-                        "take_profit": take_profit,
-                        "buy_volume": buy_volume,
-                        "buy_money": buy_money,
-                        "sent_wechat": 0,
-                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "horizon": "short",
-                        "strategy": "短线融合",
-                    })
-
-            # ── 中/长线信号：只评估最新交易日，命中各写一条 ──
-            for _scan in (scan_mid_term, scan_long_term):
-                sig = _scan(df)
-                if not sig:
-                    continue
-                # 质量过滤（ST/流动性/市值），逻辑本身不改
-                if not passes_quality(name, df, _ts):
-                    continue
-                # 追高否决（2026-08-05：与短线同口径——连板/涨停打开/急涨后不推长线建仓，
-                # 000815 三连板后的 long 41.67 分即因此不再写入）
-                if not chase_filter(df):
-                    continue
-                sig_records.append({
-                    "scan_date": sig["trade_date"],
-                    "trade_date": sig["trade_date"],
-                    "code": code,
-                    "name": name or code,
-                    "price": sig["buy_price"],
-                    "fusion_score": sig["fusion_score"],
-                    "vol_score": 0,
-                    "ma_score": 0,
-                    "diverge_score": 0,
-                    "bottom_score": 0,
-                    "whale_score": 0,
-                    "trigger_list": _json.dumps(sig["triggers"], ensure_ascii=False),
-                    "buy_price": sig["buy_price"],
-                    "stop_loss": sig["stop_loss"],
-                    "take_profit": sig["take_profit"],
-                    "buy_volume": 0,
-                    "buy_money": 0,
-                    "sent_wechat": 0,
-                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "horizon": sig["horizon"],
-                    "strategy": sig["strategy"],
-                })
-
-            # ── 隔日动量（龙虎榜净买占比）：仅最新交易日、可交易子集 ──
-            # 追加在短线记录之后：同 horizon 同票 INSERT OR REPLACE 时动量信号胜出
-            if _lhb_map:
-                nd_sig = scan_next_day_momentum(
-                    df, _lhb_map.get(code), name, _ts, params=NEXT_DAY_MOMENTUM)
-                if nd_sig and passes_quality(name, df, _ts):
-                    sig_records.append({
-                        "scan_date": nd_sig["trade_date"],
-                        "trade_date": nd_sig["trade_date"],
-                        "code": code,
-                        "name": name or code,
-                        "price": nd_sig["buy_price"],
-                        "fusion_score": nd_sig["fusion_score"],
-                        "vol_score": 0,
-                        "ma_score": 0,
-                        "diverge_score": 0,
-                        "bottom_score": 0,
-                        "whale_score": 0,
-                        "trigger_list": _json.dumps(nd_sig["triggers"], ensure_ascii=False),
-                        "buy_price": nd_sig["buy_price"],
-                        "stop_loss": nd_sig["stop_loss"],
-                        "take_profit": nd_sig["take_profit"],
-                        "buy_volume": 0,
-                        "buy_money": 0,
-                        "sent_wechat": 0,
-                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "horizon": nd_sig["horizon"],
-                        "strategy": nd_sig["strategy"],
-                    })
+            # 信号生成与写库口径完全复用增量路径的 _build_signal_records
+            # （全量：短线逐历史日 + 中/长线/动量只评最新日）
+            _recs = _build_signal_records(
+                df, code, name, _ts, SIG_THRESHOLD,
+                STOP_LOSS_SC, TAKE_PROFIT_SC,
+                lhb_row=_lhb_map.get(code))
+            sig_records.extend(_recs)
+            total_days += len(df)
         except Exception as e:
             print(f"  [{code}] stock_signal 写入失败: {e}")
 
@@ -1455,20 +1733,7 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
             "AND strategy IN ('短线融合', '超跌反弹v3')",
             [(c,) for c in _recalc_codes])
         if sig_records:
-            conn.executemany("""
-                INSERT OR REPLACE INTO stock_signal
-                  (scan_date, trade_date, code, name, price, fusion_score,
-                   vol_score, ma_score, diverge_score, bottom_score, whale_score,
-                   trigger_list, buy_price, stop_loss, take_profit,
-                   buy_volume, buy_money, sent_wechat, created_at,
-                   horizon, strategy)
-                VALUES
-                  (:scan_date, :trade_date, :code, :name, :price, :fusion_score,
-                   :vol_score, :ma_score, :diverge_score, :bottom_score, :whale_score,
-                   :trigger_list, :buy_price, :stop_loss, :take_profit,
-                   :buy_volume, :buy_money, :sent_wechat, :created_at,
-                   :horizon, :strategy)
-            """, sig_records)
+            conn.executemany(_SIGNAL_INSERT_SQL, sig_records)
         conn.commit()
     print(f"  stock_signal 写入完成: {len(sig_records)} 条记录（已清理重算范围内旧短线信号）")
 
@@ -1478,35 +1743,9 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     if progress_callback:
         progress_callback(100, "重算完成: " + str(len(sig_records)) + " 条信号")
 
-    # ── 并入常驻规则扫描（选股→回测→推荐闭环，best-effort）──
-    rule_hits = 0
-    try:
-        from strategy.rule_scanner import scan_active_rules
-        rule_result = scan_active_rules()
-        rule_hits = rule_result.get("hits", 0)
-        print(f"  常驻规则扫描完成: {rule_result.get('rules', 0)} 条规则 / {rule_hits} 条命中写入 strategy_signals")
-    except Exception as e:
-        print(f"  [WARN] 常驻规则扫描失败（不影响主流程）: {e}")
-
-    # ── 推荐结果闭环追踪（best-effort）──
-    try:
-        from core.outcome_tracker import insert_new_outcomes, evaluate_outcomes
-        insert_new_outcomes()
-        outcome_updated = evaluate_outcomes()
-        print(f"  推荐结果追踪: {outcome_updated} 条评估更新")
-    except Exception as e:
-        print(f"  [WARN] 推荐结果追踪失败（不影响主流程）: {e}")
-
-    # ── 策略优化器：每日诊断 + 周五参数寻优（suggest 模式，best-effort）──
-    try:
-        from strategy.optimizer import run_post_sync as _optimizer_run
-        opt = _optimizer_run()
-        _diag = opt.get("diagnosis") or {}
-        print(f"  策略优化器: 诊断结论 {len(_diag.get('findings') or [])} 条"
-              + (f"，寻优建议: {(opt.get('tuning') or {}).get('suggestion') or '无'}"
-                 if opt.get("tuning") is not None else ""))
-    except Exception as e:
-        print(f"  [WARN] 策略优化器失败（不影响主流程）: {e}")
+    # ── 推荐闭环：常驻规则扫描 + outcome 追踪 + 策略优化器（best-effort）──
+    _hooks = _run_post_recalc_hooks()
+    rule_hits = _hooks["rule_hits"]
 
     return {
         "success": success,
@@ -1582,8 +1821,31 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         except Exception as e:
             if verbose:
                 print(f"  [ERROR] 东财接口失败: {e}")
-            results[trade_date] = {"rows": 0, "error": str(e)}
-            continue
+            # ── 回退：东财/akshare 同源兜底不可靠，整体降级 baostock 全市场同步 ──
+            # daily_sync 自带 baostock → akshare → 腾讯 三级兜底 + 断点续传缓存，
+            # 单线程逐股拉取，预计 5~15 分钟（东财正常时仍走秒级直连，不受影响）。
+            # recalc=False：行情写库后由本函数统一的增量打分收尾负责，避免触发
+            # daily_sync 内部的全量 recalc_all_scores（约 5 分钟，重复计算）。
+            if verbose:
+                print("  [FALLBACK] 东财/akshare 不可用，回退 baostock 全市场同步"
+                      "（逐股拉取，预计 5~15 分钟）...")
+            try:
+                fb = daily_sync(verbose=verbose, target=target, recalc=False)
+                fb_rows = int(fb.get("success", 0) or 0)
+                results[trade_date] = {
+                    "rows": fb_rows, "source": "baostock_fallback",
+                    "detail": {k: fb.get(k) for k in ("total", "success", "failed")},
+                }
+                total_rows += fb_rows
+                if progress_callback:
+                    progress_callback("date_done", trade_dates.index(trade_date) + 1,
+                                      len(trade_dates))
+                continue
+            except Exception as fb_e:
+                if verbose:
+                    print(f"  [ERROR] baostock 回退也失败: {fb_e}")
+                results[trade_date] = {"rows": 0, "error": f"em: {e}; baostock: {fb_e}"}
+                continue
 
         if df.empty:
             if verbose:
@@ -1622,6 +1884,21 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         except Exception as e:
             if verbose:
                 print(f"  [WARN] 策略分数重算失败: {e}")
+
+        # 增量重算 stock_signal：只重写最新交易日信号，历史日保留
+        # （替代分钟级全量 recalc_all_scores；数据回填/修正才需要全量）
+        try:
+            recalc_incremental_signals(trade_dates, verbose=verbose, target=target)
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 增量信号重算失败: {e}")
+
+        # 推荐闭环：常驻规则扫描 + outcome 追踪 + 策略优化器（best-effort）
+        try:
+            _run_post_recalc_hooks()
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 推荐闭环钩子失败: {e}")
 
         # 刷新 latest_price 物化表（消除查询时的 N+1 子查询）
         try:
@@ -1832,8 +2109,11 @@ if __name__ == "__main__":
     elif cmd == "daily":
         daily_sync(verbose=True)
     elif cmd == "daily_fast":
-        # 按日批量同步（东财直连，1 次 HTTP 拉全 A）
+        # 按日批量同步（东财直连，1 次 HTTP 拉全 A；自动附带最新交易日信号增量重算）
         daily_sync_by_date(verbose=True)
+    elif cmd == "full":
+        # 全量重算历史打分 + stock_signal（数据回填/修正后使用，约 5 分钟）
+        recalc_all_scores()
     elif cmd == "pool_test":
         # 推荐池并行拉取测试
         from core.db import get_all_stocks
@@ -1858,4 +2138,4 @@ if __name__ == "__main__":
         print("结果:", "成功" if ok else "失败")
     else:
         print(f"未知命令: {cmd}")
-        print("可用: list / init / init_test / daily / stat / test")
+        print("可用: list / init / init_test / daily / daily_fast / full / pool_test / em_test / stat / test")

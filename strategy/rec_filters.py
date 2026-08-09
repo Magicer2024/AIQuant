@@ -14,7 +14,8 @@ from __future__ import annotations
 import math
 import pandas as pd
 
-from config.strategy_params import SHORT_TREND_GATE, QUALITY_FILTER, CHASE_FILTER, get_param
+from config.strategy_params import (SHORT_TREND_GATE, QUALITY_FILTER, CHASE_FILTER,
+                                    EXTENSION_FILTER, get_param)
 
 # ST/退市名称关键词（大写归一后匹配，"退" 为中文不受 upper 影响）
 _ST_KEYWORDS = ("ST", "退")
@@ -193,4 +194,40 @@ def chase_filter_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
 def chase_filter(df: pd.DataFrame, cfg: dict = None) -> bool:
     """最新交易日是否通过追高否决（True=可推荐）"""
     s = chase_filter_series(df, cfg)
+    return bool(s.iloc[-1]) if len(s) else False
+
+
+# ─────────────────────────────────────────────
+# 扩展度否决：价相对 MA20 偏离过大（挂高位、易均值回归）
+# ─────────────────────────────────────────────
+
+def extension_filter_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
+    """
+    逐日扩展度硬否决布尔序列（True=可推荐）。
+
+    当日 close 相对 MA20 偏离 > max_pct_above_ma20（默认 12%）→ 否决。
+    背景（tools/diag_short_reco.py）：候选均值偏离 MA20 +6.3%、>8% 占 26.9%，
+    高位组（>MA20 8%）T+1 OC 48.3%/+0.04% 劣于低位组（<MA20 2%）52.2%/+0.28%。
+
+    与 chase_filter_series 同约定：仅支持单股票 df；禁用时全 True；
+    MA20 样本不足（<20 行）或 close/MA20 缺失时按"不否决"处理（缺数据不臆断，
+    与追高否决的降级方向一致——宁可漏杀不可误杀）。
+    """
+    cfg = cfg or EXTENSION_FILTER
+    if df is None or len(df) == 0:
+        return pd.Series(dtype=bool)
+    if not cfg.get("enabled", True):
+        return pd.Series(True, index=df.index)
+
+    close = df["close"].astype(float)
+    ma20 = close.rolling(20).mean()
+    max_above = float(cfg.get("max_pct_above_ma20", 0.12))
+    above = (close / ma20 - 1.0).fillna(0.0)   # MA20 缺失 → 偏离 0 → 不否决
+    ok = above <= max_above
+    return ok.reindex(df.index).fillna(False).astype(bool)
+
+
+def extension_filter(df: pd.DataFrame, cfg: dict = None) -> bool:
+    """最新交易日是否通过扩展度否决（True=可推荐）"""
+    s = extension_filter_series(df, cfg)
     return bool(s.iloc[-1]) if len(s) else False

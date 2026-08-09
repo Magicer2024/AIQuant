@@ -221,13 +221,12 @@ def get_latest_date_all(before_date: str = None) -> str | None:
         return None
     candidates = [r["trade_date"] for r in rows]
     try:
-        import akshare as ak
-        import pandas as pd
-        df = ak.tool_trade_date_hist_sina()
-        trade_dates = set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
-        for d in candidates:
-            if d in trade_dates:
-                return d
+        from core.trade_calendar import get_trade_days
+        days = get_trade_days()
+        if days is not None:
+            for d in candidates:
+                if d in days:
+                    return d
     except Exception:
         pass
     from datetime import datetime as _dt

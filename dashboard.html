@@ -2221,19 +2221,22 @@ function onAutoSyncDone(msg) {
     }
 }
 
-// 检查今日推荐是否最新（基于 today 接口返回的 date），不是今天就触发重算
+// 检查今日推荐是否最新（基于 today 接口返回的 date），不是最近交易日就触发增量重算
 async function ensureTodayRecs(silent) {
     try {
         const resp = await RequestManager.fetch('today-reco', API + '/investor/today?limit=1');
-        const today = new Date().toISOString().slice(0, 10);
         const lastDate = resp && resp.data && resp.data.date;
-        if (lastDate === today) return;  // 推荐已是今天
-        if (silent) showToast('同步行情完成，开始重算今日打分…', 'info', 3500);
-        // 触发重算（异步任务），拿到 task_id 后轮询
-        const r = await RequestManager.fetch('recalc-start-auto', API + '/sync/recalc', { method: 'POST' });
+        const latestTrade = resp && resp.data && resp.data.latest_trade_date;
+        // 推荐已是最近交易日则无需重算（盘前/非交易日打开页面不误触发全量重算）
+        if (lastDate && latestTrade && lastDate === latestTrade) return;
+        if (silent) showToast('同步行情完成，开始增量重算今日打分…', 'info', 3500);
+        // 触发增量重算（异步，只重写最新交易日信号，秒级~分钟级）
+        const r = await RequestManager.fetch('recalc-inc-start-auto', API + '/sync/recalc_incremental', { method: 'POST' });
         const tid = r && r.data && r.data.task_id;
         if (!tid) {
-            showToast('自动重算启动失败，请手动点击"立即重算打分"', 'warning', 4000);
+            // 409（策略分未重算/任务互斥等）：给出可读提示，避免无限重试
+            const msg = (r && r.message) || '自动重算启动失败，请手动点击"立即重算打分"';
+            showToast(msg, 'warning', 4000);
             return;
         }
         pollRecalcTask(tid, function(ok, msg) {

@@ -217,6 +217,55 @@ def strategy_bottom_fishing(df: pd.DataFrame,
     return _strategy_return_cols(d)
 
 
+def strategy_bottom_fishing_v2(df: pd.DataFrame,
+                               drop_threshold: float = -0.05) -> pd.DataFrame:
+    """
+    连续下跌后的回踩企稳（P1-2.1 买回踩版，2026-08 回测通过、灰度候选）。
+
+    与 v1（strategy_bottom_fishing）的差异仅在"反弹强度"分：
+      v1 奖励"已反弹 5%"（信号滞后于反弹，T+1 开盘买入恰买在反弹中段）；
+      v2 改为奖励"上行趋势中刚回踩至支撑"：
+        - 反弹 0~4% 线性升分（1~4% 甜蜜区近满分）
+        - 4%~10% 线性衰减至 0，>10% 归零（不再奖励高位）
+        - 仅在 MA20 向上（ma20 >= ma20.shift(5)）时计分（买回踩的前提是趋势向上）
+    回测（tools/_eval_pullback.py，34 cohort，OC 口径）：
+      T+1 OC 胜率 51.5%→55.5%、均值 +0.104%→+0.211%、T+3 -0.890%→-0.585%；
+      候选量约减半（8779→4139），候选 MA20 偏离 +5.44%→+3.85%。
+    由 config.SHORT_ENGINE="pure_bottom_v2" 切换（默认 "pure_bottom" 不动线上）。
+    """
+    d = df.copy()
+
+    ma5  = d["close"].rolling(5).mean()
+    vol5 = d["volume"].rolling(5).mean()
+
+    # 1) 下跌深度：越深分越高（与 v1 一致）
+    low_10d = d["close"].rolling(10).min()
+    high_10d_before = d["close"].shift(10).rolling(10).max()
+    drop_depth = ((high_10d_before - low_10d) / high_10d_before.clip(lower=1e-9)).clip(lower=0)  # 0~1
+    score_drop = drop_depth.clip(upper=1.0)                                     # 0~1
+
+    # 2) 回踩支撑分（v2 核心改动，替代 v1 的"已反弹越多分越高"）
+    close = d["close"]
+    ma20 = close.rolling(20).mean()
+    up_trend = (ma20 >= ma20.shift(5)).fillna(False).astype(float)              # 趋势向上
+    r = ((close - low_10d) / low_10d.clip(lower=1e-9)).clip(lower=0)            # 相对10日低反弹
+    w1 = (r / 0.04).clip(upper=1.0)                       # 0~4% 线性 0→1（1~4% 甜蜜区近满分）
+    w2 = (1 - (r - 0.04) / 0.06).clip(lower=0, upper=1)   # 4%~10% 线性 1→0，>10% 归零
+    score_rebound = (w1.where(r <= 0.04, w2).fillna(0.0) * up_trend)
+
+    # 3) 放量强度：量比越高分越高（与 v1 一致）
+    vol_ratio = d["volume"] / vol5.clip(lower=1e-9)
+    score_vol = (vol_ratio / 2.0).clip(lower=0, upper=1.0)                      # 0~1，2倍量满分
+
+    buy_score = (score_drop + score_rebound + score_vol).fillna(0)
+
+    d["BUY_SCORE"]  = buy_score
+    d["BUY_SIGNAL"]  = (buy_score >= 1.0) & (d.index >= d.index[19])
+    d["SELL_SIGNAL"] = (d["close"] < ma5) | (d["volume"] < vol5 * 0.5)
+    d["STRATEGY"] = "抄底回踩型"
+    return _strategy_return_cols(d)
+
+
 # ===================================================================
 # 策略5: 主力建仓型
 # ===================================================================

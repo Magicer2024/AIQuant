@@ -124,7 +124,14 @@ V4_PARAM_GRID = [
 #   纯抄底+闸门      n= 44565  胜率46.30%  平均-0.003%  ← 采用（砍掉69%阴跌途中信号）
 #   纯抄底+闸门+质量 n= 33838  胜率46.42%  平均-0.002%
 #   v3+闸门+质量     n= 17022  胜率46.40%  平均+0.045%（组合口径PF较差，不采用）
-SHORT_ENGINE = "pure_bottom"
+# 可选值：
+#   "pure_bottom"      v1 已反弹（历史默认；2026-08-09 已由 pure_bottom_v2 转正接管）
+#   "pure_bottom_v2"   买回踩平滑版（2026-08-09 转正为线上默认；tools/_eval_pullback.py
+#                      34 cohort T+1 OC 胜率 51.5%→55.5%、均值 +0.104%→+0.211%，
+#                      候选量约减半、候选 MA20 偏离 +5.44%→+3.85%；切换后已跑
+#                      recalc_all_scores 重算 daily_price 分数列与历史 stock_signal）
+#   "oversold_rebound" 超跌反弹v3（历史备选）
+SHORT_ENGINE = "pure_bottom_v2"
 
 # 短线趋势闸门：过滤下跌途中的假反弹（要求站上均线且均线向上）
 SHORT_TREND_GATE = {
@@ -134,12 +141,15 @@ SHORT_TREND_GATE = {
 }
 
 # 推荐质量硬过滤：ST 剔除 + 流动性 + 市值区间（缺 total_shares 自动跳过市值项）
+# 2026-08-07 调整：max_mktcap 由 800亿 放宽到 3000亿。依据 tools/eval_quality_filter.py +
+# 市值分桶验证（tools/ 分析）：>1500亿 桶信号 OC 均值/盈亏比在长短两窗均最高，800亿 上限
+# 砍掉了质量最好的 ~8.7% 信号；放宽对每日 Top8 无劣化（超大盘 fs 排序难进前 8）。
 QUALITY_FILTER = {
     "enabled": True,
     "exclude_st": True,
     "min_amt20": 80_000_000,       # 近20日日均成交额下限（元）
     "min_mktcap": 3_000_000_000,   # 总市值下限（元，剔除微盘）
-    "max_mktcap": 80_000_000_000,  # 总市值上限（元，剔除超大盘）
+    "max_mktcap": 300_000_000_000,  # 总市值上限（元，放宽到 3000亿：>3000亿的极超大盘仍剔除）
 }
 
 # ── 追高否决过滤（2026-08-05 新增）────────────────────────────
@@ -156,6 +166,28 @@ CHASE_FILTER = {
     "limit_pct": 9.8,             # 涨停判定阈值（主板 10%，留 0.2pct 容差）
     "reject_limit_open": True,    # 当日盘中触板(>=+9.5%)但收盘未封住(<+9.8%) → 涨停打开否决
     "max_ret_3d": 0.25,           # 近3日涨幅上限（>=25% 否决，覆盖 20cm 板急拉）
+}
+
+
+# ── 扩展度否决（2026-08 短线优化 P0-1.2）──────────────────────────
+# 背景：diag_short_reco 实测候选均值偏离 MA20 +6.3%、>8% 占 26.9%；
+# 高位组（>MA20 8%）T+1 OC 48.3%/+0.04% vs 低位组（<MA20 2%）52.2%/+0.28%，
+# 低扩展度入场更优 → 价 > MA20×1.12 硬否决（易均值回归尾部），写库前与 chase 同链。
+# enabled=False 即一键降级，不影响任何既有链路。
+EXTENSION_FILTER = {
+    "enabled": True,
+    "max_pct_above_ma20": 0.12,   # 价 > MA20×(1+12%) → 硬否决
+}
+
+
+# ── T+1 跳空/追高守卫（2026-08-06 并入突破确认买点）────────────────
+# 背景：用户反馈"短线推荐买进去容易挂高"。信号 T 日盘后生成、T+1 开盘买入；
+# 若 T+1 最新价相对信号日收盘（buy_price）已累计涨 > max_gap_pct（跳空高开+日内续涨），
+# 追入 = 接盘高位 → 操作信号从 buy 降级为 wait（暂缓），提示等回踩，
+# 与既有"突破确认买点"（routes/investor.py，等收盘站上推荐日以来高点）合并为同一入场时机守卫。
+T1_GAP_GUARD = {
+    "enabled": True,
+    "max_gap_pct": 2.5,   # 相对信号日收盘价累计涨幅上限（%），超过则暂缓追高
 }
 
 
@@ -231,12 +263,20 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         "min": 2, "max": 15, "label": "趋势闸门斜率回看天数",
     },
     "short_stop_loss": {
-        "default": -0.06, "type": float,
+        # 2026-08 短线优化 P0-1.1：-6% → -5%（盈亏比 8/5=1.6 稳过 avoid 一票否决；
+        # -3.5% 贴近 _calc_signal 提示的"易被洗出"阈值，故取 -5%）
+        "default": -0.05, "type": float,
         "min": -0.12, "max": -0.02, "label": "短线止损比例",
     },
     "short_take_profit": {
-        "default": 0.20, "type": float,
+        # 快进快出：+20% → +8%（诊断 T+3/T+5 转负，edge 只在 T+1 附近）
+        "default": 0.08, "type": float,
         "min": 0.04, "max": 0.40, "label": "短线止盈比例",
+    },
+    "short_max_hold_days": {
+        # 买入次日收盘了结（T+1 制度下最早可卖日）；同步改 exit_advisor.HORIZON_MAX_HOLD["short"]
+        "default": 1, "type": int,
+        "min": 1, "max": 10, "label": "短线最大持仓天数",
     },
 }
 

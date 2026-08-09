@@ -10,6 +10,7 @@ routes/investor.py —— 个人投资者专属 API
 - 风险告警（接近止损/单股集中度过高等）
 """
 import json
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -22,6 +23,7 @@ from config.personal_config import (
     POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT,
     MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
 )
+from config.strategy_params import T1_GAP_GUARD
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -34,6 +36,121 @@ REGIME_LABEL = {
     "hot": "火热", "warm": "偏暖", "neutral": "震荡",
     "cool": "偏冷", "cold": "冰点", "unknown": "数据不足",
 }
+
+
+# ─────────────────────────────────────────────
+# 大盘冷热：多日宽度 composite（替代单日均值，抗单日噪音）
+# ─────────────────────────────────────────────
+_regime_cache = {"ts": 0.0, "regime": None}
+_REGIME_CACHE_TTL = 600  # 10 分钟（盘中数据低频变化）
+
+
+def _regime_from_avg_pct(avg_pct):
+    """单日全市场平均涨幅 → 5 档 regime（composite 数据不足时的回退口径）"""
+    if avg_pct is None:
+        return "unknown"
+    if avg_pct > 1.0:
+        return "hot"
+    if avg_pct > 0.3:
+        return "warm"
+    if avg_pct > -0.3:
+        return "neutral"
+    if avg_pct > -1.0:
+        return "cool"
+    return "cold"
+
+
+def _compute_market_regime(conn):
+    """
+    多日宽度 composite 市场冷热（10 分钟缓存）。
+
+    综合三项（替代原单日 AVG(pct_change) 的"一天定生死"，避免冰点↔火热来回跳）：
+      1) 近 5 个交易日涨跌家数比（多日均值，抗单日暴涨暴跌）
+      2) 全市场站上 MA20 的个股占比（真实宽度，近 5 日均值）
+      3) 沪深300 / 中证500 近 5 日斜率均值
+    composite = 50 + 三项贡献（各 ±20 / ±20 / ±15），正常区间约 25~75。
+    档位：>=60 hot / >=55 warm / >=45 neutral / >=40 cool / else cold。
+    任一环节异常时回退单日均值逻辑（原行为）。
+    """
+    now = time.time()
+    if _regime_cache["regime"] and (now - _regime_cache["ts"]) < _REGIME_CACHE_TTL:
+        return _regime_cache["regime"]
+
+    try:
+        # 1) 涨跌家数比（近 5 个交易日）
+        rows = conn.execute(
+            """
+            SELECT trade_date,
+                   SUM(CASE WHEN pct_change > 0 THEN 1 ELSE 0 END) AS up,
+                   COUNT(*) AS total
+            FROM daily_price
+            WHERE trade_date >= date('now', '-12 days')
+            GROUP BY trade_date
+            ORDER BY trade_date DESC
+            LIMIT 5
+            """
+        ).fetchall()
+        if not rows:
+            regime = "unknown"
+            _regime_cache.update({"ts": now, "regime": regime})
+            return regime
+        up_ratio = sum((r["up"] or 0) / r["total"] for r in rows if r["total"]) / len(rows)
+
+        # 2) 宽度：全市场站上 MA20 的个股占比（近 5 个交易日）
+        wrows = conn.execute(
+            """
+            SELECT d.trade_date,
+                   AVG(CASE WHEN d.close > d.ma20 THEN 1.0 ELSE 0.0 END) AS width
+            FROM (
+                SELECT code, trade_date, close,
+                       AVG(close) OVER (
+                           PARTITION BY code ORDER BY trade_date
+                           ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                       ) AS ma20
+                FROM daily_price
+                WHERE trade_date >= date('now', '-30 days')
+            ) d
+            GROUP BY d.trade_date
+            ORDER BY d.trade_date DESC
+            LIMIT 5
+            """
+        ).fetchall()
+        width = sum(float(r["width"] or 0) for r in wrows) / len(wrows) if wrows else 0.5
+
+        # 3) 指数斜率（沪深300 / 中证500，近 5 日）
+        slopes = []
+        for _icode in ("000300", "000905"):
+            irows = conn.execute(
+                "SELECT trade_date, close FROM index_daily WHERE code=? "
+                "ORDER BY trade_date DESC LIMIT 6", (_icode,)).fetchall()
+            if len(irows) >= 2 and irows[-1]["close"]:
+                slopes.append((float(irows[0]["close"]) - float(irows[-1]["close"]))
+                              / float(irows[-1]["close"]))
+        idx_slope = sum(slopes) / len(slopes) if slopes else 0.0
+
+        score = 50.0 + (up_ratio - 0.5) * 100.0 * 0.4 \
+                      + (width - 0.5) * 100.0 * 0.4 \
+                      + idx_slope * 300.0
+        if score >= 60:
+            regime = "hot"
+        elif score >= 55:
+            regime = "warm"
+        elif score >= 45:
+            regime = "neutral"
+        elif score >= 40:
+            regime = "cool"
+        else:
+            regime = "cold"
+    except Exception:
+        # composite 计算失败（表结构/数据异常）→ 回退原单日均值口径
+        avg_pct = conn.execute(
+            "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
+            "WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)"
+        ).fetchone()["avg_pct"]
+        regime = _regime_from_avg_pct(avg_pct)
+
+    _regime_cache.update({"ts": now, "regime": regime})
+    return regime
 
 
 def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_up):
@@ -354,27 +471,12 @@ def today_recommendations():
             ).fetchall()
         all_rows = [r for hz in horizons for r in rows_by_horizon[hz]]
 
-        # ── 联动查询 1：当前大盘冷热（影响信号灯） ──
-        regime_row = conn.execute(
-            """
-            SELECT AVG(pct_change) AS avg_pct
-            FROM daily_price
-            WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)
-            """
-        ).fetchone()
-        avg_pct = regime_row["avg_pct"] if regime_row else None
-        if avg_pct is None:
-            market_regime = "unknown"
-        elif avg_pct > 1.0:
-            market_regime = "hot"
-        elif avg_pct > 0.3:
-            market_regime = "warm"
-        elif avg_pct > -0.3:
-            market_regime = "neutral"
-        elif avg_pct > -1.0:
-            market_regime = "cool"
-        else:
-            market_regime = "cold"
+        # ── 联动查询 1：当前大盘冷热（影响信号灯；多日宽度 composite，10 分钟缓存） ──
+        market_regime = _compute_market_regime(conn)
+        # 最新交易日（供前端判断推荐是否已是最新，避免盘前/非交易日反复触发重算）
+        _latest_td = conn.execute(
+            "SELECT MAX(trade_date) AS d FROM daily_price"
+        ).fetchone()["d"]
 
         # ── 联动查询 2：当前持仓（影响"可加仓/可减仓"信号） ──
         held_codes = {r["code"] for r in conn.execute(
@@ -552,6 +654,26 @@ def today_recommendations():
                 is_held=is_held,
                 trend_up=trend_up,
             )
+            # ── 追高守卫（P2-3.2 重做，2026-08）：跳空过大才放弃，平开按原计划买 ──
+            # 旧语义：T+1 相对信号日收盘涨 >2.5% → 降级 wait。但隔夜跳空恰是唯一正
+            # edge（diag：T+1 OC +0.08% vs CC -0.82%，差 0.9pct 全在跳空上），好日子里
+            # 它砍掉该赚的钱。新语义：相对信号日收盘涨幅 > 止盈价（≈+8%）→ 已错过，
+            # level=sell 不追；平开/小涨保持原 buy（挂信号价/回踩支撑，不再 wait）。
+            gap_pct = None
+            if entry > 0 and latest > 0 and T1_GAP_GUARD.get("enabled", True):
+                gap_pct = (latest - entry) / entry * 100
+                # 跳空上限：优先用推荐自带止盈价（tp>entry 时 ≈ +8%）；止盈缺失回退旧阈值
+                gap_limit = ((tp / entry - 1) * 100
+                             if tp and entry > 0 and tp > entry
+                             else float(T1_GAP_GUARD.get("max_gap_pct", 2.5)))
+                if gap_pct > gap_limit:
+                    signal["level"] = "sell"
+                    signal["emoji"] = "🔴"
+                    signal["label"] = "止盈离场"
+                    signal["warnings"] = signal["warnings"] + [
+                        f"相对信号日收盘已涨 +{gap_pct:.1f}%（{entry:.2f} → {latest:.2f}），"
+                        f"已越过止盈位 +{gap_limit:.1f}%，错过买点不追，等回踩"
+                    ]
             # 可建仓但现价还在确认线下方 → 提示等突破确认再入场
             if signal["level"] == "buy" and confirm_trigger and latest > 0 and latest < confirm_trigger:
                 signal["warnings"] = signal["warnings"] + [
@@ -588,16 +710,30 @@ def today_recommendations():
             }
 
         # 构建候选卡片后剔除「避免」级（盈亏比 <1.5 一票否决），再截取前 limit 条
+        # 稳健 regime 门控（2026-08 P1-2.3）：cold/cool 时短线推荐数量减半，
+        # 避免最差 cohort 满仓推荐（diag 最差 cohort T+1 胜率仅 ~40%）；cold 时
+        # short 组已过 _calc_signal 的票也整组强制降级 wait（保守，可等回暖再上）。
         groups = {}
         for hz in horizons:
             items = [_build_item(dict(r)) for r in rows_by_horizon[hz]]
             items = [it for it in items if it["signal"]["level"] != "avoid"]
+            if hz == "short" and market_regime in ("cold", "cool"):
+                items = items[:max(1, limit // 2)]
+                if market_regime == "cold":
+                    for it in items:
+                        if it["signal"]["level"] == "buy":
+                            it["signal"]["level"] = "wait"
+                            it["signal"]["emoji"] = "🔴"
+                            it["signal"]["label"] = "大盘冷，观望"
+                            it["signal"]["reasons"] = it["signal"].get("reasons", []) + [
+                                "大盘 cold，短线整组降级观望"]
             groups[hz] = items[:limit]
         for hz in ("short", "mid", "long"):
             groups.setdefault(hz, [])
         short_items = groups.get("short", [])
         return ok({
             "date": scan_date,
+            "latest_trade_date": _latest_td,  # 推荐是否为最新交易日由前端据此判断
             "count": sum(len(v) for v in groups.values()),
             "groups": _sanitize(groups),
             "items": _sanitize(short_items),   # 兼容旧前端：items = short 组
@@ -894,20 +1030,14 @@ def market_overview():
         down_count = (sentiment_row["down_count"] or 0) if sentiment_row else 0
         flat_count = (sentiment_row["flat_count"] or 0) if sentiment_row else 0
 
-        # 简单规则：日均涨幅 > 0.5% 偏热，< -0.5% 偏冷
-        if avg_pct is None:
-            regime = "unknown"
-            regime_label = "数据不足"
-        elif avg_pct > 1.0:
-            regime, regime_label = "hot", "火热（注意追高风险）"
-        elif avg_pct > 0.3:
-            regime, regime_label = "warm", "偏暖（可适度参与）"
-        elif avg_pct > -0.3:
-            regime, regime_label = "neutral", "震荡（精选个股）"
-        elif avg_pct > -1.0:
-            regime, regime_label = "cool", "偏冷（控制仓位）"
-        else:
-            regime, regime_label = "cold", "冰点（防守为主）"
+        # 简单规则 → 多日宽度 composite（10 分钟缓存，抗单日噪音）
+        _REGIME_HINT = {
+            "hot": "火热（注意追高风险）", "warm": "偏暖（可适度参与）",
+            "neutral": "震荡（精选个股）", "cool": "偏冷（控制仓位）",
+            "cold": "冰点（防守为主）",
+        }
+        regime = _compute_market_regime(conn)
+        regime_label = _REGIME_HINT.get(regime, "数据不足")
 
         return ok({
             "indices": _sanitize(index_cards),

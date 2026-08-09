@@ -339,6 +339,50 @@ def start_recalc():
               "message": f"重算任务已启动（target={target}）"})
 
 
+@sync_bp.route("/recalc_incremental", methods=["POST"])
+def start_recalc_incremental():
+    """
+    增量重算打分（异步）：只重写最新交易日的 stock_signal，历史日保留。
+    替代分钟级全量 /recalc——前端兜底/盘后补刷用，秒级~分钟级完成。
+    body: {"target": "all" | "watchlist"}  默认 "all"
+    """
+    from flask import request
+    from core.db import get_conn
+    from core.sync import recalc_incremental_signals as run_recalc_incremental
+
+    body = request.get_json(silent=True) or {}
+    target = body.get("target", "all")
+    if target not in ("all", "watchlist"):
+        target = "all"
+
+    if _sync_progress["running"]:
+        return fail("正在同步行情（完成后会自动重算打分），请等待同步结束", 409)
+    if is_any_running(kind="recalc"):
+        return fail("已有一个重算任务在进行中，请稍后再试", 409)
+
+    # 信号评估日 = 最新交易日（daily_price 中最大的 trade_date）
+    with get_conn() as conn:
+        row = conn.execute("SELECT MAX(trade_date) AS d FROM daily_price").fetchone()
+    latest = row["d"] if row else None
+    if not latest:
+        return fail("daily_price 无行情数据，请先同步行情", 400)
+
+    # 分数列新鲜性检查：增量复用 daily_price 分数列（reuse_scores），
+    # 若最新交易日 fusion_score 覆盖率过低，说明行情刚写入但策略分未重算，先拒绝并提示
+    with get_conn() as conn:
+        cov = conn.execute(
+            "SELECT 1.0 * SUM(CASE WHEN fusion_score IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*) AS cov "
+            "FROM daily_price WHERE trade_date=?", (latest,)).fetchone()["cov"]
+    if cov is None or cov < 0.5:
+        return fail(f"最新交易日({latest})策略分未重算（覆盖率 {cov:.0%}），请先执行同步或全量重算", 409)
+
+    task_id = submit_task(run_recalc_incremental, [latest.replace("-", "")],
+                          verbose=False, progress_callback=True, kind="recalc",
+                          target=target)
+    return ok({"task_id": task_id, "target": target, "scan_date": latest,
+              "message": f"增量重算任务已启动（scan_date={latest}，target={target}）"})
+
+
 @sync_bp.route("/status/<task_id>", methods=["GET"])
 def task_status(task_id):
     """查询任务状态"""
