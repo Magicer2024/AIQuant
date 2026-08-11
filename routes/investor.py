@@ -176,6 +176,9 @@ def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_
         }
 
     # 1. 评分门槛（30/50 ≈ 百分制 60）
+    #    2026-08 回测验证：fs≥30 + 低扩展度组合 +0.468%/笔（正期望，累计+146%），
+    #    22~30 区间 -0.149%/笔（负期望）→ 可建仓门槛保持 30，不随门控(22)下调，
+    #    否则把历史负期望的票标成「可建仓」误导用户。
     if score < 30:
         return {
             "level": "wait",
@@ -741,7 +744,11 @@ def today_recommendations():
         groups = {}
         for hz in horizons:
             items = [_build_item(dict(r)) for r in rows_by_horizon[hz]]
-            items = [it for it in items if it["signal"]["level"] != "avoid"]
+            # 剔除「避免」（盈亏比<1.5 一票否决）与「止盈离场」（gap guard：
+            # 现价相对信号价已超止盈价，错过买点不追）——sell 级不占推荐名额，
+            # 由后续候选顶上或数量减少（宁缺毋滥）。
+            items = [it for it in items
+                     if it["signal"]["level"] not in ("avoid", "sell")]
             if hz == "short":
                 cap = _REGIME_CAP.get(market_regime, SHORT_CAP)
                 items = items[:cap] if cap > 0 else []
