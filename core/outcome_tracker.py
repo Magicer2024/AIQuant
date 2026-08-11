@@ -28,8 +28,9 @@ def insert_new_outcomes(days_back: int = 60):
     """将 stock_signal 中近 N 天、尚未录入 recommend_outcome 的推荐写入。
 
     口径：与「今日推荐」面板一致（config/personal_config.py 的主板过滤 +
-    每周期 fusion_score 前 4 名才是真正的「推荐」（与 /api/investor/today 的 short 上限对齐，
-    2026-08 短线 8→4 改造）。
+    每周期 fusion_score 前 4 名才是真正的「推荐」；short 组额外与今日推荐同口径：
+    fusion≥short_conf_gate 门控 + 低扩展度(pct_above_ma20 升序)取前 4 +
+    止盈离场(gap guard sell)剔除——2026-08 短线 8→4 改造）。
 
     2026-08-09 修复：原 INSERT OR IGNORE 按 (code, scan_date, horizon) 去重追加，
     多次重算（v1/v2 引擎、不同过滤链）的 Top8 并集在表内累积，short 组每天
@@ -42,41 +43,69 @@ def insert_new_outcomes(days_back: int = 60):
     if MAIN_BOARD_ONLY:
         board_filter = "".join(
             f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    # short 组与今日推荐同口径：fusion 门控 + 低扩展度排序 + 止盈离场剔除
+    from config.strategy_params import get_param, T1_GAP_GUARD
+    gate = float(get_param("short_conf_gate"))
+    gap_enabled = bool(T1_GAP_GUARD.get("enabled", True))
+    # gap guard 止盈离场（与 routes/investor.py 同口径：现价相对信号价涨幅
+    # > 止盈涨幅 = 已错过买点不追，不导入复盘追踪）；T1_GAP_GUARD 关闭时恒 0
+    if gap_enabled:
+        gap_sql = ("CASE WHEN lp.close IS NOT NULL AND lp.close > 0 "
+                   "AND s.buy_price > 0 "
+                   "AND s.take_profit IS NOT NULL AND s.take_profit > s.buy_price "
+                   "AND (lp.close / s.buy_price - 1) > (s.take_profit / s.buy_price - 1) "
+                   "THEN 1 ELSE 0 END")
+    else:
+        gap_sql = "0"
+    horizon_specs = {
+        "short": ("COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+                   " AND s.fusion_score >= ?", [gate]),
+        "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
+        "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
+    }
     with get_conn() as conn:
-        # 先清窗口内旧记录（Top8 随引擎/过滤链变化而更新，旧记录一并移除）
+        # 先清窗口内旧记录（随引擎/过滤链/推荐口径变化而更新，旧记录一并移除）
         conn.execute(
             "DELETE FROM recommend_outcome WHERE scan_date >= date('now', ?)",
             (cutoff,))
-        conn.execute(f"""
-            INSERT OR IGNORE INTO recommend_outcome
-                (code, scan_date, horizon, strategy, entry_price,
-                 stop_loss, take_profit, fusion_score)
-            SELECT code, scan_date, horizon, strategy, buy_price,
-                   stop_loss, take_profit, fusion_score
-            FROM (
-                SELECT
-                    s.code,
-                    s.scan_date,
-                    COALESCE(s.horizon, 'short') AS horizon,
-                    s.strategy,
-                    s.buy_price,
-                    s.stop_loss,
-                    s.take_profit,
-                    s.fusion_score,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
-                        ORDER BY COALESCE(s.fusion_score, 0) DESC
-                    ) AS rn
-                FROM stock_signal s
-                WHERE s.scan_date >= date('now', ?)
-                  AND s.buy_price IS NOT NULL
-                  AND s.buy_price > 0
-                  AND s.name NOT LIKE '%ST%'
-                  AND s.name NOT LIKE '%退%'
-                  {board_filter}
-            )
-            WHERE rn <= 4
-        """, (cutoff,))
+        for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
+            # 注意：gap_sell 过滤必须发生在 ROW_NUMBER 之前（先剔除止盈离场、
+            # 再按扩展度取前 4），与今日推荐「先剔 sell 再截取」语义一致，
+            # 被剔除的票不占排名、由后续候选替补。
+            conn.execute(f"""
+                INSERT OR IGNORE INTO recommend_outcome
+                    (code, scan_date, horizon, strategy, entry_price,
+                     stop_loss, take_profit, fusion_score)
+                SELECT code, scan_date, horizon, strategy, buy_price,
+                       stop_loss, take_profit, fusion_score
+                FROM (
+                    SELECT
+                        s.code,
+                        s.scan_date,
+                        COALESCE(s.horizon, 'short') AS horizon,
+                        s.strategy,
+                        s.buy_price,
+                        s.stop_loss,
+                        s.take_profit,
+                        s.fusion_score,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
+                            ORDER BY {order_clause}
+                        ) AS rn
+                    FROM stock_signal s
+                    LEFT JOIN latest_price lp ON lp.code = s.code
+                    WHERE s.scan_date >= date('now', ?)
+                      AND COALESCE(s.horizon, 'short') = ?
+                      AND s.buy_price IS NOT NULL
+                      AND s.buy_price > 0
+                      AND s.name NOT LIKE '%ST%'
+                      AND s.name NOT LIKE '%退%'
+                      AND ({gap_sql}) = 0
+                      {board_filter}
+                      {gate_sql_cond}
+                )
+                WHERE rn <= 4
+            """, (cutoff, hz, *gate_params))
 
 
 # ─────────────────────────────────────────────
