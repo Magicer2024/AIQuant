@@ -966,6 +966,32 @@ def exit_advice():
         for r in results:
             groups.setdefault(r["horizon"], []).append(r)
 
+        # ── 按周期统计持有收益（clear=已实现出场收益，hold=当前浮盈）──
+        def _seg_pnl(r):
+            v = (r.get("detail") or {}).get("current_pnl_pct")
+            return v if isinstance(v, (int, float)) else None
+
+        perf = {}
+        for hz in ("short", "mid", "long"):
+            segs = [r for r in results if r["horizon"] == hz]
+            clears = [r for r in segs if r["status"] == "clear"]
+            holds = [r for r in segs if r["status"] == "hold"]
+            cp = [v for v in (_seg_pnl(r) for r in clears) if v is not None]
+            hp = [v for v in (_seg_pnl(r) for r in holds) if v is not None]
+            allp = cp + hp
+            perf[hz] = {
+                "segments": len(segs),
+                "hold": len(holds),
+                "clear": len(clears),
+                # 已清仓：平均出场收益与胜率（相对建仓价，含止损/止盈/到期出场）
+                "clear_mean_pct": round(sum(cp) / len(cp), 2) if cp else None,
+                "clear_win_rate": round(sum(1 for v in cp if v > 0) / len(cp) * 100, 1) if cp else None,
+                # 持仓中：当前平均浮盈
+                "hold_mean_pct": round(sum(hp) / len(hp), 2) if hp else None,
+                # 综合（清仓+持仓）：全部段平均持有收益
+                "all_mean_pct": round(sum(allp) / len(allp), 2) if allp else None,
+            }
+
         return ok(_sanitize({
             "items": results,
             "groups": groups,
@@ -974,6 +1000,7 @@ def exit_advice():
             "summary": {
                 "hold": sum(1 for r in results if r["status"] == "hold"),
                 "clear": sum(1 for r in results if r["status"] == "clear"),
+                "perf": perf,
             },
         }))
     except Exception as e:
