@@ -180,6 +180,22 @@ EXTENSION_FILTER = {
 }
 
 
+# ── RSI 甜区过滤器（2026-08 短线优化 P3-1）────────────────────────
+# 背景：tools/backtest_enhance.py E3 回测——在 v2 候选上叠加 RSI(14)∈[40,65]，
+# 剔除弱势(<40，阴跌途中假回踩)与超买(>65，接反弹高位)后：T+1 胜率 48.6%→49.3%、
+# 均值 +0.100%→+0.123%、各周期均值全升（+0.7pp 胜率），是唯一稳赚的入场过滤器
+# （E1 市场宽度跳过被证伪、E2 缩量回踩仅边际）。
+# ⚠ 口径：RSI 用简单 rolling(14) 均值（与 tools/backtest_enhance.py::rsi14 /
+#    tools/backtest_exit.py::rsi14 完全一致），勿改用 strategy/indicators.calc_rsi
+#    的 ewm 口径——回测/推荐口径分裂会污染 diag 复验。
+# enabled=False 即一键降级，不影响任何既有链路。
+RSI_SWEET_SPOT = {
+    "enabled": True,
+    "lo": 40.0,   # RSI(14) 下限：剔除弱势（<40 的阴跌途中假回踩）
+    "hi": 65.0,   # RSI(14) 上限：剔除超买（>65 的接反弹高位）
+}
+
+
 # ── T+1 跳空/追高守卫（2026-08-06 并入突破确认买点）────────────────
 # 背景：用户反馈"短线推荐买进去容易挂高"。信号 T 日盘后生成、T+1 开盘买入；
 # 若 T+1 最新价相对信号日收盘（buy_price）已累计涨 > max_gap_pct（跳空高开+日内续涨），
@@ -265,12 +281,17 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
     "short_stop_loss": {
         # 2026-08 短线优化 P0-1.1：-6% → -5%（盈亏比 8/5=1.6 稳过 avoid 一票否决；
         # -3.5% 贴近 _calc_signal 提示的"易被洗出"阈值，故取 -5%）
-        "default": -0.05, "type": float,
+        # 2026-08 P3-2：-5% → -6%（回测 tools/backtest_exit.py：止损放宽后止损触发率
+        # 21%→16%、胜率 47.3%→47.7%，均值基本持平 +0.201%→+0.189%；-6% 仍在
+        # _calc_signal"易被洗出"阈值之上，配合 +10% 止盈盈亏比 10/6=1.67 更优）
+        "default": -0.06, "type": float,
         "min": -0.12, "max": -0.02, "label": "短线止损比例",
     },
     "short_take_profit": {
         # 快进快出：+20% → +8%（诊断 T+3/T+5 转负，edge 只在 T+1 附近）
-        "default": 0.08, "type": float,
+        # 2026-08 P3-2：+8% → +10%（回测：止盈放宽后触发止盈占比 12.3%→7.7%，
+        # 让利润奔跑吃 T+3/T+5 正漂移；胜率再 +0.4pp，均值基本持平）
+        "default": 0.10, "type": float,
         "min": 0.04, "max": 0.40, "label": "短线止盈比例",
     },
     "short_max_hold_days": {

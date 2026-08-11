@@ -15,7 +15,7 @@ import math
 import pandas as pd
 
 from config.strategy_params import (SHORT_TREND_GATE, QUALITY_FILTER, CHASE_FILTER,
-                                    EXTENSION_FILTER, get_param)
+                                    EXTENSION_FILTER, RSI_SWEET_SPOT, get_param)
 
 # ST/退市名称关键词（大写归一后匹配，"退" 为中文不受 upper 影响）
 _ST_KEYWORDS = ("ST", "退")
@@ -230,4 +230,52 @@ def extension_filter_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
 def extension_filter(df: pd.DataFrame, cfg: dict = None) -> bool:
     """最新交易日是否通过扩展度否决（True=可推荐）"""
     s = extension_filter_series(df, cfg)
+    return bool(s.iloc[-1]) if len(s) else False
+
+
+# ─────────────────────────────────────────────
+# RSI 甜区过滤器：RSI(14) ∈ [lo, hi]（剔除弱势/超买）
+# ─────────────────────────────────────────────
+
+def rsi_sweet_spot_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
+    """
+    逐日 RSI 甜区布尔序列（True=可推荐）。
+
+    仅当当日 RSI(14) 落在 [lo, hi]（默认 [40,65]）内才可推荐：
+      - RSI < lo（弱势）：阴跌途中假回踩，容易接飞刀；
+      - RSI > hi（超买）：接反弹高位，均值回归尾部。
+    背景（tools/backtest_enhance.py E3）：v2 候选叠加该过滤后 T+1 胜率 48.6%→49.3%、
+    均值 +0.100%→+0.123%，是唯一稳赚的入场过滤器（E1 宽度跳过证伪、E2 缩量回踩仅边际）。
+
+    与 chase/extension 同约定：仅支持单股票 df；禁用时全 True。
+    RSI 样本不足（前 13 日 NaN）→ False（宁可漏杀不可误杀，与回测掩码口径一致：
+    backtest_enhance/backtest_exit 中 NaN 参与比较同为 False）。
+
+    ⚠ 算法与 tools/backtest_enhance.py::rsi14 / tools/backtest_exit.py::rsi14 完全一致
+    （简单 rolling(14) 均值，非 Wilder ewm），勿改用 strategy/indicators.calc_rsi，
+    否则回测/推荐口径分裂会污染 diag 复验。
+    """
+    cfg = cfg or RSI_SWEET_SPOT
+    if df is None or len(df) == 0:
+        return pd.Series(dtype=bool)
+    if not cfg.get("enabled", True):
+        return pd.Series(True, index=df.index)
+
+    lo = float(cfg.get("lo", 40.0))
+    hi = float(cfg.get("hi", 65.0))
+    close = df["close"].astype(float)
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss.clip(lower=1e-9)
+    rsi = 100.0 - 100.0 / (1.0 + rs)
+    ok = (rsi >= lo) & (rsi <= hi)
+    return ok.reindex(df.index).fillna(False).astype(bool)
+
+
+def rsi_sweet_spot(df: pd.DataFrame, cfg: dict = None) -> bool:
+    """最新交易日是否通过 RSI 甜区（True=可推荐）"""
+    s = rsi_sweet_spot_series(df, cfg)
     return bool(s.iloc[-1]) if len(s) else False

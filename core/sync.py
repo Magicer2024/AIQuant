@@ -128,6 +128,7 @@ from strategy.next_day_momentum import scan_next_day_momentum
 from strategy.rec_filters import (
     trend_gate_series, quality_series, passes_quality,
     chase_filter_series, chase_filter, extension_filter_series,
+    rsi_sweet_spot_series,
 )
 from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM
 
@@ -1314,6 +1315,10 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
         # 追高否决：连板天数>=3 / 涨停打开 / 近3日急涨>=25% → 不推荐
         # （2026-08-05：修复"连板启动期被闸门挡、涨停打开放量日反而高分进推荐"问题）
         chase = chase_filter_series(df).reindex(fused.index).fillna(False)
+        # RSI 甜区：RSI(14)∈[lo,hi] 剔除弱势(<lo)与超买(>hi)（2026-08 P3-1，
+        # backtest_enhance E3 回测：T+1 胜率 48.6%→49.3%、均值 +0.100%→+0.123%；
+        # enabled=False 一键降级；口径与 tools/backtest_*.py rsi14 一致）
+        rsi_ok = rsi_sweet_spot_series(df).reindex(fused.index).fillna(False)
         # 扩展度否决：价 > MA20×1.12 硬否决（2026-08 P0-1.2，diag 实测高位组
         # T+1 OC 48.3%/+0.04% 劣于低位组 52.2%/+0.28%；enabled=False 一键降级）
         ext = extension_filter_series(df).reindex(fused.index).fillna(False)
@@ -1330,6 +1335,8 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             if not bool(gate.get(row.name, False)):
                 continue
             if not bool(chase.get(row.name, False)):
+                continue
+            if not bool(rsi_ok.get(row.name, False)):
                 continue
             if not bool(ext.get(row.name, False)):
                 continue
@@ -2004,11 +2011,21 @@ def _recompute_strategy_scores_for_updated(trade_dates: list[str], verbose: bool
         pass
 
     # 取所有需要重算的 code
+    # trade_dates 可能是 '%Y%m%d'（daily_sync_by_date 默认构造）或 '%Y-%m-%d'，
+    # 表内 trade_date 为 '%Y-%m-%d'——不归一会导致 IN 查询 0 行、策略分重算被静默跳过
+    # （2026-08-10 修复：此前 08-10 写入 4496 行后 short 信号全灭即此根因）。
+    tds = []
+    for _t in trade_dates:
+        _t = str(_t)
+        if len(_t) >= 8 and _t[:8].isdigit():
+            tds.append(f"{_t[:4]}-{_t[4:6]}-{_t[6:8]}")
+        else:
+            tds.append(_t[:10])
     with get_conn() as conn:
-        placeholders = ",".join("?" * len(trade_dates))
+        placeholders = ",".join("?" * len(tds))
         rows = conn.execute(
             f"SELECT DISTINCT code FROM daily_price WHERE trade_date IN ({placeholders})",
-            trade_dates,
+            tds,
         ).fetchall()
     codes = [r["code"] for r in rows]
     if not codes:
