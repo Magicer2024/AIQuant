@@ -250,13 +250,21 @@ def fetch_klines_by_date(trade_date: str,
     ttl = cfg.get("default_ttl", 86400)  # 日线数据，1 天 1 拉
 
     def _do_fetch():
-        # 优先：东财（之前直连的尝试在 30 天后会被反爬挡）
+        # 优先：东财（拆段拉全 A，秒级直连）
         try:
             df = _fetch_klines_by_date_em(trade_date, progress_cb)
             if not df.empty:
                 return df
         except Exception as e:
-            logger.info("东财 hist 失败，降级 akshare: %s", e)
+            logger.info("东财 hist 失败: %s", e)
+        # 2026-08-10：东财 push2his/push2 全线 404/断连、AkShare 内部东财接口
+        # 同步失效，新增腾讯 qt.gtimg.cn 批量源（500 只/次 ≈1s，全 A ≈9 次 ≈10s）
+        try:
+            df = _fetch_klines_by_date_tencent(trade_date, progress_cb)
+            if not df.empty:
+                return df
+        except Exception as e:
+            logger.info("腾讯备用失败，降级 akshare: %s", e)
         return _fetch_klines_by_date_akshare(trade_date, progress_cb)
 
     params = {"trade_date": trade_date, "page_size": page_size}
@@ -337,6 +345,86 @@ def _fetch_klines_by_date_em(trade_date: str, progress_cb=None) -> pd.DataFrame:
     if not df.empty:
         df = df[df["code"].astype(str).str.match(r"^\d{6}$", na=False)].copy()
     return df.reset_index(drop=True)
+
+
+def _fetch_klines_by_date_tencent(trade_date: str, progress_cb=None) -> pd.DataFrame:
+    """
+    腾讯 qt.gtimg.cn 备用：按代码批量拉当日快照（一次 ~500 只，全 A ≈9 次请求 ≈10s）
+
+    背景（2026-08-10）：东财 push2his/push2 全线 404/断连、AkShare 内部东财接口
+    同步失效，用腾讯批量源顶替"1 次 HTTP 拉全 A"的快速路径。
+    实测批量上限：500 只/次正常，1000+ 只被拒（返回 0 条）。
+
+    字段与东财直连兼容（_batch_write_daily_price 直接消费）：
+      volume 单位=手（写库时 *100 转股，与东财一致）
+      amount 由腾讯"万元"×10000 转元
+      turnover 取字段[38]（与东财 f8 同口径）
+      trade_date 取字段[30] 时间戳前 8 位；停牌/无效代码腾讯返回空行 → 跳过，
+      非目标交易日（停牌返回旧日期）→ 跳过。
+    """
+    trade_date = trade_date.replace("-", "")
+    try:
+        from core.db import get_all_stocks
+        stocks_df = get_all_stocks()
+    except Exception as e:
+        logger.warning("腾讯备用: 取股票列表失败: %s", e)
+        return pd.DataFrame()
+    if stocks_df is None or stocks_df.empty:
+        return pd.DataFrame()
+    codes = stocks_df["code"].astype(str).tolist()
+
+    def _symbol(c: str) -> str:
+        # 本库股票池仅沪(6/5 开头)与深(0/3 开头)，无北交所（8/4/920）
+        return ("sh" if c[0] in "56" else "sz") + c
+
+    all_rows: list[dict] = []
+    total = len(codes)
+    BATCH = 500
+    for i in range(0, total, BATCH):
+        chunk = codes[i:i + BATCH]
+        syms = ",".join(_symbol(c) for c in chunk)
+        try:
+            resp = _SESSION.get(f"https://qt.gtimg.cn/q={syms}", timeout=15)
+            resp.encoding = "gbk"   # 腾讯返回 GBK，不显式设置会乱码
+        except Exception as e:
+            logger.warning("腾讯备用 第 %d 批失败: %s", i // BATCH + 1, e)
+            continue
+        for line in resp.text.strip().split(";"):
+            if "=" not in line:
+                continue
+            body = line.split("=", 1)[1].strip().strip('"')
+            if not body:
+                continue  # 停牌/无效代码
+            f = body.split("~")
+            if len(f) < 40:
+                continue
+            ts = f[30]
+            if len(ts) < 8 or ts[:8] != trade_date:
+                continue  # 非目标交易日数据（停牌返回旧日期）
+            code = f[2]
+            if not code.isdigit() or len(code) != 6:
+                continue
+            close = _to_float(f[3])
+            if close <= 0:
+                continue
+            all_rows.append({
+                "code":       code,
+                "name":       f[1],
+                "trade_date": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}",
+                "open":       _to_float(f[5]),
+                "close":      close,
+                "high":       _to_float(f[33]),
+                "low":        _to_float(f[34]),
+                "volume":     _to_float(f[6]),              # 手（写库时 *100 转股）
+                "amount":     _to_float(f[37]) * 10000.0,   # 万元 → 元
+                "pct_change": _to_float(f[32]),
+                "change":     _to_float(f[31]),
+                "turnover":   _to_float(f[38]),
+                "pe":         None,
+            })
+        if progress_cb:
+            progress_cb(len(all_rows), total)
+    return pd.DataFrame(all_rows).reset_index(drop=True)
 
 
 def _fetch_klines_by_date_akshare(trade_date: str, progress_cb=None) -> pd.DataFrame:

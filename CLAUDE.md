@@ -30,7 +30,7 @@ python tests/test_em_speed.py     # 手动跑东财接口测速
 
 | Dir | Purpose |
 |-----|---------|
-| `core/` | SQLite 数据层：`db.py`（~12 表，get_conn 上下文管理器）、`sync.py`（行情同步主流程）、`data_fetcher.py`（baostock/AkShare 多源）、`data_cleaner.py`（L1-L6 脏数据过滤）、`em_realtime.py`/`em_kline.py`（东财接口）、`em_guard.py`（缓存+频控+配额三道防线）、`task_queue.py` |
+| `core/` | SQLite 数据层：`db.py`（~12 表，get_conn 上下文管理器）、`sync.py`（行情同步主流程）、`data_fetcher.py`（baostock/AkShare 多源）、`data_cleaner.py`（L1-L6 脏数据过滤）、`em_realtime.py`/`em_kline.py`（东财接口，`fetch_klines_by_date` 降级链：东财直连 → 腾讯 qt.gtimg.cn 批量（500 只/次，全 A ≈10s）→ AkShare）、`em_guard.py`（缓存+频控+配额三道防线）、`task_queue.py` |
 | `core/repository/` | 11 个领域 Repository（stock/price/signal/position/trade/sync/margin/north/futures/lhb/mgmt），db.py 中旧函数正逐步迁移至此 |
 | `strategy/` | `scorer.py`（回测/因子流式行情加载工具，仅供 backtest 复用）、`factor_lib.py`、`indicators.py`、`rules_store.py`（含 derive_horizon）、`strategies.py`（短线 5 信号融合）、`mid_long.py`（中线综合/长线趋势扫描）、`strategy.py`（中线综合评分库，被 mid_long 调用）、`intent/parser.py`（自然语言选股） |
 | `backtest/` | `engine.py`（可视化回测引擎，BacktestParams 含 risk_free_rate）、`rule_engine.py`（策略规则一键回测+沪深300基准）、`service.py`（任务封装，rule_id 分发 + fitness 回写）、`conditions.py`（条件构建）、`nl_parser.py`（自然语言策略→条件+参数，LLM 主路径+本地正则兑底） |
