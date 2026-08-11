@@ -455,9 +455,12 @@ def today_recommendations():
             if hz == "short":
                 gate_sql = " AND s.fusion_score >= ?"
                 gate_params = [gate]
-            # short 组换选择标准（S4 口径）：融合分排序无选择力（rank1-4 最差），
-            # 门控后按低扩展度（距 MA20 最近）优先 = 未来空间最大；mid/long 保持融合分排序
+            # short 组选择标准（S4 口径 + 龙虎榜动量优先）：
+            #   1) 隔日动量信号（独立正期望 alpha 线，fusion≥30 天然过门控）优先占名额；
+            #   2) 低扩展度抄底信号补足剩余名额（融合分排序无选择力，按距 MA20 最近优先）。
+            # mid/long 保持融合分排序
             order_clause = (
+                "CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
                 "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC"
                 if hz == "short" else "COALESCE(s.fusion_score, 0) DESC")
             rows_by_horizon[hz] = conn.execute(

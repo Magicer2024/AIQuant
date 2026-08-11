@@ -58,8 +58,10 @@ def insert_new_outcomes(days_back: int = 60):
     else:
         gap_sql = "0"
     horizon_specs = {
-        "short": ("COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
-                   " AND s.fusion_score >= ?", [gate]),
+        # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐同口径）
+        "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
+                  "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+                  " AND s.fusion_score >= ?", [gate]),
         "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
         "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
     }
