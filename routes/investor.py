@@ -543,21 +543,29 @@ def today_recommendations():
             # 散户可读的中文评分理由（基于 5 个子分，量纲 0~10，见 strategies.py 的 0-3→0-10 映射）
             reasons = []
             weaknesses = []
-            sub_scores = [
-                ("vol_score",     "成交量放大",   "量能不足，未出现放量突破"),
-                ("ma_score",      "均线多头",     "均线未形成多头排列"),
-                ("diverge_score", "量价背离修复", "量价结构未现背离修复信号"),
-                ("bottom_score",  "底部企稳",     "底部形态尚未确认"),
-                ("whale_score",   "主力资金流入", "未检测到主力资金明显流入"),
-            ]
-            for key, good_label, weak_label in sub_scores:
-                val = d.get(key) or 0
-                if val >= 6:      # 6/10 ≈ 百分制 60，认定为亮点
-                    reasons.append(good_label)
-                elif val > 0:
-                    weaknesses.append(weak_label)
-            if not weaknesses:
-                weaknesses.append("综合评分达标，暂无明显短板")
+            is_momo = (d.get("strategy") == "隔日动量")
+            if is_momo:
+                # 龙虎榜动量：子分（vol/ma/bottom 等）恒 0，形态类理由会误导（"量能不足/
+                # 均线未多头"与动量信号无关）。改用龙虎榜净买理由 + T+1 快进快出提示。
+                reasons.append("龙虎榜主力净买，隔日动量信号（正期望在次日）")
+                weaknesses.append(
+                    "T+1 快进快出：次日开盘买入、次日收盘了结，不恋战（持仓超 1 天易回吐）")
+            else:
+                sub_scores = [
+                    ("vol_score",     "成交量放大",   "量能不足，未出现放量突破"),
+                    ("ma_score",      "均线多头",     "均线未形成多头排列"),
+                    ("diverge_score", "量价背离修复", "量价结构未现背离修复信号"),
+                    ("bottom_score",  "底部企稳",     "底部形态尚未确认"),
+                    ("whale_score",   "主力资金流入", "未检测到主力资金明显流入"),
+                ]
+                for key, good_label, weak_label in sub_scores:
+                    val = d.get(key) or 0
+                    if val >= 6:      # 6/10 ≈ 百分制 60，认定为亮点
+                        reasons.append(good_label)
+                    elif val > 0:
+                        weaknesses.append(weak_label)
+                if not weaknesses:
+                    weaknesses.append("综合评分达标，暂无明显短板")
 
             # 触发策略列表（解析 trigger_list 字符串）
             triggers = []
