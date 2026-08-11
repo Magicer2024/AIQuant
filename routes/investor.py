@@ -23,7 +23,7 @@ from config.personal_config import (
     POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT,
     MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
 )
-from config.strategy_params import T1_GAP_GUARD
+from config.strategy_params import T1_GAP_GUARD, get_param
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -397,12 +397,14 @@ def today_recommendations():
     """今日推荐（action plan）—— 按 short/mid/long 三周期分组
 
     来源：stock_signal 表（融合分高 + 已有明确买入价/止损/止盈）
-    分组：每组按 fusion_score DESC 各取 limit 条（默认每组 8）
+    分组：mid/long 按 fusion_score DESC；short 先 fusion≥门控、再按低扩展度排序，
+          各取 limit 条（默认 4）；regime 天花板 cold→0 / cool→2 / normal→4
     支持 ?date=2026-06-18 查看指定日期；?horizon=short 只看单组
     返回 {date, market_regime, count, groups:{short,mid,long}, items(=short 组别名，兼容旧前端)}
     """
-    limit = request.args.get("limit", default=8, type=int)
-    limit = max(1, min(limit, 30))
+    limit = request.args.get("limit", default=4, type=int)
+    limit = max(0, min(limit, 8))   # 允许 0：cold 大盘由 regime 设为 0
+    SHORT_CAP = limit               # short 组上限（mid/long 仍用原 limit 逻辑）
     horizon_filter = (request.args.get("horizon") or "").strip().lower() or None
     if horizon_filter not in (None, "short", "mid", "long"):
         return fail("horizon 仅支持 short / mid / long")
@@ -438,11 +440,23 @@ def today_recommendations():
             board_filter = "".join(
                 f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
         rows_by_horizon: dict = {}
+        # 短线置信门控（S4 口径，默认 22，可 DB 覆盖）：低于门控不推荐，弱日自然出 0
+        gate = get_param("short_conf_gate")
         for hz in horizons:
             pe_filter = ""
             if hz == "long" and has_pe_ttm:
                 # 长线降级财务过滤：pe_ttm 有值时剔除亏损股（<=0）与明显高估股（>100）
                 pe_filter = " AND (i.pe_ttm IS NULL OR (i.pe_ttm > 0 AND i.pe_ttm <= 100))"
+            gate_sql = ""
+            gate_params: list = []
+            if hz == "short":
+                gate_sql = " AND s.fusion_score >= ?"
+                gate_params = [gate]
+            # short 组换选择标准（S4 口径）：融合分排序无选择力（rank1-4 最差），
+            # 门控后按低扩展度（距 MA20 最近）优先 = 未来空间最大；mid/long 保持融合分排序
+            order_clause = (
+                "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC"
+                if hz == "short" else "COALESCE(s.fusion_score, 0) DESC")
             rows_by_horizon[hz] = conn.execute(
                 f"""
                 SELECT
@@ -453,6 +467,7 @@ def today_recommendations():
                     s.trigger_list, s.scan_date, s.trade_date,
                     COALESCE(s.horizon, 'short') AS horizon,
                     s.strategy,
+                    COALESCE(s.pct_above_ma20, 0) AS pct_above_ma20,
                     lp.close  AS latest_close,
                     lp.pct_change AS latest_pct,
                     lp.high   AS latest_high,
@@ -468,11 +483,12 @@ def today_recommendations():
                   AND s.name NOT LIKE '%退%'
                   {board_filter}
                   {pe_filter}
-                ORDER BY COALESCE(s.fusion_score, 0) DESC
+                  {gate_sql}
+                ORDER BY {order_clause}
                 LIMIT ?
                 """,
                 # 多取 3 倍候选：盈亏比不达标的「避免」级会被剔除，由替补顶上
-                (scan_date, hz, limit * 3),
+                (scan_date, hz, *gate_params, limit * 3),
             ).fetchall()
         all_rows = [r for hz in horizons for r in rows_by_horizon[hz]]
 
@@ -693,6 +709,7 @@ def today_recommendations():
                 "horizon": d.get("horizon") or "short",
                 "strategy": d.get("strategy"),
                 "fusion_score": round(d.get("fusion_score") or 0, 1),
+                "pct_above_ma20": d.get("pct_above_ma20"),
                 "latest_close": d.get("latest_close"),
                 "latest_pct": d.get("latest_pct"),
                 "action_plan": {
@@ -716,24 +733,21 @@ def today_recommendations():
             }
 
         # 构建候选卡片后剔除「避免」级（盈亏比 <1.5 一票否决），再截取前 limit 条
-        # 稳健 regime 门控（2026-08 P1-2.3）：cold/cool 时短线推荐数量减半，
-        # 避免最差 cohort 满仓推荐（diag 最差 cohort T+1 胜率仅 ~40%）；cold 时
-        # short 组已过 _calc_signal 的票也整组强制降级 wait（保守，可等回暖再上）。
+        # 短线数量天花板（docs/short-reco-dynamic-count-plan.md A）：
+        #   cold→0 / cool→2 / neutral/warm/hot→SHORT_CAP(4)，满足「最多4/最少0」；
+        #   cold 整组出 0（不再 buy→wait 降级——本来就 0 条）。
+        _REGIME_CAP = {"cold": 0, "cool": 2, "neutral": SHORT_CAP,
+                       "warm": SHORT_CAP, "hot": SHORT_CAP, "unknown": SHORT_CAP}
         groups = {}
         for hz in horizons:
             items = [_build_item(dict(r)) for r in rows_by_horizon[hz]]
             items = [it for it in items if it["signal"]["level"] != "avoid"]
-            if hz == "short" and market_regime in ("cold", "cool"):
-                items = items[:max(1, limit // 2)]
-                if market_regime == "cold":
-                    for it in items:
-                        if it["signal"]["level"] == "buy":
-                            it["signal"]["level"] = "wait"
-                            it["signal"]["emoji"] = "🔴"
-                            it["signal"]["label"] = "大盘冷，观望"
-                            it["signal"]["reasons"] = it["signal"].get("reasons", []) + [
-                                "大盘 cold，短线整组降级观望"]
-            groups[hz] = items[:limit]
+            if hz == "short":
+                cap = _REGIME_CAP.get(market_regime, SHORT_CAP)
+                items = items[:cap] if cap > 0 else []
+                groups[hz] = items
+            else:
+                groups[hz] = items[:limit]   # mid/long 保持原逻辑
         for hz in ("short", "mid", "long"):
             groups.setdefault(hz, [])
         short_items = groups.get("short", [])
@@ -763,7 +777,7 @@ def exit_advice():
     """出场跟踪：对 2026-07-20 起推荐的出场状态（按 short/mid/long 三周期分组）
 
     GET /api/investor/exit_advice
-    口径：与「今日推荐」对齐（每组每天 fusion_score 前 8）；起始日为 EXIT_TRACK_START_DATE，
+    口径：与「今日推荐」对齐（每组每天 fusion_score 前 4）；起始日为 EXIT_TRACK_START_DATE，
          此前的推荐放弃，无结束时间限制——未卖出的持续跟踪直到卖出；
          同一股票同一周期在交易日上连续推荐时合并为一条：推荐日取最新一次、
          持仓天数从最早一次累计（买入价=最早推荐日次日开盘价）、止损/止盈按最新一次判定；
@@ -783,7 +797,7 @@ def exit_advice():
                 f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
 
         with _get_conn() as conn:
-            # 近 N 个交易日的推荐记录（与「今日推荐」对齐：每天每周期 fusion_score 前 8）
+            # 近 N 个交易日的推荐记录（与「今日推荐」对齐：每天每周期 fusion_score 前 4）
             signals = conn.execute(f"""
                 SELECT code, name, scan_date, buy_price,
                        stop_loss, take_profit, fusion_score, horizon, strategy
@@ -804,7 +818,7 @@ def exit_advice():
                       AND s.name NOT LIKE '%退%'
                       {board_filter}
                 )
-                WHERE rn <= 8
+                WHERE rn <= 4
                 ORDER BY scan_date DESC
             """, (EXIT_TRACK_START_DATE,)).fetchall()
 
@@ -1577,7 +1591,7 @@ def recommendations_history():
                   AND COALESCE(s.horizon, 'short') = 'short'
                   {board_filter}
             )
-            WHERE rn <= 8
+            WHERE rn <= 4
             ORDER BY code ASC, scan_date ASC
             """,
             (f"-{days} days",),

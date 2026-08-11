@@ -302,6 +302,13 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         "default": 3, "type": int,
         "min": 1, "max": 10, "label": "短线最大持仓天数",
     },
+    "short_conf_gate": {
+        # 短线置信门控（S2/S4 口径，docs/short-reco-dynamic-count-plan.md）：
+        # fusion_score 低于此值的 short 信号不推荐（宁缺毋滥，弱日自然出 0）。
+        # 2020+ 全市场回测：Top4 不加门控 +10.5% → 加门控22 +14.1%（组合口径）。
+        "default": 22.0, "type": float,
+        "min": 0.0, "max": 50.0, "label": "短线置信门控(融合分下限)",
+    },
 }
 
 # 覆盖值内存缓存：recalc 全市场逐股调用 get_param，不能每次都查库

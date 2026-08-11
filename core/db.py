@@ -616,6 +616,8 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
         _safe_add_column(conn, "strategy_rules", "horizon", "TEXT")
         _safe_add_column(conn, "stock_signal", "horizon", "TEXT DEFAULT 'short'")
         _safe_add_column(conn, "stock_signal", "strategy", "TEXT")
+        # 短线扩展度列：价相对 MA20 偏离（short 组低扩展度排序用，S4 口径）
+        _safe_add_column(conn, "stock_signal", "pct_above_ma20", "REAL")
         # 一次性回填 strategy_rules.horizon（按持仓期推导：<=10 短期，<=60 中期，否则长期）
         try:
             conn.execute("""

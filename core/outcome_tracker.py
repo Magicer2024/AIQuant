@@ -28,7 +28,8 @@ def insert_new_outcomes(days_back: int = 60):
     """将 stock_signal 中近 N 天、尚未录入 recommend_outcome 的推荐写入。
 
     口径：与「今日推荐」面板一致（config/personal_config.py 的主板过滤 +
-    每周期 fusion_score 前 8 名才是真正的「推荐」）。
+    每周期 fusion_score 前 4 名才是真正的「推荐」（与 /api/investor/today 的 short 上限对齐，
+    2026-08 短线 8→4 改造）。
 
     2026-08-09 修复：原 INSERT OR IGNORE 按 (code, scan_date, horizon) 去重追加，
     多次重算（v1/v2 引擎、不同过滤链）的 Top8 并集在表内累积，short 组每天
@@ -74,7 +75,7 @@ def insert_new_outcomes(days_back: int = 60):
                   AND s.name NOT LIKE '%退%'
                   {board_filter}
             )
-            WHERE rn <= 8
+            WHERE rn <= 4
         """, (cutoff,))
 
 

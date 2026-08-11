@@ -1177,13 +1177,13 @@ _SIGNAL_INSERT_SQL = """
        vol_score, ma_score, diverge_score, bottom_score, whale_score,
        trigger_list, buy_price, stop_loss, take_profit,
        buy_volume, buy_money, sent_wechat, created_at,
-       horizon, strategy)
+       horizon, strategy, pct_above_ma20)
     VALUES
       (:scan_date, :trade_date, :code, :name, :price, :fusion_score,
        :vol_score, :ma_score, :diverge_score, :bottom_score, :whale_score,
        :trigger_list, :buy_price, :stop_loss, :take_profit,
        :buy_volume, :buy_money, :sent_wechat, :created_at,
-       :horizon, :strategy)
+       :horizon, :strategy, :pct_above_ma20)
 """
 
 
@@ -1226,6 +1226,19 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
     records = []
     START_CAPITAL_SC = 10000
     POSITION_PER_SC = 0.5
+
+    # 短线扩展度（低扩展度排序用，S4 口径）：价相对 MA20 偏离
+    _ma20 = df["close"].astype(float).rolling(20).mean()
+
+    def _pct_above_ma20(ts, close_val):
+        """返回价相对 MA20 偏离（小数，0.03 = 高于 MA20 3%）；MA20 缺失按 0"""
+        try:
+            m = float(_ma20.get(ts, float("nan")))
+        except Exception:
+            m = float("nan")
+        if m and m > 0 and close_val:
+            return round(float(close_val) / m - 1.0, 4)
+        return 0.0
 
     if SHORT_ENGINE == "oversold_rebound":
         # ── 短线：超跌反弹v3 + 趋势闸门 + 质量过滤 ──
@@ -1274,6 +1287,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "horizon": "short",
                 "strategy": "超跌反弹v3",
+                "pct_above_ma20": _pct_above_ma20(dt, price),
             })
     else:
         # ── 短线：纯抄底融合分（SHORT_ENGINE="pure_bottom" 一键回退）──
@@ -1378,6 +1392,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "horizon": "short",
                 "strategy": "短线融合",
+                "pct_above_ma20": _pct_above_ma20(row.name, price),
             })
 
     # ── 中/长线信号：只评估最新交易日，命中各写一条 ──
@@ -1414,6 +1429,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "horizon": sig["horizon"],
             "strategy": sig["strategy"],
+            "pct_above_ma20": _pct_above_ma20(pd.Timestamp(sig["trade_date"]), sig["buy_price"]),
         })
 
     # ── 隔日动量（龙虎榜净买占比）：仅最新交易日、可交易子集 ──
@@ -1444,6 +1460,8 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "horizon": nd_sig["horizon"],
                 "strategy": nd_sig["strategy"],
+                "pct_above_ma20": _pct_above_ma20(
+                    pd.Timestamp(nd_sig["trade_date"]), nd_sig["buy_price"]),
             })
 
     return records
@@ -1615,6 +1633,20 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
     if verbose:
         print(f"  增量信号重算完成: {len(sig_records)} 条"
               f"（{scan_date}，{n_success}/{len(codes)} 只，耗时 {elapsed:.1f}s）")
+
+    # ── 复盘闭环：导入新推荐 + 评估收益（best-effort）──
+    # 与全量路径 _run_post_recalc_hooks 的 outcome 部分同口径；不在此跑规则扫描/
+    # 策略优化器，保持增量路径轻量（每日盘后调度高频触发）。
+    try:
+        from core.outcome_tracker import insert_new_outcomes, evaluate_outcomes
+        insert_new_outcomes()
+        _m = evaluate_outcomes()
+        if verbose:
+            print(f"  复盘追踪: 推荐导入完成 / 收益评估更新 {_m} 条")
+    except Exception as e:
+        if verbose:
+            print(f"  [WARN] 复盘追踪失败（不影响主流程）: {e}")
+
     return {"scan_date": scan_date, "signals": len(sig_records),
             "codes": n_success, "elapsed_s": round(elapsed, 1), "target": target}
 

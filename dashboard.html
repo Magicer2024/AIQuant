@@ -1150,7 +1150,7 @@ async function loadTodayPicks(isFallback) {
     const dateEl = document.getElementById('pickDate');
     const dateParam = dateEl && dateEl.value ? '&date=' + dateEl.value : '';
     try {
-        const resp = await RequestManager.fetch('today', API + '/investor/today?limit=8' + dateParam);
+        const resp = await RequestManager.fetch('today', API + '/investor/today?limit=4' + dateParam);
         const data = (resp && resp.data) || {};
         const serverDate = data.date;
         // 自动回填日期（首次加载时）
