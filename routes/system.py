@@ -36,7 +36,9 @@ def system_status():
         },
         "scheduler": {
             "enabled": SCHEDULER_RUNNING["enabled"],
-        }
+        },
+        # 最近一次同步后对持仓的移动止盈出场诊断（每日 18:00 定时 / 手动同步后生成）
+        "holdings_advice": SYNC_STATUS.get("holdings_advice"),
     })
 
 

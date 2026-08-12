@@ -1603,6 +1603,22 @@ function renderPositionAdvice(advice) {
 async function loadMyPositions() {
     const box = document.getElementById('myPositions');
     try {
+        // 同步后持仓建议横幅（每日 18:00 定时 / 手动同步后由后端对持仓跑移动止盈诊断生成）
+        let adviceBanner = '';
+        try {
+            const sr = await RequestManager.fetch('sys-status', API + '/system/status');
+            const ha = (sr.data || {}).holdings_advice;
+            if (ha && ha.count > 0 && ha.items && ha.items.length) {
+                const rows = ha.items.map(i =>
+                    `<div style="font-size:11px;color:var(--text-secondary);line-height:1.7">
+                        ${i.status==='clear'?'🔴':(i.status==='reduce'?'🟠':'🟢')}
+                        <b>${i.code}</b> ${i.name||''} — ${i.reason||''}
+                     </div>`).join('');
+                adviceBanner = `<div style="margin-bottom:10px;padding:8px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:8px;background:rgba(255,255,255,0.02)">
+                    <div style="font-size:12px;font-weight:600;margin-bottom:4px">📋 同步后持仓建议（${ha.summary||''}）</div>${rows}</div>`;
+            }
+        } catch(e) { /* 横幅获取失败不影响持仓列表 */ }
+
         const resp = await RequestManager.fetch('positions', API + '/investor/positions');
         const d = resp.data || {};
         const positions = d.positions || [];
@@ -1616,7 +1632,7 @@ async function loadMyPositions() {
         const pnlCls = summary.total_pnl >= 0 ? 'idx-up' : 'idx-down';
         const sign = summary.total_pnl >= 0 ? '+' : '';
 
-        let html = `<div class="position-summary">
+        let html = adviceBanner + `<div class="position-summary">
             <div class="ps-cell"><div class="ps-lbl">总市值</div><div class="ps-val">¥${summary.total_value.toLocaleString()}</div></div>
             <div class="ps-cell"><div class="ps-lbl">总成本</div><div class="ps-val">¥${summary.total_cost.toLocaleString()}</div></div>
             <div class="ps-cell"><div class="ps-lbl">浮动盈亏</div><div class="ps-val ${pnlCls}">${sign}¥${summary.total_pnl.toLocaleString()} (${sign}${summary.total_pnl_pct}%)</div></div>
@@ -2055,6 +2071,9 @@ function showAddPositionDialog() {
             <div style="margin-bottom:10px"><label>成本价 <input type="number" id="addPosCost" placeholder="29.72" step="0.01" style="width:120px"></label></div>
             <div style="margin-bottom:10px"><label>止损价 <input type="number" id="addPosStop" placeholder="27.94" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:11px">可留空</span></div>
             <div style="margin-bottom:10px"><label>止盈价 <input type="number" id="addPosTP" placeholder="35.66" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:11px">可留空</span></div>
+            <div style="margin-bottom:10px"><label>持仓周期 <select id="addPosHorizon" style="width:120px">
+                <option value="short">短线</option><option value="mid">中线</option><option value="long">长线</option>
+            </select></label> <span style="color:var(--text-muted);font-size:11px">决定出场诊断参数</span></div>
             <div style="margin-bottom:10px"><label>备注 <input type="text" id="addPosNote" placeholder="例如：超跌反弹" style="width:240px"></label></div>
             <div style="margin-top:16px"><button class="btn btn-primary" onclick="submitAddPosition()">保存</button></div>
         </div>
@@ -2069,6 +2088,7 @@ async function submitAddPosition() {
         cost_price: parseFloat(document.getElementById('addPosCost').value) || 0,
         stop_loss: parseFloat(document.getElementById('addPosStop').value) || null,
         take_profit: parseFloat(document.getElementById('addPosTP').value) || null,
+        horizon: document.getElementById('addPosHorizon').value,
         note: document.getElementById('addPosNote').value.trim(),
     };
     if (!body.code || !body.shares || !body.cost_price) {

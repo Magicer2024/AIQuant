@@ -17,6 +17,84 @@ _MAX_RETRIES = 3
 _BASE_RETRY_DELAY = 30 * 60  # 30 分钟
 
 
+def _evaluate_holdings():
+    """同步完成后对当前持仓跑移动止盈出场诊断，结果写入 SYNC_STATUS 供前端展示。
+
+    与持仓页 _diagnose_position 同口径（evaluate_exit + TUNABLE_PARAMS 短线参数）：
+    硬止损 / 浮盈达启动线后移动止盈（回撤清仓）/ 破MA5 / 超期兜底。
+    """
+    try:
+        from strategy.exit_advisor import evaluate_exit, get_max_hold
+        from config.strategy_params import get_param
+        from core.db import get_conn
+        import pandas as pd
+
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT code, name, cost_price, opened_at, COALESCE(horizon, 'short') AS horizon "
+                "FROM personal_position WHERE status='holding' AND opened_at IS NOT NULL").fetchall()
+        if not rows:
+            SYNC_STATUS["holdings_advice"] = {
+                "count": 0, "summary": "无持仓", "items": []}
+            return
+
+        items = []
+        for r in rows:
+            try:
+                with get_conn() as conn:
+                    price_rows = conn.execute(
+                        "SELECT trade_date, close, high, low FROM daily_price "
+                        "WHERE code = ? ORDER BY trade_date ASC", (r["code"],)).fetchall()
+                if not price_rows:
+                    continue
+                df = pd.DataFrame([dict(x) for x in price_rows]).set_index("trade_date")
+                kwargs = {}
+                hz = r["horizon"]
+                if hz == "short":
+                    # 短线：移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
+                    kwargs = dict(
+                        stop_loss_pct=get_param("short_stop_loss"),
+                        partial_tp=get_param("short_take_profit"),
+                        trailing_pct=get_param("short_trailing_pct"),
+                        max_hold_days=int(get_param("short_max_hold_days")),
+                    )
+                else:
+                    # 中/长线：各自移动止盈启动线/回撤 + 各自周期上限（mid=60 / long=不限）。
+                    # 止损用 evaluate_exit 默认 -6%（与 short_stop_loss 同值，无独立参数）
+                    kwargs = dict(
+                        partial_tp=get_param("mid_partial_tp") if hz == "mid" else get_param("long_partial_tp"),
+                        trailing_pct=get_param("mid_trailing_pct") if hz == "mid" else get_param("long_trailing_pct"),
+                        max_hold_days=get_max_hold(hz),
+                    )
+                adv = evaluate_exit(
+                    entry_price=float(r["cost_price"]),
+                    entry_date=str(r["opened_at"])[:10],
+                    df=df,
+                    **kwargs,
+                )
+            except Exception:
+                continue
+            items.append({
+                "code": r["code"],
+                "name": r["name"],
+                "status": adv["status"],   # hold / reduce / clear
+                "reason": adv["reason"],
+                "detail": adv.get("detail") or {},
+            })
+
+        clears = [i for i in items if i["status"] == "clear"]
+        reduces = [i for i in items if i["status"] == "reduce"]
+        holds = [i for i in items if i["status"] == "hold"]
+        SYNC_STATUS["holdings_advice"] = {
+            "count": len(items),
+            "summary": f"持仓 {len(items)} 只：清仓 {len(clears)} · 减仓 {len(reduces)} · 持有 {len(holds)}",
+            "items": items,
+        }
+    except Exception as e:
+        SYNC_STATUS["holdings_advice"] = {
+            "count": 0, "summary": f"持仓诊断失败: {e}", "items": []}
+
+
 def run_sync_blocking():
     """Background thread: 盘后全市场同步
 
@@ -77,6 +155,13 @@ def run_sync_blocking():
 
         SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _retry_count = 0  # 成功后重置重试计数
+
+        # 同步完成后对当前持仓跑移动止盈出场诊断（每日推荐持仓操作）
+        try:
+            _evaluate_holdings()
+        except Exception:
+            import traceback
+            traceback.print_exc()
     except Exception as e:
         SYNC_STATUS["last_result"] = f"错误: {e}"
         # 指数退避重试

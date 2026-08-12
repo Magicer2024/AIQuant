@@ -185,6 +185,13 @@ def start_fast_sync():
             _sync_progress["message"] = (
                 f"按日批量同步完成 [target={target}]: {result['rows']} 行, 耗时 {result['elapsed_s']}s"
             )
+            # 同步完成后对当前持仓跑移动止盈出场诊断（与每日 18:00 定时同步同口径）
+            try:
+                from scheduler.runner import _evaluate_holdings
+                _evaluate_holdings()
+            except Exception:
+                import traceback
+                traceback.print_exc()
         except Exception as e:
             _sync_progress["last_error"] = str(e)
             _sync_progress["message"] = f"按日同步失败: {e}"

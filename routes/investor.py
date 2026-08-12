@@ -289,6 +289,21 @@ def _ensure_personal_tables():
 EXIT_TRACK_START_DATE = "2026-07-20"
 
 
+def _exit_trailing_params(horizon: str) -> tuple:
+    """按周期取移动止盈参数 (trailing_pct, partial_tp)。
+
+    2026-08 落地：short/mid/long 三周期全部启用移动止盈（让利润奔跑，不轻易止盈）。
+    partial_tp（启动线）覆盖 stock_signal.take_profit 作启动线——long 自带的
+    take_profit=现价×1.5（+50% 目标价）不宜直接当启动线；short 用 short_take_profit。
+    参数均来自 TUNABLE_PARAMS（DB 可覆盖，60s TTL）。
+    """
+    if horizon == "short":
+        return get_param("short_trailing_pct"), get_param("short_take_profit")
+    if horizon == "mid":
+        return get_param("mid_trailing_pct"), get_param("mid_partial_tp")
+    return get_param("long_trailing_pct"), get_param("long_partial_tp")
+
+
 def _split_continuous_segments(seg: list, df, horizon: str) -> list:
     """将一段连续推荐按卖出断点拆分。
 
@@ -312,7 +327,8 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
     entry_price = float(_f["open"]) if _f["open"] else (
         float(_f["close"]) or first["buy_price"])
 
-    # 用段内最新止损/止盈评估整段持仓
+    # 用段内最新止损/止盈评估整段持仓（三周期均开启移动止盈，与出场跟踪同口径）
+    _trail, _partial = _exit_trailing_params(horizon)
     adv = evaluate_exit_by_prices(
         entry_price=entry_price,
         entry_date=first["scan_date"],
@@ -320,6 +336,8 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
         stop_loss=last["stop_loss"],
         take_profit=last["take_profit"],
         max_hold_days=get_max_hold(horizon),
+        trailing_pct=_trail,
+        partial_tp=_partial,
     )
     exit_date = (adv.get("detail") or {}).get("exit_date")
     if not exit_date:
@@ -382,13 +400,18 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
                 float(first["close"]) or d.get("buy_price") or 0)
         if not entry_price or entry_price <= 0:
             return None
+        hz = d.get("horizon") or "short"
+        _trail, _partial = _exit_trailing_params(hz)
         advice = evaluate_exit_by_prices(
             entry_price=entry_price,
             entry_date=str(scan_date)[:10],
             df=df,
             stop_loss=d.get("stop_loss"),
             take_profit=d.get("take_profit"),
-            max_hold_days=get_max_hold(d.get("horizon") or "short"),
+            max_hold_days=get_max_hold(hz),
+            # 三周期均开启移动止盈：浮盈达启动线后不再达价即卖，回撤才清仓
+            trailing_pct=_trail,
+            partial_tp=_partial,
         )
         return advice
     except Exception:
@@ -929,7 +952,8 @@ def exit_advice():
                     float(_f["close"]) or first["buy_price"])
                 entry_date = str(after.index[0])[:10]
 
-                # 持仓从最早推荐日起算；止损/止盈按最新推荐判定
+                # 持仓从最早推荐日起算；止损/止盈按最新推荐判定（三周期均开启移动止盈）
+                _trail, _partial = _exit_trailing_params(horizon)
                 advice = evaluate_exit_by_prices(
                     entry_price=entry_price,
                     entry_date=first["scan_date"],
@@ -937,6 +961,8 @@ def exit_advice():
                     stop_loss=last["stop_loss"],
                     take_profit=last["take_profit"],
                     max_hold_days=get_max_hold(horizon),
+                    trailing_pct=_trail,
+                    partial_tp=_partial,
                 )
                 detail = dict(advice.get("detail") or {})
                 if entry_date is not None:
@@ -1133,15 +1159,18 @@ def market_overview():
 # ─────────────────────────────────────────────
 # 3. 个人持仓：CRUD + 实时盈亏
 # ─────────────────────────────────────────────
-def _diagnose_position(conn, code: str, cost_price, opened_at) -> Optional[dict]:
+def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "short") -> Optional[dict]:
     """对单条持仓运行 exit_advisor 出场诊断，返回 {status, reason, detail} 或 None。
 
     entry_price 取持仓成本价，entry_date 取建仓日；异常时降级为 None，不影响持仓主列表。
+    三周期统一移动止盈（2026-08 落地）：short 用 short_take_profit 启动线+回撤8%，
+    mid 用 +10% 启动线+回撤10%（持仓上限 60），long 用 +20% 启动线+回撤15%（不限仓期），
+    参数均来自 TUNABLE_PARAMS（DB 可覆盖）。
     """
     if not code or not cost_price or cost_price <= 0 or not opened_at:
         return None
     try:
-        from strategy.exit_advisor import evaluate_exit
+        from strategy.exit_advisor import evaluate_exit, get_max_hold
         import pandas as pd
         rows = conn.execute(
             """
@@ -1154,10 +1183,30 @@ def _diagnose_position(conn, code: str, cost_price, opened_at) -> Optional[dict]
         if not rows:
             return None
         df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
+        kwargs = {}
+        hz = horizon or "short"
+        if hz == "short":
+            # 短线：移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
+            kwargs = dict(
+                stop_loss_pct=get_param("short_stop_loss"),
+                partial_tp=get_param("short_take_profit"),
+                trailing_pct=get_param("short_trailing_pct"),
+                max_hold_days=int(get_param("short_max_hold_days")),
+            )
+        else:
+            # 中/长线：各自移动止盈启动线/回撤（与推荐出场同口径）+ 各自周期上限。
+            # 止损不传 → evaluate_exit 默认 DEFAULT_STOP_LOSS=-6%，与 short_stop_loss 同值
+            # （无独立 mid/long 止损参数；持仓诊断按成本价比例止损，与信号自带 ATR 止损价脱钩）
+            kwargs = dict(
+                partial_tp=get_param("mid_partial_tp") if hz == "mid" else get_param("long_partial_tp"),
+                trailing_pct=get_param("mid_trailing_pct") if hz == "mid" else get_param("long_trailing_pct"),
+                max_hold_days=get_max_hold(hz),
+            )
         return evaluate_exit(
             entry_price=float(cost_price),
             entry_date=str(opened_at)[:10],
             df=df,
+            **kwargs,
         )
     except Exception:
         return None
@@ -1198,16 +1247,17 @@ def list_positions():
             elif d.get("latest_close") and tp and d["latest_close"] >= tp:
                 warning = "已触及止盈价，可考虑止盈"
 
-            # 出场诊断（清仓/减仓/持有）——复用推荐票出场纪律
+            # 出场诊断（清仓/减仓/持有）——复用推荐票出场纪律（按持仓周期选参数）
             advice = _diagnose_position(conn, d.get("code"),
-                                        d.get("cost_price"), d.get("opened_at"))
+                                        d.get("cost_price"), d.get("opened_at"),
+                                        d.get("horizon") or "short")
 
             total_cost += cost
             total_value += value
             items.append({
                 **{k: d.get(k) for k in (
                     "id", "code", "name", "shares", "cost_price",
-                    "stop_loss", "take_profit", "note", "opened_at"
+                    "stop_loss", "take_profit", "note", "opened_at", "horizon"
                 )},
                 "latest_close": d.get("latest_close"),
                 "latest_pct": d.get("latest_pct"),
@@ -1241,7 +1291,7 @@ def list_positions():
 
 @investor_bp.route("/positions", methods=["POST"])
 def add_position():
-    """新增持仓 {code, shares, cost_price, stop_loss?, take_profit?, note?}"""
+    """新增持仓 {code, shares, cost_price, stop_loss?, take_profit?, note?, horizon?}"""
     body = request.get_json(silent=True) or {}
     code = (body.get("code") or "").strip()
     if not code or not body.get("shares") or not body.get("cost_price"):
@@ -1255,6 +1305,10 @@ def add_position():
 
     stop_loss = body.get("stop_loss")
     take_profit = body.get("take_profit")
+    # 持仓周期（决定出场诊断参数：短线=移动止盈 TUNABLE_PARAMS，中/长线=默认纪律）
+    horizon = (body.get("horizon") or "short").strip().lower()
+    if horizon not in ("short", "mid", "long"):
+        return fail("horizon 仅支持 short / mid / long", 400)
 
     with get_conn() as conn:
         # 自动补全股票名
@@ -1268,13 +1322,13 @@ def add_position():
             """
             INSERT OR REPLACE INTO personal_position
               (code, name, shares, cost_price, stop_loss, take_profit,
-               note, opened_at, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'holding', ?, ?)
+               note, opened_at, status, created_at, updated_at, horizon)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'holding', ?, ?, ?)
             """,
             (code, name, shares, cost_price,
              float(stop_loss) if stop_loss else None,
              float(take_profit) if take_profit else None,
-             body.get("note"), now, now, now),
+             body.get("note"), now, now, now, horizon),
         )
         new_id = conn.execute(
             "SELECT id FROM personal_position WHERE code=? AND opened_at=?",

@@ -39,7 +39,7 @@ def evaluate_exit(
     stop_loss_pct: float = DEFAULT_STOP_LOSS,
     partial_tp: float = DEFAULT_PARTIAL_TP,
     trailing_pct: float = DEFAULT_TRAILING_PCT,
-    max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
+    max_hold_days: Optional[int] = DEFAULT_MAX_HOLD_DAYS,
 ) -> dict:
     """评估单只推荐票的出场状态。
 
@@ -50,7 +50,7 @@ def evaluate_exit(
         stop_loss_pct: 硬止损比例（负数，如 -0.06）
         partial_tp: 浮盈减半阈值（如 0.10 = +10%）
         trailing_pct: 移动止盈回撤比例（如 0.10 = 10%）
-        max_hold_days: 最长持仓交易日数
+        max_hold_days: 最长持仓交易日数，None 表示不限（长线趋势跟踪不设上限）
 
     Returns:
         dict: {
@@ -117,6 +117,10 @@ def evaluate_exit(
     partial_done = max_pnl >= partial_tp
 
     # ── 按优先级逐条判定 ──
+    # ⚠ 口径差异：本函数是「快照式」判定（只看当前收盘价相对当前移动止盈线的回撤），
+    # 而 evaluate_exit_by_prices 是「逐日模拟」（按历史逐日收盘是否曾破线）。
+    # 曾破线又反弹的持仓：本函数会继续 hold（漏报），evaluate_exit_by_prices 会 clear。
+    # 持仓页/同步横幅用本函数（快照，简单直观），推荐出场跟踪用前者（逐日，严谨）。
 
     # 1. 硬止损
     if "low" in after.columns:
@@ -140,6 +144,9 @@ def evaluate_exit(
 
     # 2. 浮盈减半（当前浮盈 >= partial_tp 且之前未触发过）
     # 注意：这里判断的是"当前是否应该减仓"，如果当前浮盈首次达到阈值
+    # 说明：+10% 减半与移动止盈（规则3）组合 = 先锁定一半利润、剩余仓位让利润
+    # 奔跑；与 evaluate_exit_by_prices 的「+10% 启动线后移动止盈清仓」是两种
+    # 可选执行方式，持仓页/同步横幅用前者（分批），推荐出场跟踪用后者（整仓）。
     if current_pnl >= partial_tp and not _was_partial_done_before(after, entry_price, partial_tp):
         return {
             "status": "reduce",
@@ -169,8 +176,8 @@ def evaluate_exit(
                               stop_price, trailing_stop_price),
         }
 
-    # 5. 超期
-    if hold_days >= max_hold_days:
+    # 5. 超期（max_hold_days=None 表示不限持仓期，长线趋势跟踪不设上限）
+    if max_hold_days is not None and hold_days >= max_hold_days:
         return {
             "status": "clear",
             "reason": f"持仓 {hold_days} 个交易日，超过最长持仓期 {max_hold_days} 天",
@@ -195,10 +202,11 @@ def evaluate_exit(
     }
 
 
-# 三周期持仓上限：短线 3 个交易日（v2 引擎 edge 在 T+3/T+5，见
-# TUNABLE_PARAMS.short_max_hold_days 注释；2026-08-09 由 1→3）
+# 三周期持仓上限：短线 5 个交易日（2026-08 移动止盈落地：T5 回测最优 trail8_T5
+# -0.072% vs trail8_T3 -0.142%，给移动止盈奔跑空间；TUNABLE_PARAMS.short_max_hold_days
+# 是线上真实值（DB 可覆盖），此常量仅作 get_param 读取失败的兜底，保持同值避免漂移）
 # / 中线 60 个交易日 / 长线不限（None）
-HORIZON_MAX_HOLD: dict = {"short": 3, "mid": 60, "long": None}
+HORIZON_MAX_HOLD: dict = {"short": 5, "mid": 60, "long": None}
 
 
 def get_max_hold(horizon: str) -> Optional[int]:
@@ -221,6 +229,8 @@ def evaluate_exit_by_prices(
     stop_loss: Optional[float] = None,
     take_profit: Optional[float] = None,
     max_hold_days: Optional[int] = None,
+    trailing_pct: Optional[float] = None,
+    partial_tp: Optional[float] = None,
 ) -> dict:
     """按推荐自带止损/止盈价逐日模拟出场状态（出场跟踪新口径）。
 
@@ -229,9 +239,12 @@ def evaluate_exit_by_prices(
       - A股 T+1：买入日当天不可卖出（只计入持仓），从买入日后第 2 个交易日开始逐日检查
       - 卖出判定统一用当日收盘价（不做盘中插针触发），触发按收盘价卖出：
           1. 收盘价跌破止损价       → 卖出（止损）
-          2. 收盘价达到止盈价       → 卖出（止盈）
-          3. 持仓达到 max_hold_days → 卖出（到期；None 表示不限）
-          4. 均未触发               → 持续持有
+          2. 移动止盈（trailing_pct 开启时）：浮盈首次达到启动线后，
+             移动止盈线 = 持仓最高价 × (1 - trailing_pct)，收盘跌破该线 → 卖出（移动止盈）。
+             不再"达止盈价即卖"——让利润奔跑，好票不轻易下车。
+          3. 固定止盈（trailing_pct=None 时）：收盘价达到止盈价 → 卖出（止盈）
+          4. 持仓达到 max_hold_days → 卖出（到期；None 表示不限）
+          5. 均未触发               → 持续持有
       - 已卖出返回 status='clear'，仍持有返回 status='hold'
 
     Args:
@@ -239,8 +252,15 @@ def evaluate_exit_by_prices(
         entry_date: 推荐日期 (YYYY-MM-DD)
         df: 该股日线 DataFrame（含 open/high/low/close 列，日期索引升序）
         stop_loss: 绝对止损价（推荐自带），None 则不检查
-        take_profit: 绝对止盈价（推荐自带），None 则不检查
+        take_profit: 止盈价。trailing_pct=None 时为固定止盈价（推荐自带）；
+                     trailing_pct 开启时为移动止盈启动线的兜底（partial_tp 未提供时）
         max_hold_days: 最长持仓交易日数，None 表示不限
+        trailing_pct: 移动止盈回撤比例（小数，如 0.08 = 自高点回撤 8% 清仓）；
+                      None 表示使用固定止盈（旧行为）
+        partial_tp: 移动止盈启动线，双语义：<1 视为浮盈比例（如 0.10 = 浮盈 +10% 启用），
+                    >=1 视为绝对价（如 110.0）。覆盖 take_profit 作为启动线，用于 mid/long：
+                    其 stock_signal.take_profit 可能是 ATR 止盈价或长线 +50% 目标价，
+                    不适合直接当启动线。None 时回退 take_profit。
 
     Returns:
         dict: {
@@ -249,7 +269,8 @@ def evaluate_exit_by_prices(
             detail: {
                 entry_date, entry_price, hold_days, current_price,
                 current_pnl_pct, highest_since_entry, stop_loss, take_profit,
-                exit_date, exit_price, exit_reason
+                exit_date, exit_price, exit_reason,
+                trailing_pct, partial_done, trailing_stop_price, partial_tp
             }
         }
     """
@@ -267,6 +288,19 @@ def evaluate_exit_by_prices(
         take_profit = None
     if stop_loss is not None and take_profit is not None and take_profit <= stop_loss:
         take_profit = None
+    # 防御：非法移动止盈回撤比例（<1% 或 >=100%）视为未开启，回落固定止盈
+    if trailing_pct is not None and not (0.01 <= trailing_pct < 1.0):
+        trailing_pct = None
+    # 防御：非法启动线（<=0）视为未设置，回退用 take_profit 作启动线
+    if partial_tp is not None and partial_tp <= 0:
+        partial_tp = None
+    # 启动线双语义：partial_tp < 1 视为浮盈比例（换算为绝对价，如 0.10 → entry×1.10），
+    # >= 1 视为绝对价（如 110.0）。调用方 _exit_trailing_params 传比例
+    # （short 0.10 / mid 0.10 / long 0.20）；take_profit 恒为绝对价（信号自带），作兜底启动线。
+    if partial_tp is not None and partial_tp < 1.0:
+        partial_tp = entry_price * (1 + partial_tp)
+    launch_line = partial_tp if partial_tp is not None else take_profit
+    trailing_enabled = trailing_pct is not None and launch_line is not None
 
     # 推荐日之后的交易日（含买入日）
     if hasattr(df.index, 'strftime'):
@@ -294,9 +328,11 @@ def evaluate_exit_by_prices(
         }
 
     # ── 逐日模拟（A股 T+1：买入日当天不可卖出，最早次日才能出场） ──
-    # 卖出判定统一用当日收盘价（不做盘中插针触发）：收盘价破止损/达止盈按收盘价卖出
+    # 卖出判定统一用当日收盘价（不做盘中插针触发）：收盘价破止损/破移动止盈线/达止盈价按收盘价卖出
     hold_days = 0
     highest = None
+    partial_done = False          # 浮盈（按持仓期最高价计）是否已首次达到移动止盈启动线
+    trailing_stop = None          # 当前移动止盈线（只上移不下移）
     exit_date = None
     exit_price = None
     exit_reason = None
@@ -307,6 +343,18 @@ def evaluate_exit_by_prices(
             highest = high
         hold_days = i
 
+        # 移动止盈状态机：持仓期最高价首次达到启动线 → 启用移动止盈；
+        # 移动止盈线随最高价上移，永不下移（锁住已实现的浮盈）。
+        # ⚠ 设计取舍：启动线用盘中 high 触发（避免插针假启动）、卖出用收盘价判定
+        # （不插针，与全项目出场口径一致）；极端情形（买入日盘中冲过启动线又回落）
+        # 会早启动移动止盈，属可接受的保守方向。
+        if trailing_enabled and not partial_done and highest >= launch_line:
+            partial_done = True
+        if trailing_enabled and partial_done:
+            line = highest * (1 - trailing_pct)
+            if trailing_stop is None or line > trailing_stop:
+                trailing_stop = line
+
         # T+1 规则：买入日（第 1 个交易日）当天买入不可卖出，只累计持仓，不检查出场
         if i == 1:
             continue
@@ -315,11 +363,17 @@ def evaluate_exit_by_prices(
         if stop_loss is not None and close <= stop_loss:
             exit_date, exit_price, exit_reason = ts, close, f"收盘跌破止损价 {stop_loss:.2f}"
             break
-        # 2. 止盈：收盘价达到止盈价 → 按收盘价卖出
-        if take_profit is not None and close >= take_profit:
+        # 2. 移动止盈：浮盈已过启动线且收盘跌破移动止盈线 → 按收盘价卖出（让利润奔跑后锁利）
+        if trailing_enabled and partial_done and trailing_stop is not None and close <= trailing_stop:
+            dd = (highest - close) / highest * 100
+            exit_date, exit_price, exit_reason = ts, close, (
+                f"移动止盈：自高点 {highest:.2f} 回撤 {dd:.1f}% ≥ {trailing_pct * 100:.0f}%，清仓")
+            break
+        # 3. 固定止盈（未开启移动止盈时）：收盘价达到止盈价 → 按收盘价卖出
+        if not trailing_enabled and take_profit is not None and close >= take_profit:
             exit_date, exit_price, exit_reason = ts, close, f"收盘达到止盈价 {take_profit:.2f}"
             break
-        # 3. 超期（到期卖出）
+        # 4. 超期（到期卖出）
         if max_hold_days is not None and i >= max_hold_days:
             exit_date, exit_price, exit_reason = ts, close, f"持仓满 {i} 个交易日，到期卖出"
             break
@@ -341,6 +395,10 @@ def evaluate_exit_by_prices(
                 "highest_since_entry": round(highest, 2) if highest else None,
                 "stop_loss": round(stop_loss, 2) if stop_loss else None,
                 "take_profit": round(take_profit, 2) if take_profit else None,
+                "partial_tp": round(partial_tp, 2) if partial_tp else None,
+                "trailing_pct": trailing_pct if trailing_enabled else None,
+                "partial_done": bool(partial_done) if trailing_enabled else None,
+                "trailing_stop_price": round(trailing_stop, 2) if trailing_stop else None,
                 "exit_date": exit_date_str,
                 "exit_price": round(current_price, 2),
                 "exit_reason": exit_reason,
@@ -366,6 +424,10 @@ def evaluate_exit_by_prices(
             "highest_since_entry": round(highest, 2) if highest else None,
             "stop_loss": round(stop_loss, 2) if stop_loss else None,
             "take_profit": round(take_profit, 2) if take_profit else None,
+            "partial_tp": round(partial_tp, 2) if partial_tp else None,
+            "trailing_pct": trailing_pct if trailing_enabled else None,
+            "partial_done": bool(partial_done) if trailing_enabled else None,
+            "trailing_stop_price": round(trailing_stop, 2) if trailing_stop else None,
             "exit_date": None,
             "exit_price": None,
             "exit_reason": None,
