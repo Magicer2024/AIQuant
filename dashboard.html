@@ -29,7 +29,7 @@
     <button class="nav-item active" onclick="switchTab('home')">首页</button>
     <button class="nav-item" onclick="switchTab('screen')">指标筛选</button>
     <button class="nav-item" onclick="switchTab('backtest')">智能回测</button>
-
+    <button class="nav-item" onclick="switchTab('maintenance')">系统维护</button>
 </nav>
 
 <main class="content" id="content"></main>
@@ -287,6 +287,7 @@ async function loadTab(tab) {
         if (tab === 'home') await loadHomeTab(c);
         else if (tab === 'screen') await loadScreenTab(c);
         else if (tab === 'backtest') await loadBacktestTab(c);
+        else if (tab === 'maintenance') await loadMaintenanceTab(c);
 
         c.firstElementChild?.classList.add('tab-content');
     } catch(e) {
@@ -3732,6 +3733,254 @@ function btCloseHistory() {
 function btLoadFromHistory(taskId) {
     btCloseHistory();
     showToast('历史回测已持久化到 backtest_results 表，详情请查询数据库', 'info');
+}
+
+// ─── Tab 4: 系统维护 ───
+async function loadMaintenanceTab(c) {
+    c.innerHTML = `
+    <div class="page" style="padding:20px;">
+        <h2 style="margin:0 0 20px 0; font-size:18px;">系统维护 · 数据修正</h2>
+        
+        <!-- 全量历史修正 -->
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:20px; margin-bottom:20px;">
+            <h3 style="margin:0 0 16px 0; font-size:16px; color:var(--text-primary);">全量历史数据修正</h3>
+            <p style="color:var(--text-secondary); font-size:13px; margin:0 0 16px 0; line-height:1.6;">
+                从东方财富和腾讯双数据源重新拉取全量历史K线数据，检测并修正确价格偏差、成交量缺失、OHLC关系错误等问题。<br>
+                <strong>耗时预估：</strong>5000+只股票约需2-3小时（2线程，1秒限速）。
+            </p>
+            
+            <!-- 定时任务设置 -->
+            <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:16px; margin-bottom:16px;">
+                <h4 style="margin:0 0 12px 0; font-size:14px; color:var(--text-primary);">定时任务设置</h4>
+                <div style="display:flex; gap:12px; align-items:end; margin-bottom:12px;">
+                    <div style="flex:1;">
+                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">执行时间</label>
+                        <input type="time" id="scheduleTime" value="10:00" 
+                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                    </div>
+                    <div style="flex:1;">
+                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">数据源</label>
+                        <select id="scheduleSource" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                            <option value="tx">腾讯 (稳定)</option>
+                            <option value="em">东方财富 (偶尔反爬)</option>
+                            <option value="both">双源交叉验证</option>
+                        </select>
+                    </div>
+                    <div style="flex:1;">
+                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">并发数</label>
+                        <input type="number" id="scheduleThreads" value="2" min="1" max="8"
+                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                    </div>
+                    <div style="flex:1;">
+                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">限速 (秒/只)</label>
+                        <input type="number" id="scheduleRateLimit" value="1.0" min="0.1" max="10" step="0.1"
+                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button onclick="scheduleFixHistory()" style="flex:1; padding:10px; background:var(--accent); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
+                        添加定时任务
+                    </button>
+                    <button onclick="loadScheduledJobs()" style="padding:10px 16px; background:var(--bg-base); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
+                        刷新列表
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 定时任务列表 -->
+            <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:16px; margin-bottom:16px;">
+                <h4 style="margin:0 0 12px 0; font-size:14px; color:var(--text-primary);">定时任务列表</h4>
+                <div id="scheduledJobsList" style="color:var(--text-secondary); font-size:13px;">加载中...</div>
+            </div>
+            
+            <!-- 立即执行 -->
+            <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:16px;">
+                <h4 style="margin:0 0 12px 0; font-size:14px; color:var(--text-primary);">立即执行</h4>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px 0;">
+                    立即启动全量历史修正（不定时），任务将在后台运行。
+                </p>
+                <div style="display:flex; gap:8px;">
+                    <button onclick="runFixHistoryNow(false)" style="flex:1; padding:10px; background:var(--success); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
+                        立即执行 (实际修正)
+                    </button>
+                    <button onclick="runFixHistoryNow(true)" style="flex:1; padding:10px; background:var(--warning); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
+                        试运行 (只检测)
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 任务进度 -->
+        <div id="fixHistoryProgress" style="background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:20px; display:none;">
+            <h3 style="margin:0 0 12px 0; font-size:16px; color:var(--text-primary);">任务进度</h3>
+            <div id="fixHistoryProgressContent" style="color:var(--text-secondary); font-size:13px;"></div>
+        </div>
+    </div>
+    `;
+    
+    // 加载定时任务列表
+    await loadScheduledJobs();
+}
+
+async function scheduleFixHistory() {
+    const time = document.getElementById('scheduleTime').value;
+    const source = document.getElementById('scheduleSource').value;
+    const threads = parseInt(document.getElementById('scheduleThreads').value);
+    const rateLimit = parseFloat(document.getElementById('scheduleRateLimit').value);
+    
+    try {
+        const resp = await fetch(API + '/sync/fix-history/schedule', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({time, source, threads, rate_limit: rateLimit})
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(data.data.message, 'success');
+            await loadScheduledJobs();
+        } else {
+            showToast(data.message || '添加定时任务失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+async function loadScheduledJobs() {
+    try {
+        const resp = await fetch(API + '/sync/fix-history/schedule');
+        const data = await resp.json();
+        const jobs = (data.data && data.data.jobs) || [];
+        const container = document.getElementById('scheduledJobsList');
+        
+        if (!jobs.length) {
+            container.innerHTML = '<div style="color:var(--text-muted);">暂无定时任务</div>';
+            return;
+        }
+        
+        container.innerHTML = jobs.map(job => `
+            <div style="background:var(--bg-base); border:1px solid var(--border); border-radius:4px; padding:12px; margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:8px;">
+                    <div>
+                        <div style="font-size:14px; font-weight:500; color:var(--text-primary);">每天 ${job.time}</div>
+                        <div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">
+                            数据源: ${job.source === 'tx' ? '腾讯' : job.source === 'em' ? '东方财富' : '双源交叉'} · 
+                            并发: ${job.threads} · 限速: ${job.rate_limit}s
+                        </div>
+                    </div>
+                    <button onclick="cancelScheduledJob('${job.id}')" 
+                            style="padding:4px 8px; background:var(--danger); color:white; border:none; border-radius:3px; cursor:pointer; font-size:11px;">
+                        取消
+                    </button>
+                </div>
+                ${job.last_run ? `
+                    <div style="font-size:11px; color:var(--text-muted); border-top:1px solid var(--border); padding-top:8px; margin-top:8px;">
+                        上次执行: ${job.last_run} · 
+                        状态: <span style="color:${job.last_status === 'success' ? 'var(--success)' : 'var(--danger)'}">${job.last_status === 'success' ? '成功' : '失败'}</span>
+                        ${job.last_error ? `<br>错误: ${job.last_error}` : ''}
+                    </div>
+                ` : ''}
+            </div>
+        `).join('');
+    } catch (e) {
+        document.getElementById('scheduledJobsList').innerHTML = 
+            '<div style="color:var(--danger);">加载失败: ' + e.message + '</div>';
+    }
+}
+
+async function cancelScheduledJob(jobId) {
+    if (!confirm('确定要取消这个定时任务吗？')) return;
+    
+    try {
+        const resp = await fetch(API + '/sync/fix-history/schedule/' + jobId, {method: 'DELETE'});
+        const data = await resp.json();
+        if (data.success) {
+            showToast('定时任务已取消', 'success');
+            await loadScheduledJobs();
+        } else {
+            showToast(data.message || '取消失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+async function runFixHistoryNow(dryRun) {
+    const source = document.getElementById('scheduleSource').value;
+    const threads = parseInt(document.getElementById('scheduleThreads').value);
+    const rateLimit = parseFloat(document.getElementById('scheduleRateLimit').value);
+    
+    const mode = dryRun ? '试运行' : '实际修正';
+    if (!confirm(`确定要立即执行全量历史修正（${mode}）吗？\n\n任务将在后台运行，预计耗时2-3小时。`)) return;
+    
+    try {
+        const resp = await fetch(API + '/sync/fix-history/run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({source, threads, rate_limit: rateLimit, dry_run: dryRun})
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showToast(data.data.message, 'success');
+            // 显示进度面板
+            document.getElementById('fixHistoryProgress').style.display = 'block';
+            pollFixHistoryProgress(data.data.task_id);
+        } else {
+            showToast(data.message || '启动任务失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    }
+}
+
+let fixHistoryPollTimer = null;
+async function pollFixHistoryProgress(taskId) {
+    if (fixHistoryPollTimer) clearInterval(fixHistoryPollTimer);
+    
+    const content = document.getElementById('fixHistoryProgressContent');
+    
+    const poll = async () => {
+        try {
+            const resp = await fetch(API + '/sync/status/' + taskId);
+            const data = await resp.json();
+            const status = data.data;
+            
+            if (!status) {
+                content.innerHTML = '<div style="color:var(--warning);">任务状态查询失败</div>';
+                clearInterval(fixHistoryPollTimer);
+                return;
+            }
+            
+            const statusText = status.status === 'running' ? '运行中' : 
+                             status.status === 'completed' ? '已完成' : 
+                             status.status === 'failed' ? '失败' : status.status;
+            
+            content.innerHTML = `
+                <div style="margin-bottom:12px;">
+                    <strong>状态:</strong> <span style="color:${status.status === 'running' ? 'var(--accent)' : status.status === 'completed' ? 'var(--success)' : 'var(--danger)'}">${statusText}</span>
+                </div>
+                ${status.progress ? `
+                    <div style="margin-bottom:8px;">
+                        <strong>进度:</strong> ${status.progress.current || 0} / ${status.progress.total || '?'} 
+                        (${status.progress.success || 0} 成功, ${status.progress.failed || 0} 失败)
+                    </div>
+                ` : ''}
+                ${status.message ? `<div style="margin-bottom:8px;"><strong>消息:</strong> ${status.message}</div>` : ''}
+                ${status.error ? `<div style="color:var(--danger);"><strong>错误:</strong> ${status.error}</div>` : ''}
+            `;
+            
+            if (status.status === 'completed' || status.status === 'failed') {
+                clearInterval(fixHistoryPollTimer);
+                showToast(`全量历史修正${status.status === 'completed' ? '完成' : '失败'}`, 
+                         status.status === 'completed' ? 'success' : 'error');
+            }
+        } catch (e) {
+            content.innerHTML = '<div style="color:var(--danger);">轮询失败: ' + e.message + '</div>';
+        }
+    };
+    
+    poll(); // 立即执行一次
+    fixHistoryPollTimer = setInterval(poll, 3000); // 每3秒轮询
 }
 </script>
 </body>

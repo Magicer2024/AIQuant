@@ -2,13 +2,70 @@
 routes/sync.py —— 数据同步相关接口
 """
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+import schedule
+import time
 
 from routes import sync_bp
 from utils.api import ok, fail
 from core.sync import recalc_all_scores as run_recalc_all_scores
 from core.task_queue import submit_task, get_task_status, is_any_running
 from scheduler.state import SYNC_STATUS
+
+# ─────────────────────────────────────────────
+# 定时任务管理（全量历史修正）
+# ─────────────────────────────────────────────
+_scheduled_jobs = {}  # job_id -> job info
+_schedule_thread = None
+_schedule_running = False
+
+def _run_scheduler_loop():
+    """后台调度器循环，每分钟检查一次"""
+    global _schedule_running
+    _schedule_running = True
+    while _schedule_running:
+        schedule.run_pending()
+        time.sleep(60)
+
+def _start_scheduler_if_needed():
+    """启动调度器线程（如果未启动）"""
+    global _schedule_thread
+    if _schedule_thread is None or not _schedule_thread.is_alive():
+        _schedule_thread = threading.Thread(target=_run_scheduler_loop, daemon=True)
+        _schedule_thread.start()
+
+def _job_fix_history(job_id: str, source: str, threads: int, rate_limit: float):
+    """执行历史修正的任务函数"""
+    print(f"[Schedule] 开始执行定时任务 {job_id}: source={source}, threads={threads}")
+    try:
+        # 导入并执行
+        import sys
+        sys.path.insert(0, '.')
+        from tools.fix_history import run_fix_history
+        
+        # 执行修正（非 dry-run）
+        report = run_fix_history(
+            codes=None,  # 全部股票
+            source=source,
+            threads=threads,
+            rate_limit=rate_limit,
+            dry_run=False,
+            verbose=False,
+        )
+        
+        # 更新任务状态
+        if job_id in _scheduled_jobs:
+            _scheduled_jobs[job_id]["last_run"] = datetime.now().isoformat()
+            _scheduled_jobs[job_id]["last_status"] = "success"
+            _scheduled_jobs[job_id]["last_report"] = report
+            
+        print(f"[Schedule] 任务 {job_id} 执行完成")
+    except Exception as e:
+        print(f"[Schedule] 任务 {job_id} 执行失败: {e}")
+        if job_id in _scheduled_jobs:
+            _scheduled_jobs[job_id]["last_run"] = datetime.now().isoformat()
+            _scheduled_jobs[job_id]["last_status"] = "failed"
+            _scheduled_jobs[job_id]["last_error"] = str(e)
 
 # ─────────────────────────────────────────────
 # 同步进度状态（模块级全局变量）
@@ -397,3 +454,181 @@ def task_status(task_id):
     if not status:
         return fail("任务不存在或已过期", 404)
     return ok(status)
+
+
+# ─────────────────────────────────────────────
+# 全量历史修正确时任务 API
+# ─────────────────────────────────────────────
+
+@sync_bp.route("/fix-history/schedule", methods=["POST"])
+def schedule_fix_history():
+    """
+    添加全量历史修正确时任务
+    body: {
+        "time": "10:00",       # 每天执行时间 (HH:MM)
+        "source": "tx",        # 数据源 (em/tx/both)
+        "threads": 2,          # 并发数
+        "rate_limit": 1.0,     # 限速 (秒/股)
+    }
+    """
+    from flask import request
+    
+    body = request.get_json(silent=True) or {}
+    run_time = body.get("time", "10:00")
+    source = body.get("source", "tx")
+    threads = int(body.get("threads", 2))
+    rate_limit = float(body.get("rate_limit", 1.0))
+    
+    # 验证时间格式
+    try:
+        hour, minute = map(int, run_time.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return fail("时间格式错误，应为 HH:MM (00:00-23:59)", 400)
+    except Exception:
+        return fail("时间格式错误，应为 HH:MM", 400)
+    
+    # 验证参数
+    if source not in ("em", "tx", "both"):
+        return fail("source 必须是 em/tx/both", 400)
+    if threads < 1 or threads > 8:
+        return fail("threads 必须在 1-8 之间", 400)
+    if rate_limit < 0.1 or rate_limit > 10:
+        return fail("rate_limit 必须在 0.1-10 之间", 400)
+    
+    # 启动调度器（如果需要）
+    _start_scheduler_if_needed()
+    
+    # 创建任务 ID
+    job_id = f"fix_history_{run_time.replace(':', '')}"
+    
+    # 检查是否已存在相同时间的任务
+    if job_id in _scheduled_jobs:
+        # 更新现有任务
+        schedule.cancel_job(_scheduled_jobs[job_id]["schedule_job"])
+    
+    # 创建 schedule job
+    job = schedule.every().day.at(run_time).do(
+        _job_fix_history, 
+        job_id=job_id,
+        source=source,
+        threads=threads,
+        rate_limit=rate_limit
+    )
+    
+    # 保存任务信息
+    _scheduled_jobs[job_id] = {
+        "id": job_id,
+        "time": run_time,
+        "source": source,
+        "threads": threads,
+        "rate_limit": rate_limit,
+        "schedule_job": job,
+        "created_at": datetime.now().isoformat(),
+        "last_run": None,
+        "last_status": None,
+        "last_report": None,
+        "last_error": None,
+    }
+    
+    return ok({
+        "job_id": job_id,
+        "time": run_time,
+        "source": source,
+        "threads": threads,
+        "rate_limit": rate_limit,
+        "message": f"定时任务已添加：每天 {run_time} 执行全量历史修正"
+    })
+
+
+@sync_bp.route("/fix-history/schedule", methods=["GET"])
+def list_fix_history_jobs():
+    """获取所有历史修正确时任务"""
+    jobs = []
+    for job_id, info in _scheduled_jobs.items():
+        jobs.append({
+            "id": info["id"],
+            "time": info["time"],
+            "source": info["source"],
+            "threads": info["threads"],
+            "rate_limit": info["rate_limit"],
+            "created_at": info["created_at"],
+            "last_run": info["last_run"],
+            "last_status": info["last_status"],
+            "last_error": info["last_error"],
+        })
+    return ok({"jobs": jobs, "count": len(jobs)})
+
+
+@sync_bp.route("/fix-history/schedule/<job_id>", methods=["DELETE"])
+def cancel_fix_history_job(job_id: str):
+    """取消指定的历史修正确时任务"""
+    if job_id not in _scheduled_jobs:
+        return fail("任务不存在", 404)
+    
+    # 取消 schedule job
+    schedule.cancel_job(_scheduled_jobs[job_id]["schedule_job"])
+    
+    # 删除任务信息
+    del _scheduled_jobs[job_id]
+    
+    return ok({"job_id": job_id, "message": "定时任务已取消"})
+
+
+@sync_bp.route("/fix-history/run", methods=["POST"])
+def run_fix_history_now():
+    """
+    立即执行一次全量历史修正（不定时）
+    body: {
+        "source": "tx",        # 数据源 (em/tx/both)
+        "threads": 2,          # 并发数
+        "rate_limit": 1.0,     # 限速 (秒/股)
+        "dry_run": false,      # 是否试运行
+    }
+    """
+    from flask import request
+    
+    body = request.get_json(silent=True) or {}
+    source = body.get("source", "tx")
+    threads = int(body.get("threads", 2))
+    rate_limit = float(body.get("rate_limit", 1.0))
+    dry_run = bool(body.get("dry_run", False))
+    
+    # 验证参数
+    if source not in ("em", "tx", "both"):
+        return fail("source 必须是 em/tx/both", 400)
+    if threads < 1 or threads > 8:
+        return fail("threads 必须在 1-8 之间", 400)
+    if rate_limit < 0.1 or rate_limit > 10:
+        return fail("rate_limit 必须在 0.1-10 之间", 400)
+    
+    # 检查是否有任务正在运行
+    if is_any_running(kind="fix_history"):
+        return fail("已有历史修正任务在运行中", 409)
+    
+    def run_task():
+        import sys
+        sys.path.insert(0, '.')
+        from tools.fix_history import run_fix_history
+        
+        report = run_fix_history(
+            codes=None,
+            source=source,
+            threads=threads,
+            rate_limit=rate_limit,
+            dry_run=dry_run,
+            verbose=False,
+        )
+        return report
+    
+    task_id = submit_task(run_task, [], kind="fix_history")
+    
+    return ok({
+        "task_id": task_id,
+        "message": f"全量历史修正任务已启动 ({'试运行' if dry_run else '实际运行'})",
+        "params": {
+            "source": source,
+            "threads": threads,
+            "rate_limit": rate_limit,
+            "dry_run": dry_run,
+        }
+    })
