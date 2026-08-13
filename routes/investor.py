@@ -22,6 +22,7 @@ from utils.serialization import sanitize_numeric as _sanitize
 from config.personal_config import (
     POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT,
     MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
+    EXIT_TRACK_START_DATE,
 )
 from config.strategy_params import T1_GAP_GUARD, get_param
 
@@ -284,9 +285,6 @@ def _ensure_personal_tables():
 # ─────────────────────────────────────────────
 # 1. 今日推荐：直接告诉散户“买什么、什么价买、什么价卖、什么价止损”
 # ─────────────────────────────────────────────
-
-# 出场跟踪起始日：该日期（含）起的推荐纳入跟踪，此前的推荐放弃；无结束时间限制
-EXIT_TRACK_START_DATE = "2026-07-20"
 
 
 def _exit_trailing_params(horizon: str) -> tuple:
@@ -818,8 +816,9 @@ def exit_advice():
     """出场跟踪：对 2026-07-20 起推荐的出场状态（按 short/mid/long 三周期分组）
 
     GET /api/investor/exit_advice
-    口径：与「今日推荐」对齐（每组每天 fusion_score 前 4）；起始日为 EXIT_TRACK_START_DATE，
-         此前的推荐放弃，无结束时间限制——未卖出的持续跟踪直到卖出；
+    口径：与「推荐复盘 / 今日推荐」对齐（short 组 = 隔日动量优先 + 低扩展度补足 +
+         fusion≥short_conf_gate 门控 + 止盈离场剔除；mid/long = fusion_score 前 4）；
+         起始日为 EXIT_TRACK_START_DATE，此前的推荐放弃，无结束时间限制——未卖出的持续跟踪直到卖出；
          同一股票同一周期在交易日上连续推荐时合并为一条：推荐日取最新一次、
          持仓天数从最早一次累计（买入价=最早推荐日次日开盘价）、止损/止盈按最新一次判定；
          开始持有 = 推荐日，买入价 = 推荐日之后首个交易日的开盘价；
@@ -837,31 +836,62 @@ def exit_advice():
             board_filter = "".join(
                 f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
 
+        # 选股口径与「推荐复盘（recommend_outcome）/ 今日推荐」完全一致（2026-08 短线 8→4 改造）：
+        #   short = 隔日动量信号优先占名额 + 低扩展度（pct_above_ma20 升序）补足 +
+        #           fusion≥short_conf_gate 门控 + 止盈离场（gap guard）剔除；
+        #   mid/long = fusion_score 前 4。
+        # 此前 exit_advice 仍用旧 fusion 排序（无门控/无剔除），与推荐复盘不一致——旧算法残余，已对齐。
+        gate = float(get_param("short_conf_gate"))
+        gap_enabled = bool(T1_GAP_GUARD.get("enabled", True))
+        # gap guard 止盈离场（与 core/outcome_tracker.insert_new_outcomes 同口径：现价相对
+        # 信号价涨幅 > 止盈涨幅 = 已错过买点不追，不纳入出场跟踪）；T1_GAP_GUARD 关闭时恒 0
+        if gap_enabled:
+            gap_sql = ("CASE WHEN lp.close IS NOT NULL AND lp.close > 0 "
+                       "AND s.buy_price > 0 "
+                       "AND s.take_profit IS NOT NULL AND s.take_profit > s.buy_price "
+                       "AND (lp.close / s.buy_price - 1) > (s.take_profit / s.buy_price - 1) "
+                       "THEN 1 ELSE 0 END")
+        else:
+            gap_sql = "0"
+        horizon_specs = {
+            # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐/推荐复盘同口径）
+            "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
+                      "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+                      " AND s.fusion_score >= ?", [gate]),
+            "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
+            "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
+        }
+
         with _get_conn() as conn:
-            # 近 N 个交易日的推荐记录（与「今日推荐」对齐：每天每周期 fusion_score 前 4）
-            signals = conn.execute(f"""
-                SELECT code, name, scan_date, buy_price,
-                       stop_loss, take_profit, fusion_score, horizon, strategy
-                FROM (
-                    SELECT s.code, s.name, s.scan_date, s.buy_price,
-                           s.stop_loss, s.take_profit, s.fusion_score,
-                           COALESCE(s.horizon, 'short') AS horizon,
-                           s.strategy,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
-                               ORDER BY COALESCE(s.fusion_score, 0) DESC
-                           ) AS rn
-                    FROM stock_signal s
-                    WHERE s.scan_date >= ?
-                      AND s.buy_price IS NOT NULL
-                      AND s.buy_price > 0
-                      AND s.name NOT LIKE '%ST%'
-                      AND s.name NOT LIKE '%退%'
-                      {board_filter}
-                )
-                WHERE rn <= 4
-                ORDER BY scan_date DESC
-            """, (EXIT_TRACK_START_DATE,)).fetchall()
+            # 2026-07-20 起的推荐记录（与「推荐复盘」同口径：每天每周期前 4）
+            signals = []
+            for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
+                signals += conn.execute(f"""
+                    SELECT code, name, scan_date, buy_price,
+                           stop_loss, take_profit, fusion_score, horizon, strategy
+                    FROM (
+                        SELECT s.code, s.name, s.scan_date, s.buy_price,
+                               s.stop_loss, s.take_profit, s.fusion_score,
+                               COALESCE(s.horizon, 'short') AS horizon,
+                               s.strategy,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
+                                   ORDER BY {order_clause}
+                               ) AS rn
+                        FROM stock_signal s
+                        LEFT JOIN latest_price lp ON lp.code = s.code
+                        WHERE s.scan_date >= ?
+                          AND COALESCE(s.horizon, 'short') = ?
+                          AND s.buy_price IS NOT NULL
+                          AND s.buy_price > 0
+                          AND s.name NOT LIKE '%ST%'
+                          AND s.name NOT LIKE '%退%'
+                          AND ({gap_sql}) = 0
+                          {board_filter}
+                          {gate_sql_cond}
+                    )
+                    WHERE rn <= 4
+                """, (EXIT_TRACK_START_DATE, hz, *gate_params)).fetchall()
 
             if not signals:
                 return ok({"items": [], "groups": {"short": [], "mid": [], "long": []},

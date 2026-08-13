@@ -17,7 +17,9 @@ from datetime import datetime
 from typing import Optional
 
 from core.db import get_conn
-from config.personal_config import MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES
+from config.personal_config import (
+    MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES, EXIT_TRACK_START_DATE,
+)
 
 
 # ─────────────────────────────────────────────
@@ -25,19 +27,26 @@ from config.personal_config import MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES
 # ─────────────────────────────────────────────
 
 def insert_new_outcomes(days_back: int = 60):
-    """将 stock_signal 中近 N 天、尚未录入 recommend_outcome 的推荐写入。
+    """将 stock_signal 中窗口内、尚未录入 recommend_outcome 的推荐写入。
 
     口径：与「今日推荐」面板一致（config/personal_config.py 的主板过滤 +
     每周期 fusion_score 前 4 名才是真正的「推荐」；short 组额外与今日推荐同口径：
     fusion≥short_conf_gate 门控 + 低扩展度(pct_above_ma20 升序)取前 4 +
     止盈离场(gap guard sell)剔除——2026-08 短线 8→4 改造）。
 
+    窗口：近 N 天 与 EXIT_TRACK_START_DATE（2026-07-20，出场跟踪/推荐复盘起始日）
+    取较晚者——该日期之前的推荐视为旧算法数据，不写入也不保留（清理后不回填）。
+
     2026-08-09 修复：原 INSERT OR IGNORE 按 (code, scan_date, horizon) 去重追加，
     多次重算（v1/v2 引擎、不同过滤链）的 Top8 并集在表内累积，short 组每天
     19~28 条。改为窗口内「先清空再重写」：recommend_outcome 恒等于当前
     stock_signal 的每日每组 Top8（收益字段清空后由 evaluate_outcomes 重新评估）。
     """
-    cutoff = f"-{days_back} days"
+    from datetime import date, timedelta
+    start_date = max(
+        (date.today() - timedelta(days=days_back)).isoformat(),
+        EXIT_TRACK_START_DATE,
+    )
     # 板块限制：与 routes/investor.py 的今日推荐同口径（小资金仅推主板）
     board_filter = ""
     if MAIN_BOARD_ONLY:
@@ -68,8 +77,8 @@ def insert_new_outcomes(days_back: int = 60):
     with get_conn() as conn:
         # 先清窗口内旧记录（随引擎/过滤链/推荐口径变化而更新，旧记录一并移除）
         conn.execute(
-            "DELETE FROM recommend_outcome WHERE scan_date >= date('now', ?)",
-            (cutoff,))
+            "DELETE FROM recommend_outcome WHERE scan_date >= ?",
+            (start_date,))
         for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
             # 注意：gap_sell 过滤必须发生在 ROW_NUMBER 之前（先剔除止盈离场、
             # 再按扩展度取前 4），与今日推荐「先剔 sell 再截取」语义一致，
@@ -96,7 +105,7 @@ def insert_new_outcomes(days_back: int = 60):
                         ) AS rn
                     FROM stock_signal s
                     LEFT JOIN latest_price lp ON lp.code = s.code
-                    WHERE s.scan_date >= date('now', ?)
+                    WHERE s.scan_date >= ?
                       AND COALESCE(s.horizon, 'short') = ?
                       AND s.buy_price IS NOT NULL
                       AND s.buy_price > 0
@@ -107,7 +116,7 @@ def insert_new_outcomes(days_back: int = 60):
                       {gate_sql_cond}
                 )
                 WHERE rn <= 4
-            """, (cutoff, hz, *gate_params))
+            """, (start_date, hz, *gate_params))
 
 
 # ─────────────────────────────────────────────
