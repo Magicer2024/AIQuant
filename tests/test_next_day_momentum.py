@@ -7,6 +7,7 @@
 4. 龙虎榜日期与最新交易日不一致 → 不命中
 5. 无龙虎榜记录 / 数据不足 → None
 6. fusion_score 映射（10→30、20→40、≥30→50）与盈亏比≥1.5
+7. 当日大跌/跌停（max_down_pct，默认 -7%）→ 剔除不命中
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -105,3 +106,27 @@ def test_fusion_mapping(ratio, expected):
                                  params=NEXT_DAY_MOMENTUM)
     assert sig is not None
     assert sig["fusion_score"] == pytest.approx(expected)
+
+
+# ── 7. 大跌/跌停剔除（2026-08 修复：麦迪科技 603990 跌停日误入推荐） ──
+def test_limit_down_excluded():
+    df = _make_df([10 + 0.01 * i for i in range(30)])
+    # 普通票跌停 -10% ≤ -7 → 剔除
+    assert scan_next_day_momentum(df, _lhb(df, code="600000", ratio=25.0, pct=-10.0),
+                                  params=NEXT_DAY_MOMENTUM) is None
+    # 20cm（创业板）跌停 -20% → 剔除
+    assert scan_next_day_momentum(df, _lhb(df, code="300750", ratio=25.0, pct=-20.0),
+                                  params=NEXT_DAY_MOMENTUM) is None
+    # 大跌 -7.5%（阈值 -7 以下）→ 剔除
+    assert scan_next_day_momentum(df, _lhb(df, code="600000", ratio=25.0, pct=-7.5),
+                                  params=NEXT_DAY_MOMENTUM) is None
+    # -5% 正常回调 → 仍命中
+    sig = scan_next_day_momentum(df, _lhb(df, code="600000", ratio=25.0, pct=-5.0),
+                                 params=NEXT_DAY_MOMENTUM)
+    assert sig is not None
+    # 关闭过滤（max_down_pct=0）→ 跌停不再剔除（仅用于回退/调试）
+    p_off = dict(NEXT_DAY_MOMENTUM)
+    p_off["max_down_pct"] = 0
+    sig = scan_next_day_momentum(df, _lhb(df, code="600000", ratio=25.0, pct=-10.0),
+                                 params=p_off)
+    assert sig is not None

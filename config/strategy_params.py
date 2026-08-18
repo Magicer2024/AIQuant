@@ -216,6 +216,11 @@ NEXT_DAY_MOMENTUM = {
     "enabled": True,
     "min_net_buy_ratio": 10.0,   # 龙虎榜净买额占总成交比下限（%）
     "exclude_limit_up": True,    # 剔除当日涨停（次日巨幅高开买不到、日内易回落）
+    # 剔除当日大跌/跌停（2026-08 修复：净买占比>=10% 但当日大跌/跌停的信号是
+    # 明确负期望子集——历史 T+1 -1.0%/胜率47%、T+2 -3.6%/34%、T+5 -5.8%/25%，
+    # 麦迪科技 603990 2026-08-13 跌停日即因此误入今日短线推荐）。
+    # 当日跌幅 <= 该值（%）不产生隔日动量信号；设 0/None 关闭本过滤。
+    "max_down_pct": -7.0,
     "stop_loss_pct": -0.04,      # 止损 -4%
     "take_profit_pct": 0.065,    # 止盈 +6.5%（盈亏比≈1.6 稳超 1.5，规避信号灯 avoid 的浮点边界）
 }
@@ -239,6 +244,17 @@ CROSS_PAIRS = [
     ("MA5_偏离", "MA20_偏离"),
     ("PDI", "MDI"),
 ]
+
+
+# ── 中/长线市场环境（regime）天花板（2026-08）────────────────────────
+# 长线是只做多的趋势策略，在 cold（广度+指数斜率均差的普跌市）里负期望；
+# 短线已有 cold→0/cool→2 的 regime 天花板（P1-2.3，routes/investor.py 展示层），
+# 此处补齐中/长线同源控制。键：regime → 当日最多推荐条数；None = 不受 regime 限制。
+# 注：与短线一致，本天花板只在「今日推荐」展示层生效，不影响 stock_signal 写库与复盘。
+MID_LONG_REGIME_CAP = {
+    "mid":  {"cold": 0, "cool": 2, "neutral": None, "warm": None, "hot": None, "unknown": None},
+    "long": {"cold": 0, "cool": 1, "neutral": None, "warm": None, "hot": None, "unknown": None},
+}
 
 
 def get_strategy_params(name: str) -> Dict[str, Any]:
@@ -349,6 +365,28 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         # 长线移动止盈回撤比例：持仓 60+ 日波动更大，回撤阈值放宽到 15%（趋势破坏确认）。
         "default": 0.15, "type": float,
         "min": 0.05, "max": 0.40, "label": "长线移动止盈回撤比例(自高点)",
+    },
+    "mid_atr_stop_mult": {
+        # 中线止损 ATR 倍数（2026-08 回测 tools/backtest_midlong_exit.py：全历史 raw composite
+        # BUY_SIGNAL ~90 万笔，盈亏比固定 2.5，hold=60）：
+        #   k=2.0 → 胜率34.8% 均值+2.30% PF2.50 止损率63%
+        #   k=2.5 → 胜率36.6% 均值+2.97% PF2.38 止损率58%
+        #   k=3.0 → 胜率38.5% 均值+3.51% PF2.24 止损率52%
+        # 放宽止损减少震荡误扫（止损率↓、胜率↑、均值↑），代价是 PF 略降（单笔亏损变大）。
+        # 取 2.5 折中；回滚：DB 覆盖或改回 2.0。
+        "default": 2.5, "type": float,
+        "min": 1.0, "max": 4.0, "label": "中线止损 ATR 倍数",
+    },
+    "long_ma_stop_mult": {
+        # 长线止损 MA120 倍数（2026-08 回测 tools/backtest_midlong_exit.py：全历史 raw 趋势信号
+        # ~515 万笔，移动止盈 +20%启动/15%回撤，hold=120）：
+        #   0.99 → 胜率44.8% 均值+3.97% PF1.95 止损率52%
+        #   0.95 → 胜率49.3% 均值+4.65% PF1.67 止损率44%
+        #   0.93 → 胜率51.4% 均值+4.97% PF1.55 止损率40%
+        # 0.99 过近（52% 止损率 = 1% 级 MA 波动即扫出，来回被洗）。放宽到 0.95 显著降误扫、
+        # 抬胜率/均值；代价 PF 1.95→1.67。取 0.95 折中；回滚：DB 覆盖或改回 0.99。
+        "default": 0.95, "type": float,
+        "min": 0.85, "max": 0.99, "label": "长线止损 MA120 倍数",
     },
 }
 

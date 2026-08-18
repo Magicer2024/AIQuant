@@ -126,21 +126,29 @@ def insert_new_outcomes(days_back: int = 60):
 def evaluate_outcomes():
     """遍历 recommend_outcome 中尚未完全评估的记录，用 daily_price 填充收益。
 
-    评估逻辑：
-      - T+N return = (第N个交易日close - entry_price) / entry_price * 100
-      - max_return / min_return = 推荐日后所有交易日的最高/最低收益
-      - hit_stop / hit_tp = 是否触及止损/止盈价
-      - exit_reason / exit_date / exit_return = 首次触发止损或止盈的记录
+    评估逻辑（horizon 感知）：
+      - short：T+1/2/3/5/10 收益 + 首次触及止损/止盈出场（原逻辑不变）。
+      - mid/long：长周期策略——用 evaluate_exit_by_prices 按真实出场纪律
+        （移动止盈 + 周期持仓上限）逐日模拟出场。持仓期远超短线的 10 天：
+        中线窗口 ~70 交易日（max_hold=60）、长线窗口 ~130 交易日（max_hold=None
+        不设强制出场上限）。未出场时 exit_return 保持 NULL，由后续交易日继续评估，
+        避免「60+ 天策略被 10 天强制了结」的误判。
     """
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_conn() as conn:
-        # 取尚未评估完的记录（t10_return 为 NULL、evaluated_at 为空或 t2 未回填）
+        # short：沿用原触发条件（t10 未评估完）；mid/long：只要还没出场就持续评估
         rows = conn.execute("""
-            SELECT id, code, scan_date, entry_price, stop_loss, take_profit
+            SELECT id, code, scan_date, horizon, entry_price, stop_loss, take_profit
             FROM recommend_outcome
             WHERE entry_price > 0
-              AND (t10_return IS NULL OR evaluated_at IS NULL OR t2_return IS NULL)
+              AND (
+                (COALESCE(horizon, 'short') = 'short'
+                 AND (t10_return IS NULL OR evaluated_at IS NULL OR t2_return IS NULL))
+                OR
+                (COALESCE(horizon, 'short') IN ('mid', 'long')
+                 AND (exit_return IS NULL OR evaluated_at IS NULL))
+              )
             ORDER BY scan_date ASC
         """).fetchall()
 
@@ -149,100 +157,207 @@ def evaluate_outcomes():
 
         updated = 0
         for row in rows:
-            rid = row["id"]
-            code = row["code"]
-            scan_date = row["scan_date"]
-            entry = row["entry_price"]
-            stop = row["stop_loss"]
-            tp = row["take_profit"]
-
-            # 取推荐日之后的行情（按交易日升序）
-            prices = conn.execute("""
-                SELECT trade_date, close, high, low
-                FROM daily_price
-                WHERE code = ? AND trade_date > ?
-                ORDER BY trade_date ASC
-                LIMIT 15
-            """, (code, scan_date)).fetchall()
-
-            if not prices:
-                continue
-
-            # 计算 T+N 收益
-            def _ret(n):
-                if len(prices) >= n:
-                    c = prices[n - 1]["close"]
-                    if c and entry > 0:
-                        return round((c - entry) / entry * 100, 2)
-                return None
-
-            t1 = _ret(1)
-            t2 = _ret(2)
-            t3 = _ret(3)
-            t5 = _ret(5)
-            t10 = _ret(10)
-
-            # 最大浮盈/浮亏（用 high/low 更精确）
-            max_ret = None
-            min_ret = None
-            for p in prices:
-                if p["high"] and entry > 0:
-                    r = (p["high"] - entry) / entry * 100
-                    max_ret = r if max_ret is None else max(max_ret, r)
-                if p["low"] and entry > 0:
-                    r = (p["low"] - entry) / entry * 100
-                    min_ret = r if min_ret is None else min(min_ret, r)
-
-            if max_ret is not None:
-                max_ret = round(max_ret, 2)
-            if min_ret is not None:
-                min_ret = round(min_ret, 2)
-
-            # 止损/止盈判定
-            hit_stop = 0
-            hit_tp = 0
-            exit_reason = None
-            exit_date = None
-            exit_return = None
-
-            for p in prices:
-                # 止损：当日最低价 <= stop_loss
-                if stop and p["low"] and p["low"] <= stop:
-                    hit_stop = 1
-                    if exit_reason is None:
-                        exit_reason = "stop_loss"
-                        exit_date = p["trade_date"]
-                        exit_return = round((stop - entry) / entry * 100, 2)
-                    break
-                # 止盈：当日最高价 >= take_profit
-                if tp and p["high"] and p["high"] >= tp:
-                    hit_tp = 1
-                    if exit_reason is None:
-                        exit_reason = "take_profit"
-                        exit_date = p["trade_date"]
-                        exit_return = round((tp - entry) / entry * 100, 2)
-                    break
-
-            # 如果持有期满（>=10 个交易日）且未触发止损止盈，用 T+10 收盘作为出场
-            if exit_reason is None and len(prices) >= 10:
-                exit_reason = "max_hold_days"
-                exit_date = prices[9]["trade_date"]
-                exit_return = t10
-
-            conn.execute("""
-                UPDATE recommend_outcome
-                SET t1_return = ?, t2_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
-                    max_return = ?, min_return = ?,
-                    hit_stop = ?, hit_tp = ?,
-                    exit_reason = ?, exit_date = ?, exit_return = ?,
-                    evaluated_at = ?
-                WHERE id = ?
-            """, (t1, t2, t3, t5, t10, max_ret, min_ret,
-                  hit_stop, hit_tp, exit_reason, exit_date, exit_return,
-                  now_str, rid))
-            updated += 1
+            horizon = row["horizon"] or "short"
+            if horizon in ("mid", "long"):
+                if _evaluate_mid_long(conn, row, horizon, now_str):
+                    updated += 1
+            else:
+                if _evaluate_short(conn, row, now_str):
+                    updated += 1
 
     return updated
+
+
+def _evaluate_short(conn, row, now_str: str) -> bool:
+    """短线评估（原逻辑不变）：15 交易日窗口内 T+N 收益 + 首次触及止损/止盈出场，
+    未触发则持有满 10 日以 T+10 收盘了结。"""
+    rid = row["id"]
+    code = row["code"]
+    scan_date = row["scan_date"]
+    entry = row["entry_price"]
+    stop = row["stop_loss"]
+    tp = row["take_profit"]
+
+    prices = conn.execute("""
+        SELECT trade_date, close, high, low
+        FROM daily_price
+        WHERE code = ? AND trade_date > ?
+        ORDER BY trade_date ASC
+        LIMIT 15
+    """, (code, scan_date)).fetchall()
+
+    if not prices:
+        return False
+
+    def _ret(n):
+        if len(prices) >= n:
+            c = prices[n - 1]["close"]
+            if c and entry > 0:
+                return round((c - entry) / entry * 100, 2)
+        return None
+
+    t1 = _ret(1)
+    t2 = _ret(2)
+    t3 = _ret(3)
+    t5 = _ret(5)
+    t10 = _ret(10)
+
+    max_ret = None
+    min_ret = None
+    for p in prices:
+        if p["high"] and entry > 0:
+            r = (p["high"] - entry) / entry * 100
+            max_ret = r if max_ret is None else max(max_ret, r)
+        if p["low"] and entry > 0:
+            r = (p["low"] - entry) / entry * 100
+            min_ret = r if min_ret is None else min(min_ret, r)
+
+    if max_ret is not None:
+        max_ret = round(max_ret, 2)
+    if min_ret is not None:
+        min_ret = round(min_ret, 2)
+
+    hit_stop = 0
+    hit_tp = 0
+    exit_reason = None
+    exit_date = None
+    exit_return = None
+
+    for p in prices:
+        if stop and p["low"] and p["low"] <= stop:
+            hit_stop = 1
+            if exit_reason is None:
+                exit_reason = "stop_loss"
+                exit_date = p["trade_date"]
+                exit_return = round((stop - entry) / entry * 100, 2)
+            break
+        if tp and p["high"] and p["high"] >= tp:
+            hit_tp = 1
+            if exit_reason is None:
+                exit_reason = "take_profit"
+                exit_date = p["trade_date"]
+                exit_return = round((tp - entry) / entry * 100, 2)
+            break
+
+    if exit_reason is None and len(prices) >= 10:
+        exit_reason = "max_hold_days"
+        exit_date = prices[9]["trade_date"]
+        exit_return = t10
+
+    conn.execute("""
+        UPDATE recommend_outcome
+        SET t1_return = ?, t2_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
+            max_return = ?, min_return = ?,
+            hit_stop = ?, hit_tp = ?,
+            exit_reason = ?, exit_date = ?, exit_return = ?,
+            evaluated_at = ?
+        WHERE id = ?
+    """, (t1, t2, t3, t5, t10, max_ret, min_ret,
+          hit_stop, hit_tp, exit_reason, exit_date, exit_return,
+          now_str, rid))
+    return True
+
+
+def _evaluate_mid_long(conn, row, horizon: str, now_str: str) -> bool:
+    """中/长线评估：用真实出场纪律（移动止盈 + 周期持仓上限）逐日模拟出场。
+
+    与 routes/investor.py 的出场跟踪同口径（evaluate_exit_by_prices + 周期
+    trailing/partial 参数 + get_max_hold）。窗口按周期拉长；未出场时
+    exit_reason/exit_date/exit_return 保持 NULL，供后续交易日继续评估。
+    """
+    import pandas as pd
+    from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
+    from config.strategy_params import get_param
+
+    rid = row["id"]
+    code = row["code"]
+    scan_date = row["scan_date"]
+    entry = row["entry_price"]
+    stop = row["stop_loss"]
+    tp = row["take_profit"]
+
+    # 长线 60+ 天持仓 → ~130 交易日窗口；中线 10~60 天 → ~70 交易日窗口
+    limit = 130 if horizon == "long" else 70
+    prices = conn.execute("""
+        SELECT trade_date, open, close, high, low
+        FROM daily_price
+        WHERE code = ? AND trade_date > ?
+        ORDER BY trade_date ASC
+        LIMIT ?
+    """, (code, scan_date, limit)).fetchall()
+
+    if not prices:
+        return False
+
+    def _ret(n):
+        if len(prices) >= n:
+            c = prices[n - 1]["close"]
+            if c and entry > 0:
+                return round((c - entry) / entry * 100, 2)
+        return None
+
+    t1 = _ret(1)
+    t2 = _ret(2)
+    t3 = _ret(3)
+    t5 = _ret(5)
+    t10 = _ret(10)
+
+    max_ret = None
+    min_ret = None
+    for p in prices:
+        if p["high"] and entry > 0:
+            r = (p["high"] - entry) / entry * 100
+            max_ret = r if max_ret is None else max(max_ret, r)
+        if p["low"] and entry > 0:
+            r = (p["low"] - entry) / entry * 100
+            min_ret = r if min_ret is None else min(min_ret, r)
+    if max_ret is not None:
+        max_ret = round(max_ret, 2)
+    if min_ret is not None:
+        min_ret = round(min_ret, 2)
+
+    # 逐日模拟出场（与 routes/investor.py::_get_exit_advice 同口径）
+    df = pd.DataFrame([dict(p) for p in prices]).set_index("trade_date")
+    trailing_pct = get_param("long_trailing_pct" if horizon == "long" else "mid_trailing_pct")
+    partial_tp = get_param("long_partial_tp" if horizon == "long" else "mid_partial_tp")
+    adv = evaluate_exit_by_prices(
+        entry_price=entry,
+        entry_date=scan_date,
+        df=df,
+        stop_loss=stop,
+        take_profit=tp,
+        max_hold_days=get_max_hold(horizon),
+        trailing_pct=trailing_pct,
+        partial_tp=partial_tp,
+    )
+    detail = adv.get("detail") or {}
+    exit_reason = detail.get("exit_reason")
+    exit_date = detail.get("exit_date")
+    exit_return = None
+    hit_stop = 0
+    hit_tp = 0
+    if adv.get("status") == "clear" and exit_date:
+        exit_price = detail.get("exit_price")
+        if exit_price and entry > 0:
+            exit_return = round((exit_price - entry) / entry * 100, 2)
+        if exit_reason and "止损" in str(exit_reason):
+            hit_stop = 1
+        elif exit_reason and "止盈" in str(exit_reason):
+            hit_tp = 1
+    # 未出场：exit_return/exit_date/exit_reason 保持 NULL，等待后续交易日继续评估
+
+    conn.execute("""
+        UPDATE recommend_outcome
+        SET t1_return = ?, t2_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
+            max_return = ?, min_return = ?,
+            hit_stop = ?, hit_tp = ?,
+            exit_reason = ?, exit_date = ?, exit_return = ?,
+            evaluated_at = ?
+        WHERE id = ?
+    """, (t1, t2, t3, t5, t10, max_ret, min_ret,
+          hit_stop, hit_tp, exit_reason, exit_date, exit_return,
+          now_str, rid))
+    return True
 
 
 # ─────────────────────────────────────────────

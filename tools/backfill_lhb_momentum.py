@@ -7,6 +7,7 @@
 动量信号回填 stock_signal，口径与 core/sync.py::_build_signal_records 的
 动量分支完全一致：
   - 净买占比 >= min_net_buy_ratio(10) 且当日非涨停（20cm 阈值 19.8 / 其余 9.8）
+  - 且当日非大跌/跌停（max_down_pct，默认 -7%，2026-08 修复：该子集为负期望）
   - 过质量过滤（ST/流动性 amt20>=8000万/市值 30亿~3000亿，缺市值项跳过）
   - fusion_score = 30 + min((ratio-10)/20,1)*20（净买占比映射 0~50）
   - buy_price=当日收盘；stop_loss=×0.96；take_profit=×1.065（NEXT_DAY_MOMENTUM）
@@ -60,13 +61,18 @@ def main():
     min_ratio = float(p.get("min_net_buy_ratio", 10.0))
     stop_pct = float(p.get("stop_loss_pct", -0.04))
     take_pct = float(p.get("take_profit_pct", 0.065))
+    # 大跌/跌停剔除（与 strategy/next_day_momentum.py 同口径，默认 -7%）
+    max_down = float(p.get("max_down_pct") or 0)
 
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
 
-    # 1) 动量候选：净买>=阈值 且 非涨停（全市场，含创业板）
+    # 1) 动量候选：净买>=阈值 且 非涨停 且 非大跌/跌停（全市场，含创业板）
     where = "WHERE net_buy_ratio >= ? AND pct_change < 9.8"
     args_sql: list = [min_ratio]
+    if max_down < 0:
+        where += " AND (pct_change IS NULL OR pct_change > ?)"
+        args_sql.append(max_down)
     if since:
         where += " AND trade_date >= ?"
         args_sql.append(since)
@@ -77,7 +83,8 @@ def main():
     cand = [dict(r) for r in cand_rows
             if r["pct_change"] is None or float(r["pct_change"]) < (
                 19.8 if str(r["code"]).startswith(("300", "301", "688", "689")) else 9.8)]
-    print(f"[回填] 动量候选 {len(cand)} 条（净买≥{min_ratio} 非涨停，since={since or '全部'}）")
+    print(f"[回填] 动量候选 {len(cand)} 条（净买≥{min_ratio} 非涨停"
+          f"{' 非大跌/跌停(>'+str(max_down)+')' if max_down < 0 else ''}，since={since or '全部'}）")
 
     # 2) 按 code 加载日线 + 质量
     codes = sorted({r["code"] for r in cand})

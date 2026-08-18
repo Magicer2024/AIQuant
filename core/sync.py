@@ -548,7 +548,9 @@ def _sync_one_stock_tencent(code: str, start_date: str, end_date: str, verbose: 
         df.set_index('date', inplace=True)
         df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
         append_daily_data(code, df_qlib)
-        n = _write_daily_price(code, df)
+        # 腾讯 stock_zh_a_hist_tx：amount=万元、无 volume —— 必须走 source="tencent"
+        # 分支（amount ×10000 转元 + volume 用 amount/close 估算股），否则会写进万元/0。
+        n = _write_daily_price(code, df, source="tencent")
         if verbose:
             print(f"  [{code}] 腾讯财经 OK (+{n} 行)")
         return True
@@ -1646,6 +1648,18 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
     except Exception as e:
         if verbose:
             print(f"  [WARN] 复盘追踪失败（不影响主流程）: {e}")
+
+    # ── 刷新 latest_price 物化表 ──
+    # 增量重算会重写 daily_price 分数列并生成当日新信号；若不刷新，物化表会
+    # 停留在上一交易日，推荐卡片的 latest_close 用过期的旧收盘价与当日突破
+    # 确认线比较，可能误报"已突破确认"（实测：601898 旧收盘 14.15 >= 确认线
+    # 14.15 触发假信号，实际当日收盘 13.93 未站上）。
+    try:
+        from core.repository.price_repo import refresh_latest_price
+        refresh_latest_price()
+    except Exception as e:
+        if verbose:
+            print(f"  [WARN] latest_price 刷新失败: {e}")
 
     return {"scan_date": scan_date, "signals": len(sig_records),
             "codes": n_success, "elapsed_s": round(elapsed, 1), "target": target}

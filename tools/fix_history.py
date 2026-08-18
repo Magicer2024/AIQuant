@@ -132,6 +132,9 @@ def _parse_em_klines(klines: list[str]) -> pd.DataFrame:
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     for col in ["open", "close", "high", "low", "volume", "amount", "pct_change", "turnover"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    # 东财 push2his 的 volume 字段(f56)单位是「手」，统一 ×100 转「股」，
+    # 与腾讯源(fetch_tx_kline 已 ×100)及 daily_price 入库口径一致。否则会写入 100 倍偏小的成交量。
+    df["volume"] = df["volume"].fillna(0) * 100
     return df[["trade_date", "open", "high", "low", "close",
                "volume", "amount", "pct_change", "turnover"]].sort_values("trade_date").reset_index(drop=True)
 

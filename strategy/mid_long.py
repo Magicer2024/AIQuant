@@ -65,9 +65,15 @@ def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
         return None
 
     close = float(latest["close"])
-    stop = float(latest.get("STOP_LOSS", 0) or 0)
-    take = float(latest.get("TAKE_PROFIT", 0) or 0)
-    if not math.isfinite(stop) or not math.isfinite(take) or stop <= 0 or take <= close:
+    from config.strategy_params import get_param
+    atr = float(latest.get("ATR", 0) or 0)
+    if math.isfinite(atr) and atr > 0:
+        # 止损 = close - k×ATR，止盈 = close + 2.5×k×ATR（盈亏比固定 2.5）。
+        # k 默认 2.5（2026-08 回测：2.0 止损率 63% 偏紧被震荡误扫，2.5 均值/胜率↑、PF 略降）。
+        k = float(get_param("mid_atr_stop_mult"))
+        stop = round(close - k * atr, 4)
+        take = round(close + 2.5 * k * atr, 4)
+    else:
         # ATR 列缺失/NaN 时给保守兜底：-8% / +20%
         stop = round(close * 0.92, 4)
         take = round(close * 1.20, 4)
@@ -115,7 +121,7 @@ def scan_long_term(df: pd.DataFrame, min_rows: int = 250,
       3) 60 日年化波动率 < vol_max（默认 35%，低波）           +0.5
       4) 距 250 日最高点回撤 < max_drawdown_from_high（默认 40%）+0.5
 
-    止损：MA120 × 0.99（跌破长期趋势线离场）
+    止损：MA120 × long_ma_stop_mult（默认 0.95，跌破长期趋势线离场）
     止盈：入场价 × 1.5（长线目标位，实战中建议移动止盈）
     """
     if df is None or len(df) < min_rows:
@@ -169,12 +175,15 @@ def scan_long_term(df: pd.DataFrame, min_rows: int = 250,
     idx = close.index[-1]
     trade_date = str(idx.date()) if hasattr(idx, "date") else str(idx)[:10]
 
+    from config.strategy_params import get_param
+    m = float(get_param("long_ma_stop_mult"))
+
     return {
         "horizon": "long",
         "strategy": "长线趋势",
         "fusion_score": round(score / 3.0 * 50.0, 2),  # 0~3 → 0~50 量纲对齐
         "buy_price": round(last_close, 2),
-        "stop_loss": round(last_ma120 * 0.99, 2),
+        "stop_loss": round(last_ma120 * m, 2),
         "take_profit": round(last_close * 1.5, 2),
         "trade_date": trade_date,
         "triggers": triggers,

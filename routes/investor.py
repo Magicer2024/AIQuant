@@ -24,7 +24,7 @@ from config.personal_config import (
     MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
     EXIT_TRACK_START_DATE,
 )
-from config.strategy_params import T1_GAP_GUARD, get_param
+from config.strategy_params import T1_GAP_GUARD, MID_LONG_REGIME_CAP, get_param
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -274,12 +274,32 @@ def _ensure_personal_tables():
             note        TEXT,
             created_at  TEXT
         );
+
+        -- 持仓卖出流水（减仓/平仓），用于统计历史持仓收益率
+        CREATE TABLE IF NOT EXISTS personal_trade (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            position_id INTEGER,             -- 关联 personal_position.id（删除持仓时级联清理）
+            code        TEXT NOT NULL,
+            name        TEXT,
+            action      TEXT NOT NULL,     -- reduce 减仓 | close 平仓
+            shares      INTEGER NOT NULL,  -- 卖出股数
+            price       REAL NOT NULL,     -- 卖出价
+            cost_price  REAL NOT NULL,     -- 该笔成本价
+            pnl         REAL NOT NULL,     -- 已实现盈亏（元）
+            pnl_pct     REAL NOT NULL,     -- 收益率（%）
+            traded_at   TEXT,
+            created_at  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pt_code      ON personal_trade(code);
+        CREATE INDEX IF NOT EXISTS idx_pt_traded_at ON personal_trade(traded_at);
         """)
         # stock_info 可能缺少 industry 列（个人投资者会希望按行业筛选）
         _safe_add_column(conn, "stock_info", "industry", "TEXT")
         # 自选股价格预警：目标价 + 触发方向（above=现价↑目标 / below=现价↓目标）
         _safe_add_column(conn, "personal_watchlist", "target_price", "REAL")
         _safe_add_column(conn, "personal_watchlist", "alert_dir", "TEXT")
+        # 持仓卖出流水关联 position_id（老库迁移；删除持仓时级联清理其流水）
+        _safe_add_column(conn, "personal_trade", "position_id", "INTEGER")
 
 
 # ─────────────────────────────────────────────
@@ -495,10 +515,20 @@ def today_recommendations():
                     COALESCE(s.horizon, 'short') AS horizon,
                     s.strategy,
                     COALESCE(s.pct_above_ma20, 0) AS pct_above_ma20,
-                    lp.close  AS latest_close,
-                    lp.pct_change AS latest_pct,
-                    lp.high   AS latest_high,
-                    lp.low    AS latest_low,
+                    -- 优先取 daily_price 最新交易日（与 confirm_trigger 同源）；
+                    -- latest_price 物化表可能滞后（增量路径曾不刷新），兜底防过期价误判突破确认
+                    COALESCE((SELECT d.close FROM daily_price d
+                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
+                             lp.close) AS latest_close,
+                    COALESCE((SELECT d.pct_change FROM daily_price d
+                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
+                             lp.pct_change) AS latest_pct,
+                    COALESCE((SELECT d.high FROM daily_price d
+                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
+                             lp.high) AS latest_high,
+                    COALESCE((SELECT d.low FROM daily_price d
+                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
+                             lp.low) AS latest_low,
                     i.industry
                 FROM stock_signal s
                 LEFT JOIN latest_price lp ON lp.code = s.code
@@ -786,7 +816,14 @@ def today_recommendations():
                 items = items[:cap] if cap > 0 else []
                 groups[hz] = items
             else:
-                groups[hz] = items[:limit]   # mid/long 保持原逻辑
+                # mid/long 市场环境天花板（2026-08）：长线是只做多趋势策略，
+                # cold 普跌市里负期望 → cold 整组出 0、cool 收缩；None = 不受 regime 限制
+                ml_cap = MID_LONG_REGIME_CAP.get(hz, {}).get(market_regime)
+                if ml_cap is not None:
+                    items = items[:ml_cap] if ml_cap > 0 else []
+                else:
+                    items = items[:limit]
+                groups[hz] = items
         for hz in ("short", "mid", "long"):
             groups.setdefault(hz, [])
         short_items = groups.get("short", [])
@@ -1046,6 +1083,10 @@ def exit_advice():
                 "hold_mean_pct": round(sum(hp) / len(hp), 2) if hp else None,
                 # 综合（清仓+持仓）：全部段平均持有收益
                 "all_mean_pct": round(sum(allp) / len(allp), 2) if allp else None,
+                # 累计口径（分栏展示）：累计收益 = 全部段盈亏之和（已清仓已实现 + 持仓浮盈）；
+                # 累计胜率 = 盈亏 > 0 的段占比
+                "cum_pnl": round(sum(allp), 2) if allp else None,
+                "win_rate": round(sum(1 for v in allp if v > 0) / len(allp) * 100, 1) if allp else None,
             }
 
         return ok(_sanitize({
@@ -1242,6 +1283,26 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
         return None
 
 
+def _record_trade(conn, pos, action: str, shares: int, price: float, traded_at: str) -> dict:
+    """写入一条卖出流水（减仓/平仓），返回 {pnl, pnl_pct}（元 / %）。
+
+    收益率按持仓成本价 cost_price 计算：pnl_pct = (price - cost_price) / cost_price。
+    """
+    cost_price = float(pos["cost_price"] or 0)
+    pnl = (price - cost_price) * shares if cost_price else 0.0
+    pnl_pct = ((price - cost_price) / cost_price * 100) if cost_price else 0.0
+    conn.execute(
+        """
+        INSERT INTO personal_trade
+          (position_id, code, name, action, shares, price, cost_price, pnl, pnl_pct, traded_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (pos["id"], pos["code"], pos["name"], action, shares, price, cost_price,
+         round(pnl, 2), round(pnl_pct, 2), traded_at, traded_at),
+    )
+    return {"pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2)}
+
+
 @investor_bp.route("/positions", methods=["GET"])
 def list_positions():
     """列出当前持仓（含最新价 + 浮动盈亏 + 出场诊断）"""
@@ -1367,17 +1428,108 @@ def add_position():
         return ok({"id": new_id["id"] if new_id else None, "code": code, "name": name})
 
 
+@investor_bp.route("/positions/<int:pid>/reduce", methods=["POST"])
+def reduce_position(pid: int):
+    """减仓 / 平仓卖出：{shares, price}。
+
+    shares < 剩余股数 → 减仓（部分卖出）；shares >= 剩余股数 → 平仓。
+    每次卖出写一条 personal_trade 流水，用于历史持仓收益率统计。
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        shares = int(body.get("shares") or 0)
+        price = float(body.get("price") or 0)
+    except (ValueError, TypeError):
+        return fail("shares/price 必须是数字", 400)
+    if shares <= 0 or price <= 0:
+        return fail("请填写卖出的股数与价格", 400)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        pos = conn.execute(
+            "SELECT * FROM personal_position WHERE id = ?", (pid,)
+        ).fetchone()
+        if not pos or pos["status"] != "holding":
+            return fail("持仓不存在或已平仓", 404)
+
+        remaining = int(pos["shares"] or 0)
+        sell_shares = min(shares, remaining)
+        if sell_shares <= 0:
+            return fail("持仓股数为 0，无法卖出", 400)
+
+        action = "close" if sell_shares >= remaining else "reduce"
+        trade = _record_trade(conn, pos, action, sell_shares, price, now)
+
+        new_shares = remaining - sell_shares
+        if new_shares <= 0:
+            conn.execute(
+                "UPDATE personal_position SET shares=0, status='closed', closed_at=?, updated_at=? WHERE id=?",
+                (now, now, pid),
+            )
+        else:
+            conn.execute(
+                "UPDATE personal_position SET shares=?, updated_at=? WHERE id=?",
+                (new_shares, now, pid),
+            )
+
+        return ok({
+            "action": action,
+            "sold_shares": sell_shares,
+            "price": price,
+            "pnl": trade["pnl"],
+            "pnl_pct": trade["pnl_pct"],
+            "remaining_shares": max(new_shares, 0),
+        })
+
+
 @investor_bp.route("/positions/<int:pid>", methods=["DELETE"])
 def delete_position(pid: int):
-    """删除/平仓持仓"""
+    """直接删除持仓记录（误录入时使用），并级联清理其卖出流水。
+
+    与「平仓」不同：平仓会保留持仓并按卖出价结算收益；
+    删除则是物理移除该条记录（含历史），不进入历史收益率统计。
+    """
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE personal_position SET status='closed', closed_at=?, updated_at=? WHERE id=?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             pid),
-        )
-        return ok({"closed": pid})
+        pos = conn.execute(
+            "SELECT * FROM personal_position WHERE id = ?", (pid,)
+        ).fetchone()
+        if not pos:
+            return fail("持仓不存在", 404)
+        conn.execute("DELETE FROM personal_trade WHERE position_id = ?", (pid,))
+        conn.execute("DELETE FROM personal_position WHERE id = ?", (pid,))
+        return ok({"deleted": pid})
+
+
+@investor_bp.route("/positions/history", methods=["GET"])
+def positions_history():
+    """历史持仓收益率统计：卖出流水（减仓/平仓）逐笔 + 汇总。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM personal_trade ORDER BY traded_at DESC, id DESC"
+        ).fetchall()
+        items = [dict(r) for r in rows]
+
+        total_pnl = sum(t["pnl"] or 0 for t in items)
+        wins = [t for t in items if (t["pnl"] or 0) > 0]
+        losses = [t for t in items if (t["pnl"] or 0) < 0]
+        win_rate = round(len(wins) / len(items) * 100, 1) if items else 0
+        avg_pnl_pct = round(sum(t["pnl_pct"] or 0 for t in items) / len(items), 2) if items else 0
+        total_sold = sum((t["shares"] or 0) * (t["price"] or 0) for t in items)
+
+        return ok({
+            "trades": _sanitize(items),
+            "summary": {
+                "trade_count": len(items),
+                "win_count": len(wins),
+                "loss_count": len(losses),
+                "total_pnl": round(total_pnl, 2),
+                "win_rate": win_rate,
+                "avg_pnl_pct": avg_pnl_pct,
+                "best_pnl_pct": round(max((t["pnl_pct"] or 0 for t in items), default=0), 2),
+                "worst_pnl_pct": round(min((t["pnl_pct"] or 0 for t in items), default=0), 2),
+                "total_sold_amount": round(total_sold, 2),
+            },
+        })
 
 
 # ─────────────────────────────────────────────
