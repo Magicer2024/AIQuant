@@ -413,6 +413,14 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
+                <h3>次日强势观察 · 博弈明天涨停/大涨</h3>
+                <span class="text-muted" style="font-size:12px" id="surgePicksHint">大阳突破 × 龙虎榜净买双重严筛 · 次日开盘买入 · 严守止损、仓位从轻 · 宁缺毋滥</span>
+            </div>
+            <div id="surgePicks" class="action-plan-grid">加载中…</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
                 <h3>出场跟踪 · 7月20日起推荐的出场状态</h3>
                 <span class="text-muted" style="font-size:12px" id="exitTrackHint">按推荐自带止损/止盈价跟踪 · 买入价=推荐次日开盘价 · 短线≤10日 / 中线≤60日 / 长线不限，未卖出前持续跟踪</span>
             </div>
@@ -476,6 +484,7 @@ async function loadHomeTab(container) {
     await Promise.all([
         loadMarketOverview(),
         loadTodayPicks(),
+        loadSurgePicks(),
         loadExitTrack(),
         loadMyPositions(),
         loadMyWatchlist(),
@@ -757,6 +766,87 @@ async function loadTodayPicks(isFallback) {
     } catch(e) {
         if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
     }
+}
+
+// ── 次日强势观察（强势突破信号线：博弈次日涨停/大涨，独立于今日推荐）──
+async function loadSurgePicks() {
+    const box = document.getElementById('surgePicks');
+    if (!box) return;
+    try {
+        const resp = await RequestManager.fetch('surge-picks', API + '/investor/surge_picks?limit=6');
+        const data = (resp && resp.data) || {};
+        const items = data.items || [];
+        const hint = document.getElementById('surgePicksHint');
+        if (hint && data.date) {
+            hint.textContent = '信号日 ' + data.date + ' · 大阳突破 × 龙虎榜净买双重严筛 · 次日开盘买入 · 严守止损、仓位从轻 · 宁缺毋滥';
+        }
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-state">今日无强势突破信号<br><span style="color:var(--text-muted);font-size:12px">龙虎榜净买严筛无合格候选（或大盘过热被门控），宁缺毋滥</span></div>';
+            return;
+        }
+        box.innerHTML = items.map(it => renderSurgeCard(it)).join('');
+    } catch(e) {
+        box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+// 次日强势观察卡片：轻量版 action-card（无建仓分批/信号灯，突出信号日涨幅与买卖价位）
+function renderSurgeCard(it) {
+    const fmt = v => v != null ? Number(v).toFixed(2) : '--';
+    const pctDay = it.pct_day;
+    const pctHtml = pctDay != null
+        ? `<span class="idx-up" style="font-weight:700">+${pctDay.toFixed(2)}%</span>` : '';
+    const rr = it.risk_reward_ratio;
+    const rrCls = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
+    const rrHtml = rr != null ? `<span class="rr-tag ${rrCls}">盈亏比 ${rr.toFixed(2)}</span>` : '';
+    const triggers = (it.triggers || []).map(t => `<span class="reason-chip">${t}</span>`).join('');
+    // 龙虎榜增强标记（上榜且净买>0 的票两窗验证更强，徽章突出展示）
+    const hasLhb = (it.triggers || []).some(t => t.indexOf('龙虎榜') >= 0);
+    // 次日已收盘且越过止盈 → 错过不追；次日已开始未错过 → 提示开盘买入
+    let statusHtml = '';
+    if (it.missed) {
+        statusHtml = '<div class="price-sub" style="color:var(--text-muted)">⏰ 已越过止盈位，错过不追</div>';
+    } else if (!it.started) {
+        statusHtml = '<div class="price-sub" style="color:var(--gold, #e0b34d)">🔔 明日开盘买入（参考信号日收盘）</div>';
+    }
+    return `
+        <div class="action-card" style="border-color:rgba(255,170,60,0.35)${it.missed ? ';opacity:.6' : ''}" onclick="openKline('${it.code}')">
+            <div class="action-head">
+                <div>
+                    <div class="action-name">${it.name || it.code} <span class="strategy-badge" style="background:rgba(255,170,60,0.15);color:#ffaa3c">⚡ 强势突破</span>${hasLhb ? ' <span class="strategy-badge lhb-badge" title="信号日上榜龙虎榜且主力净买入，历史验证隔日更强">🐯 龙虎榜净买</span>' : ''}</div>
+                    <div class="action-code">${it.code}${it.industry ? ` · ${it.industry}` : ''}</div>
+                </div>
+                <div class="action-score" title="强势分：量比与涨幅强度（30~50）">
+                    <div class="score-num">${it.fusion_score || '--'}</div>
+                    <div class="score-lbl">强势分</div>
+                </div>
+            </div>
+            <div class="action-prices">
+                <div class="price-cell buy">
+                    <div class="price-lbl">信号日收盘</div>
+                    <div class="price-val">${fmt(it.signal_price)}</div>
+                    <div class="price-sub">当日 ${pctHtml}</div>
+                    ${statusHtml}
+                </div>
+                <div class="action-arrow">·</div>
+                <div class="price-cell sell">
+                    <div class="price-lbl">止盈目标</div>
+                    <div class="price-val">${fmt(it.take_profit)}</div>
+                    <div class="price-sub">${it.reward_pct != null ? `+${it.reward_pct}%` : '--'}</div>
+                </div>
+                <div class="price-arrow">⛔</div>
+                <div class="price-cell stop">
+                    <div class="price-lbl">止损</div>
+                    <div class="price-val">${fmt(it.stop_loss)}</div>
+                    <div class="price-sub">${it.risk_pct != null ? `-${it.risk_pct}%` : '--'}</div>
+                </div>
+            </div>
+            <div class="action-foot">
+                <div class="reasons">${triggers}</div>
+                <div class="reasons" style="margin-top:4px"><span class="reason-chip" style="background:rgba(255,100,100,0.08);color:var(--text-muted)">⚠ 博弈型信号：胜率≈半，博的是大涨尾部，仓位从轻、次日不涨就走</span></div>
+                ${rrHtml}
+            </div>
+        </div>`;
 }
 
 // P0: 出场跟踪（7月20日起推荐的出场状态，按短线/中线/长线三组，未卖出持续跟踪）

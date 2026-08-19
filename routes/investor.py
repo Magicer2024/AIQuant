@@ -308,18 +308,21 @@ def _ensure_personal_tables():
 
 
 def _exit_trailing_params(horizon: str) -> tuple:
-    """按周期取移动止盈参数 (trailing_pct, partial_tp)。
+    """按周期取移动止盈参数 (trailing_pct, partial_tp, stop_cap_pct)。
 
     2026-08 落地：short/mid/long 三周期全部启用移动止盈（让利润奔跑，不轻易止盈）。
     partial_tp（启动线）覆盖 stock_signal.take_profit 作启动线——long 自带的
     take_profit=现价×1.5（+50% 目标价）不宜直接当启动线；short 用 short_take_profit。
+    stop_cap_pct：止损宽度上限（2026-08-19 落地）——仅中线叠加，信号自带 k×ATR
+    止损可达 -20%，收窄到 -12% 消除深浮亏尾部；short/long 传 None 不叠加。
     参数均来自 TUNABLE_PARAMS（DB 可覆盖，60s TTL）。
     """
     if horizon == "short":
-        return get_param("short_trailing_pct"), get_param("short_take_profit")
+        return get_param("short_trailing_pct"), get_param("short_take_profit"), None
     if horizon == "mid":
-        return get_param("mid_trailing_pct"), get_param("mid_partial_tp")
-    return get_param("long_trailing_pct"), get_param("long_partial_tp")
+        return (get_param("mid_trailing_pct"), get_param("mid_partial_tp"),
+                get_param("mid_stop_max_width"))
+    return get_param("long_trailing_pct"), get_param("long_partial_tp"), None
 
 
 def _split_continuous_segments(seg: list, df, horizon: str) -> list:
@@ -346,7 +349,7 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
         float(_f["close"]) or first["buy_price"])
 
     # 用段内最新止损/止盈评估整段持仓（三周期均开启移动止盈，与出场跟踪同口径）
-    _trail, _partial = _exit_trailing_params(horizon)
+    _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
     adv = evaluate_exit_by_prices(
         entry_price=entry_price,
         entry_date=first["scan_date"],
@@ -356,6 +359,7 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
         max_hold_days=get_max_hold(horizon),
         trailing_pct=_trail,
         partial_tp=_partial,
+        stop_cap_pct=_stop_cap,
     )
     exit_date = (adv.get("detail") or {}).get("exit_date")
     if not exit_date:
@@ -419,7 +423,7 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
         if not entry_price or entry_price <= 0:
             return None
         hz = d.get("horizon") or "short"
-        _trail, _partial = _exit_trailing_params(hz)
+        _trail, _partial, _stop_cap = _exit_trailing_params(hz)
         advice = evaluate_exit_by_prices(
             entry_price=entry_price,
             entry_date=str(scan_date)[:10],
@@ -430,6 +434,7 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
             # 三周期均开启移动止盈：浮盈达启动线后不再达价即卖，回撤才清仓
             trailing_pct=_trail,
             partial_tp=_partial,
+            stop_cap_pct=_stop_cap,
         )
         return advice
     except Exception:
@@ -538,6 +543,8 @@ def today_recommendations():
                   AND (s.buy_price IS NOT NULL OR s.fusion_score IS NOT NULL)
                   AND s.name NOT LIKE '%ST%'
                   AND s.name NOT LIKE '%退%'
+                  -- 强势突破是首页独立栏目信号线，不占今日推荐名额
+                  AND COALESCE(s.strategy, '') != '强势突破'
                   {board_filter}
                   {pe_filter}
                   {gate_sql}
@@ -848,6 +855,117 @@ def available_dates():
         return ok({"dates": dates})
 
 
+@investor_bp.route("/surge_picks", methods=["GET"])
+def surge_picks():
+    """次日强势观察（强势突破信号线）—— 首页独立栏目，不混入今日推荐
+
+    目标：次日（T+1）可能涨停或大涨的高弹性观察池。
+    来源：stock_signal 表 strategy='强势突破'（盘后大阳突破扫描，仅最新交易日）。
+    验证口径（主板 OC 现实口径）：基础条件验证窗大涨率 12.9%；叠加龙虎榜
+    硬过滤（同日上榜且净买>0，用户确认宁缺毋滥）后验证窗大涨率 25%、
+    盘中触涨停 21.4%（tools/eval_lhb_surge_boost.py 两窗验证）——高风险
+    博弈型信号，前端需展示风险提示。
+    支持 ?date=2026-08-18 查看指定日期；?limit 默认 6、上限 12。
+    """
+    limit = request.args.get("limit", default=6, type=int)
+    limit = max(0, min(limit, 12))
+    target_date = request.args.get("date")
+
+    board_filter = ""
+    if MAIN_BOARD_ONLY:
+        board_filter = "".join(
+            f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+
+    with get_conn() as conn:
+        if target_date:
+            scan_date = target_date
+        else:
+            row = conn.execute(
+                "SELECT MAX(scan_date) AS d FROM stock_signal "
+                "WHERE strategy = '强势突破'"
+            ).fetchone()
+            scan_date = row["d"] if row else None
+        if not scan_date or limit == 0:
+            return ok({"date": scan_date, "count": 0, "items": []})
+
+        rows = conn.execute(
+            f"""
+            SELECT s.code, s.name, s.price AS signal_price,
+                   s.buy_price, s.stop_loss, s.take_profit,
+                   s.fusion_score, s.trigger_list, s.scan_date, s.trade_date,
+                   -- 信号日当日涨幅（栏目卡片展示用）
+                   (SELECT d.pct_change FROM daily_price d
+                    WHERE d.code = s.code AND d.trade_date = s.trade_date) AS pct_day,
+                   -- 最新收盘/日期（判断次日是否已开盘/错过）
+                   (SELECT d.close FROM daily_price d
+                    WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1) AS latest_close,
+                   (SELECT MAX(d.trade_date) FROM daily_price d
+                    WHERE d.code = s.code) AS latest_date,
+                   i.industry
+            FROM stock_signal s
+            LEFT JOIN stock_info i ON i.code = s.code
+            WHERE s.scan_date = ?
+              AND s.strategy = '强势突破'
+              AND s.buy_price IS NOT NULL
+              AND s.name NOT LIKE '%ST%'
+              AND s.name NOT LIKE '%退%'
+              {board_filter}
+            ORDER BY COALESCE(s.fusion_score, 0) DESC
+            LIMIT ?
+            """,
+            (scan_date, limit),
+        ).fetchall()
+
+        items = []
+        for r in rows:
+            d = dict(r)
+            entry = d.get("buy_price") or d.get("signal_price") or 0
+            stop = d.get("stop_loss") or 0
+            tp = d.get("take_profit") or 0
+            risk_pct = round((entry - stop) / entry * 100, 1) if entry > 0 and stop > 0 else None
+            reward_pct = round((tp - entry) / entry * 100, 1) if entry > 0 and tp > 0 else None
+            risk_reward = round(reward_pct / risk_pct, 2) if risk_pct and reward_pct and risk_pct > 0 else None
+            triggers = []
+            tl = d.get("trigger_list")
+            if tl:
+                try:
+                    parsed = json.loads(tl)
+                    if isinstance(parsed, list):
+                        triggers = [str(x) for x in parsed]
+                except (json.JSONDecodeError, TypeError):
+                    triggers = [s.strip() for s in str(tl).split(",") if s.strip()]
+            # 错过判定：次日已收盘且收盘价越过止盈价（追高无意义）
+            latest_close = d.get("latest_close")
+            started = bool(d.get("latest_date") and d["latest_date"] > (d.get("trade_date") or ""))
+            missed = bool(started and latest_close and tp and latest_close > tp)
+            items.append({
+                "code": d.get("code"),
+                "name": d.get("name"),
+                "industry": d.get("industry"),
+                "fusion_score": round(d.get("fusion_score") or 0, 1),
+                "pct_day": round(d["pct_day"], 2) if d.get("pct_day") is not None else None,
+                "signal_price": entry,
+                "stop_loss": stop,
+                "take_profit": tp,
+                "risk_pct": risk_pct,
+                "reward_pct": reward_pct,
+                "risk_reward_ratio": risk_reward,
+                "latest_close": latest_close,
+                "started": started,
+                "missed": missed,
+                "triggers": triggers,
+                "scan_date": d.get("scan_date"),
+                "trade_date": d.get("trade_date"),
+            })
+        return ok({
+            "date": scan_date,
+            "count": len(items),
+            "items": _sanitize(items),
+            "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
+                    "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
+        })
+
+
 @investor_bp.route("/exit_advice", methods=["GET"])
 def exit_advice():
     """出场跟踪：对 2026-07-20 起推荐的出场状态（按 short/mid/long 三周期分组）
@@ -923,6 +1041,8 @@ def exit_advice():
                           AND s.buy_price > 0
                           AND s.name NOT LIKE '%ST%'
                           AND s.name NOT LIKE '%退%'
+                          -- 强势突破是首页独立栏目信号线，不纳入出场跟踪
+                          AND COALESCE(s.strategy, '') != '强势突破'
                           AND ({gap_sql}) = 0
                           {board_filter}
                           {gate_sql_cond}
@@ -1020,7 +1140,7 @@ def exit_advice():
                 entry_date = str(after.index[0])[:10]
 
                 # 持仓从最早推荐日起算；止损/止盈按最新推荐判定（三周期均开启移动止盈）
-                _trail, _partial = _exit_trailing_params(horizon)
+                _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
                 advice = evaluate_exit_by_prices(
                     entry_price=entry_price,
                     entry_date=first["scan_date"],
@@ -1030,6 +1150,7 @@ def exit_advice():
                     max_hold_days=get_max_hold(horizon),
                     trailing_pct=_trail,
                     partial_tp=_partial,
+                    stop_cap_pct=_stop_cap,
                 )
                 detail = dict(advice.get("detail") or {})
                 if entry_date is not None:

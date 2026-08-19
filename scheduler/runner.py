@@ -2,7 +2,9 @@
 scheduler/runner.py -- background sync task and scheduler
 
 调度策略：
-  - 18:00  盘后同步（全市场行情 + 策略分重算）
+  - 19:00  盘后同步（全市场行情 + 龙虎榜 + 策略分重算）
+    （19 点而非 18 点：东财龙虎榜通常 18:30 后才发布齐全，强势突破
+     硬过滤与隔日动量都依赖当日龙虎榜，宁晚勿缺）
   - 失败后指数退避重试（30min → 60min → 120min，最多 3 次）
 """
 import threading
@@ -189,15 +191,15 @@ def _schedule_retry(delay_seconds: int):
 
 
 def start_scheduler():
-    """启动定时同步调度器（每日 18:00 盘后同步 + 策略分重算）"""
+    """启动定时同步调度器（每日 19:00 盘后同步 + 龙虎榜 + 策略分重算）"""
     def _sched_loop():
         while SCHEDULER_RUNNING["enabled"]:
             schedule.run_pending()
             time.sleep(60)
 
     schedule.clear()
-    schedule.every().day.at("18:00").do(_job_sync)
-    print("[Scheduler] 每日 18:00 盘后自动数据同步")
+    schedule.every().day.at("19:00").do(_job_sync)
+    print("[Scheduler] 每日 19:00 盘后自动数据同步（含龙虎榜）")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)

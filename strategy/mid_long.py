@@ -5,8 +5,9 @@ strategy/mid_long.py —— 中线 / 长线选股信号扫描
 补齐推荐体系的三周期（horizon）维度：
 
 - 短期（short, 1~10 交易日）：core/sync.py 现有 5 信号融合（strategies.py）
-- 中期（mid,   10~60 交易日）：本模块 scan_mid_term —— 复活 strategy/strategy.py
-  的中线综合评分（0~100 分 + ATR 止损止盈）
+- 中期（mid,   10~60 交易日）：本模块 scan_mid_term —— 基于 strategy/strategy.py
+  composite 评分的三过滤确认入场（锚点上穿 + 突破确认 + 不追高 + 弱市闸门，
+  2026-08-19 风格替换；止损止盈仍为 ATR 口径）
 - 长期（long,  60+ 交易日）：本模块 scan_long_term —— MA60/MA120 长趋势
   + 低波动 + 回撤过滤（财务降级过滤在推荐 API 层做）
 
@@ -28,16 +29,27 @@ import pandas as pd
 
 
 # ─────────────────────────────────────────────
-# 中线：复活 strategy/strategy.py 综合评分（1~8 周持仓）
+# 中线：三过滤确认入场（2026-08-19 风格替换，替代"上穿当日"触发）
 # ─────────────────────────────────────────────
 
 def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
-                  score_threshold: float = 65.0) -> Optional[dict]:
+                  score_threshold: float = 65.0,
+                  weak_market_ok: bool = True) -> Optional[dict]:
     """
-    中线综合评分信号（趋势/动量/量能/布林多因子 0~100 分）。
+    中线三过滤确认信号（锚点 + 突破确认 + 不追高 + 弱市闸门）。
 
-    命中条件：最新交易日 COMPOSITE_SCORE >= score_threshold 且 BUY_SIGNAL
-    （综合分上穿阈值当日，避免同一趋势重复出信号）。
+    命中条件（缺一不可）：
+      1) 锚点：近 mid_anchor_lookback 日（默认 5）内 composite 分最近一次
+         上穿 score_threshold（前一日 <阈值、当日 >=阈值）；
+      2) 确认：当日收盘 > 锚点日高点 × mid_confirm_mult（默认 1.002），
+         且当日为该锚点的首个确认日（锚点与今日之间的任何一日均未突破）；
+      3) 位置：当日偏离 MA20 ≤ mid_dev_ma20_max（默认 5%，不追高）；
+      4) 弱市闸门：weak_market_ok=False（调用方按全市场当日平均涨幅判定）不出信号。
+
+    回测依据（tools/verify_mid_three_filter.py：全历史 21.2 万笔，
+    test=2020+ 9.7 万笔，出场同线上 launch=0.06/trail=0.10/cap=0.12）：
+      旧"上穿当日"入场: test 胜率 40.1% 均值 +0.930% PF 1.79
+      本三过滤组合:     test 胜率 43.2% 均值 +1.385% PF 1.74（日均 61 信号）
 
     Returns:
         None 或 dict:
@@ -45,6 +57,8 @@ def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
           trade_date/triggers(中文命中描述)
     """
     if df is None or len(df) < min_rows:
+        return None
+    if not weak_market_ok:
         return None
 
     # 延迟导入，避免与 strategy/strategy.py 形成循环依赖
@@ -57,15 +71,49 @@ def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
     if result is None or len(result) < 2:
         return None
 
+    from config.strategy_params import get_param
+    lookback = int(get_param("mid_anchor_lookback"))
+    confirm_mult = float(get_param("mid_confirm_mult"))
+    dev_max = float(get_param("mid_dev_ma20_max"))
+
+    score = result["COMPOSITE_SCORE"].astype(float)
+    cross = (score >= score_threshold) & (score.shift(1) < score_threshold)
+    close_s = result["close"].astype(float)
+    high_s = result["high"].astype(float)
+    ma20_s = result["MA20"].astype(float)
+
+    last = len(result) - 1
     latest = result.iloc[-1]
-    score = float(latest.get("COMPOSITE_SCORE", 0) or 0)
-    if not math.isfinite(score) or score < score_threshold:
-        return None
-    if not bool(latest.get("BUY_SIGNAL", False)):
+    close = float(latest["close"])
+    ma20 = float(ma20_s.iloc[last])
+    if not math.isfinite(ma20) or ma20 <= 0:
         return None
 
-    close = float(latest["close"])
-    from config.strategy_params import get_param
+    # 过滤 3：偏离 MA20 上限（不追高）
+    dev = close / ma20 - 1.0
+    if not math.isfinite(dev) or dev > dev_max:
+        return None
+
+    # 过滤 1：最近 lookback 日内的上穿锚点
+    anchor = None
+    for age in range(1, lookback + 1):
+        i = last - age
+        if i < 0:
+            break
+        if bool(cross.iloc[i]):
+            anchor = i
+            break
+    if anchor is None:
+        return None
+
+    # 过滤 2：当日首次收盘突破锚点日高点 × confirm_mult
+    target = float(high_s.iloc[anchor]) * confirm_mult
+    if not math.isfinite(target) or close <= target:
+        return None
+    between = close_s.iloc[anchor + 1: last]
+    if len(between) > 0 and bool((between > target).any()):
+        return None  # 锚点后已有确认日，今日不是首个确认日
+
     atr = float(latest.get("ATR", 0) or 0)
     if math.isfinite(atr) and atr > 0:
         # 止损 = close - k×ATR，止盈 = close + 2.5×k×ATR（盈亏比固定 2.5）。
@@ -78,16 +126,18 @@ def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
         stop = round(close * 0.92, 4)
         take = round(close * 1.20, 4)
 
-    # 命中的中文理由（基于最新指标状态）
-    triggers = ["中线综合评分 " + str(round(score, 1)) + " 分（≥" + str(int(score_threshold)) + "）"]
+    anchor_score = float(score.iloc[anchor])
+    triggers = [
+        "锚点日综合评分 " + str(round(anchor_score, 1)) + " 分（上穿" + str(int(score_threshold)) + "）",
+        "收盘突破锚点日高点（确认入场）",
+        "偏离MA20 " + str(round(dev * 100, 1)) + "%（≤" + str(round(dev_max * 100, 1)) + "% 不追高）",
+    ]
     if bool(latest.get("STRONG_BUY", False)):
         triggers.append("强烈买入区间（≥80 分）")
     ma_bull = (latest.get("MA5", 0) > latest.get("MA10", 0)) and \
               (latest.get("MA10", 0) > latest.get("MA20", 0))
     if ma_bull:
         triggers.append("均线多头排列")
-    if latest.get("DMI_ADX", 0) and float(latest.get("DMI_ADX") or 0) > 25:
-        triggers.append("ADX 趋势强劲")
 
     idx = result.index[-1]
     trade_date = str(idx.date()) if hasattr(idx, "date") else str(idx)[:10]
@@ -95,7 +145,7 @@ def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
     return {
         "horizon": "mid",
         "strategy": "中线综合",
-        "fusion_score": round(score / 2.0, 2),  # 0~100 → 0~50 量纲对齐
+        "fusion_score": round(anchor_score / 2.0, 2),  # 0~100 → 0~50 量纲对齐
         "buy_price": round(close, 2),
         "stop_loss": round(stop, 2),
         "take_profit": round(take, 2),

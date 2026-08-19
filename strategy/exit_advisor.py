@@ -231,6 +231,7 @@ def evaluate_exit_by_prices(
     max_hold_days: Optional[int] = None,
     trailing_pct: Optional[float] = None,
     partial_tp: Optional[float] = None,
+    stop_cap_pct: Optional[float] = None,
 ) -> dict:
     """按推荐自带止损/止盈价逐日模拟出场状态（出场跟踪新口径）。
 
@@ -261,6 +262,10 @@ def evaluate_exit_by_prices(
                     >=1 视为绝对价（如 110.0）。覆盖 take_profit 作为启动线，用于 mid/long：
                     其 stock_signal.take_profit 可能是 ATR 止盈价或长线 +50% 目标价，
                     不适合直接当启动线。None 时回退 take_profit。
+        stop_cap_pct: 止损宽度上限（小数，如 0.12 = 最大允许 -12%）。信号自带止损
+                      （如中线 k×ATR 可达 -20%）过宽时收窄：
+                      effective_stop = max(stop_loss, entry_price×(1-此值))。
+                      None/非法值（不在 1%~99% 区间）表示不叠加。
 
     Returns:
         dict: {
@@ -280,6 +285,13 @@ def evaluate_exit_by_prices(
             "reason": "数据不足，暂无法评估",
             "detail": {"entry_price": round(entry_price, 2) if entry_price else None},
         }
+
+    # 止损宽度上限：信号自带止损过宽（如中线 k×ATR 可达 -20%）时收窄到
+    # entry×(1-cap)。先于防御检查执行，保证后续 take_profit<=stop_loss 判定用收窄后的值。
+    if stop_cap_pct is not None and 0.01 <= stop_cap_pct < 1.0:
+        capped = entry_price * (1 - stop_cap_pct)
+        if stop_loss is None or capped > stop_loss:
+            stop_loss = capped
 
     # 防御：非法止损/止盈价（<=0 或止盈低于止损）视为未设置，避免历史脏数据误触发
     if stop_loss is not None and stop_loss <= 0:

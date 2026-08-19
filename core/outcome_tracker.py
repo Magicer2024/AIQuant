@@ -111,6 +111,8 @@ def insert_new_outcomes(days_back: int = 60):
                       AND s.buy_price > 0
                       AND s.name NOT LIKE '%ST%'
                       AND s.name NOT LIKE '%退%'
+                      -- 强势突破是首页独立栏目信号线，不计入推荐复盘胜率
+                      AND COALESCE(s.strategy, '') != '强势突破'
                       AND ({gap_sql}) = 0
                       {board_filter}
                       {gate_sql_cond}
@@ -320,6 +322,8 @@ def _evaluate_mid_long(conn, row, horizon: str, now_str: str) -> bool:
     df = pd.DataFrame([dict(p) for p in prices]).set_index("trade_date")
     trailing_pct = get_param("long_trailing_pct" if horizon == "long" else "mid_trailing_pct")
     partial_tp = get_param("long_partial_tp" if horizon == "long" else "mid_partial_tp")
+    # 止损宽度上限：仅中线叠加（与出场跟踪同口径），short/long 传 None
+    stop_cap_pct = get_param("mid_stop_max_width") if horizon == "mid" else None
     adv = evaluate_exit_by_prices(
         entry_price=entry,
         entry_date=scan_date,
@@ -329,6 +333,7 @@ def _evaluate_mid_long(conn, row, horizon: str, now_str: str) -> bool:
         max_hold_days=get_max_hold(horizon),
         trailing_pct=trailing_pct,
         partial_tp=partial_tp,
+        stop_cap_pct=stop_cap_pct,
     )
     detail = adv.get("detail") or {}
     exit_reason = detail.get("exit_reason")

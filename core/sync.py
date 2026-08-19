@@ -125,12 +125,13 @@ from strategy.strategies import (
 )
 from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.next_day_momentum import scan_next_day_momentum
+from strategy.surge_breakout import scan_surge_breakout
 from strategy.rec_filters import (
     trend_gate_series, quality_series, passes_quality,
     chase_filter_series, chase_filter, extension_filter_series,
     rsi_sweet_spot_series,
 )
-from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM
+from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM, SURGE_BREAKOUT
 
 # 短线抄底引擎选择：pure_bottom = v1 已反弹（线上默认，双口径回测验证组合）；
 # pure_bottom_v2 = 买回踩平滑版（P1-2.1 灰度，tools/_eval_pullback.py 34 cohort：
@@ -983,8 +984,8 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         total_idx = sum(index_results.values())
         print(f">>> 指数同步完成，共写入 {total_idx} 行")
 
-    # 同步当日龙虎榜（供隔日动量信号线）—— 抓取失败不阻断主流程
-    if NEXT_DAY_MOMENTUM.get("enabled"):
+    # 同步当日龙虎榜（供隔日动量 + 强势突破硬过滤）—— 抓取失败不阻断主流程
+    if NEXT_DAY_MOMENTUM.get("enabled") or SURGE_BREAKOUT.get("enabled"):
         try:
             if verbose:
                 print(f"\n>>> 同步龙虎榜 {start_date}~{end_date}...")
@@ -1207,16 +1208,69 @@ def _resolve_sig_threshold():
     return float(get_param("sig_threshold")), None
 
 
+def _surge_market_ok() -> bool:
+    """强势突破大盘门控：最新交易日全市场平均涨幅未过热（火热日追高为负期望）。
+
+    口径与 tools/mine_surge_next_day.py 的 regime 定义一致：
+    当日全市场 AVG(pct_change) >= max_market_pct（默认 +1%）时返回 False。
+    任一异常时默认放行（门控失效不阻断信号线，与龙虎榜同步失败同策略）。
+    """
+    if not SURGE_BREAKOUT.get("enabled"):
+        return False
+    try:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
+                "WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)"
+            ).fetchone()
+        avg_pct = float(row["avg_pct"]) if row and row["avg_pct"] is not None else None
+        if avg_pct is None:
+            return True
+        return avg_pct < float(SURGE_BREAKOUT.get("max_market_pct", 1.0))
+    except Exception:
+        return True
+
+
+def _mid_weak_market_ok(scan_date=None) -> bool:
+    """中线弱市闸门：指定交易日全市场平均涨幅 > mid_weak_market_gate（默认 -0.5%）
+    才放行中线信号（2026-08-19 三过滤入场的第四重过滤，口径见
+    tools/verify_mid_three_filter.py：叠加后 test 均值 +1.233%→+1.385%）。
+
+    scan_date=None 时取最新交易日（全量重算路径）。
+    任一异常/缺数据时默认放行（闸门失效不阻断信号线，与强势突破同策略）。
+    """
+    try:
+        from config.strategy_params import get_param
+        gate = float(get_param("mid_weak_market_gate"))
+        with get_conn() as conn:
+            if scan_date:
+                row = conn.execute(
+                    "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
+                    "WHERE trade_date = ?", (scan_date,)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
+                    "WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)"
+                ).fetchone()
+        avg_pct = row["avg_pct"] if row else None
+        if avg_pct is None:
+            return True
+        return float(avg_pct) > gate
+    except Exception:
+        return True
+
+
 def _build_signal_records(df, code, name, total_shares, sig_threshold,
                           stop_loss_sc, take_profit_sc, lhb_row=None,
-                          scan_date=None, reuse_scores=False) -> list:
+                          scan_date=None, reuse_scores=False,
+                          surge_ok=False, mid_weak_ok=True) -> list:
     """
     对单只股票的日线 df 生成 stock_signal 记录列表（与 recalc_all_scores 同口径）。
 
     短线段：
       - scan_date 为 "YYYY-MM-DD" 时，只生成该日期的记录（增量模式，每日盘后）；
       - scan_date 为 None 时，对全部历史命中日生成（全量重算模式，供回测读历史）。
-    中/长线与隔日动量（龙虎榜）恒只评估 df 最新交易日（信号持续期长，逐日写库会膨胀）。
+    中/长线与隔日动量（龙虎榜）、强势突破恒只评估 df 最新交易日（信号持续期短，逐日写库会膨胀）。
 
     :param reuse_scores: True 时短线复用 daily_price 已算好的分数列（仅限单日评估，
         须在 sync_strategy_score 写库之后调用，否则回退全量重算）。
@@ -1398,8 +1452,8 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             })
 
     # ── 中/长线信号：只评估最新交易日，命中各写一条 ──
-    for _scan in (scan_mid_term, scan_long_term):
-        sig = _scan(df)
+    # 中线三过滤入场（2026-08-19）：弱市闸门由调用方按全市场口径一次性判定后传入
+    for sig in (scan_mid_term(df, weak_market_ok=mid_weak_ok), scan_long_term(df)):
         if not sig:
             continue
         # 质量过滤（ST/流动性/市值），逻辑本身不改
@@ -1464,6 +1518,40 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                 "strategy": nd_sig["strategy"],
                 "pct_above_ma20": _pct_above_ma20(
                     pd.Timestamp(nd_sig["trade_date"]), nd_sig["buy_price"]),
+            })
+
+    # ── 强势突破（首页「次日强势观察」栏目专用）：仅最新交易日、大盘未过热 ──
+    # 与今日推荐短线组隔离：strategy='强势突破' 由 /today 与 outcome_tracker 显式剔除；
+    # 追加在动量之后：同 horizon 同票冲突时突破信号胜出（两者同为正期望短线信号）
+    if surge_ok:
+        sb_sig = scan_surge_breakout(
+            df, name, total_shares, params=SURGE_BREAKOUT, market_ok=True,
+            lhb_row=lhb_row)  # 龙虎榜增强：上榜且净买>0 加分（调用方已预加载）
+        if sb_sig and passes_quality(name, df, total_shares):
+            records.append({
+                "scan_date": sb_sig["trade_date"],
+                "trade_date": sb_sig["trade_date"],
+                "code": code,
+                "name": name or code,
+                "price": sb_sig["buy_price"],
+                "fusion_score": sb_sig["fusion_score"],
+                "vol_score": 0,
+                "ma_score": 0,
+                "diverge_score": 0,
+                "bottom_score": 0,
+                "whale_score": 0,
+                "trigger_list": _json.dumps(sb_sig["triggers"], ensure_ascii=False),
+                "buy_price": sb_sig["buy_price"],
+                "stop_loss": sb_sig["stop_loss"],
+                "take_profit": sb_sig["take_profit"],
+                "buy_volume": 0,
+                "buy_money": 0,
+                "sent_wechat": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "horizon": sb_sig["horizon"],
+                "strategy": sb_sig["strategy"],
+                "pct_above_ma20": _pct_above_ma20(
+                    pd.Timestamp(sb_sig["trade_date"]), sb_sig["buy_price"]),
             })
 
     return records
@@ -1570,16 +1658,30 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
     except Exception:
         _mktcap_map = {}
     _lhb_map = {}
-    if NEXT_DAY_MOMENTUM.get("enabled"):
+    # 隔日动量与强势突破（龙虎榜硬过滤）均需龙虎榜映射；
+    # 按信号评估日加载（而非全局最新日），否则历史日重算会错配到更新的龙虎榜记录
+    if NEXT_DAY_MOMENTUM.get("enabled") or SURGE_BREAKOUT.get("enabled"):
         try:
-            _lhb_date = get_latest_lhb_date()
-            if _lhb_date:
-                _lhb_map = get_lhb_map_for_date(_lhb_date)
-                if verbose:
-                    print(f"  [增量信号] 预加载龙虎榜 {_lhb_date}：{len(_lhb_map)} 只")
+            _lhb_map = get_lhb_map_for_date(scan_date)
+            if verbose:
+                if _lhb_map:
+                    print(f"  [增量信号] 预加载龙虎榜 {scan_date}：{len(_lhb_map)} 只")
+                else:
+                    print(f"  [增量信号] {scan_date} 无龙虎榜记录"
+                          f"（强势突破硬过滤当日将无信号）")
         except Exception as e:
             if verbose:
-                print(f"  [WARN] 隔日动量龙虎榜预加载失败: {e}")
+                print(f"  [WARN] 龙虎榜预加载失败: {e}")
+
+    # 强势突破大盘门控（全市场一次性判定，火热日不产生信号）
+    _surge_ok = _surge_market_ok()
+    if verbose and SURGE_BREAKOUT.get("enabled"):
+        print(f"  [强势突破] 大盘门控: {'放行' if _surge_ok else '拦截（全市场过热）'}")
+
+    # 中线弱市闸门（全市场一次性判定，弱市日不产生中线信号）
+    _mid_weak_ok = _mid_weak_market_ok(scan_date)
+    if verbose:
+        print(f"  [中线] 弱市闸门: {'放行' if _mid_weak_ok else '拦截（全市场弱势）'}")
 
     sig_records = []
     n_success = 0
@@ -1593,14 +1695,16 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
             # 增量只评估最新交易日：读取 scan_date 前 ~700 自然日窗口即可
             # （覆盖长线 250 日回撤 + MA120 斜率 + 中线 80 日 + 短线滚动窗口；
             #  滚动指标在 scan_date 处与全历史读取完全一致，I/O 与计算量大幅下降）
+            # end_date 截断到信号评估日：历史日重算时若读到更新数据，
+            # 中/长线/强势突破会错评成最新日（已踩坑）
             _start = (pd.Timestamp(scan_date) - timedelta(days=700)).strftime("%Y-%m-%d")
-            df = get_daily_price(code, start_date=_start)
+            df = get_daily_price(code, start_date=_start, end_date=scan_date)
             if df is None or len(df) < 30:
                 continue
             # 停牌密集股窗口内行数可能不足 scan_long_term 的 min_rows=250，
-            # 回退全历史读取，保证长线评估口径与全量重算完全一致
+            # 回退全历史读取（同样截断到评估日），保证长线评估口径与全量重算一致
             if len(df) < 260:
-                df = get_daily_price(code)
+                df = get_daily_price(code, end_date=scan_date)
                 if df is None or len(df) < 30:
                     continue
             _ts = (_mktcap_map.get(code) or {}).get("total_shares")
@@ -1608,7 +1712,8 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
                 df, code, name_map.get(code) or code, _ts,
                 SIG_THRESHOLD, STOP_LOSS_SC, TAKE_PROFIT_SC,
                 lhb_row=_lhb_map.get(code), scan_date=scan_date,
-                reuse_scores=True)
+                reuse_scores=True, surge_ok=_surge_ok,
+                mid_weak_ok=_mid_weak_ok)
             sig_records.extend(_recs)
             n_success += 1
         except Exception as e:
@@ -1731,18 +1836,27 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     except Exception:
         _mktcap_map = {}
 
-    # ── 隔日动量（龙虎榜净买占比）：一次性预加载最新龙虎榜日期的映射 ──
+    # ── 隔日动量（龙虎榜净买占比）+ 强势突破（龙虎榜硬过滤）：一次性预加载最新龙虎榜日期的映射 ──
     _lhb_map = {}
     _lhb_date = None
-    if NEXT_DAY_MOMENTUM.get("enabled"):
+    if NEXT_DAY_MOMENTUM.get("enabled") or SURGE_BREAKOUT.get("enabled"):
         try:
             _lhb_date = get_latest_lhb_date()
             if _lhb_date:
                 _lhb_map = get_lhb_map_for_date(_lhb_date)
-                print(f"  [隔日动量] 预加载龙虎榜 {_lhb_date}：{len(_lhb_map)} 只")
+                print(f"  [龙虎榜] 预加载 {_lhb_date}：{len(_lhb_map)} 只")
         except Exception as e:
-            print(f"  [WARN] 隔日动量龙虎榜预加载失败: {e}")
+            print(f"  [WARN] 龙虎榜预加载失败: {e}")
             _lhb_map = {}
+
+    # 强势突破大盘门控（全市场一次性判定，火热日不产生信号）
+    _surge_ok = _surge_market_ok()
+    if SURGE_BREAKOUT.get("enabled"):
+        print(f"  [强势突破] 大盘门控: {'放行' if _surge_ok else '拦截（全市场过热）'}")
+
+    # 中线弱市闸门（全量重算只评最新交易日，scan_date=None 取最新日）
+    _mid_weak_ok = _mid_weak_market_ok(None)
+    print(f"  [中线] 弱市闸门: {'放行' if _mid_weak_ok else '拦截（全市场弱势）'}")
 
     for i, (code, name) in enumerate(stocks):
         if (i + 1) % 200 == 0:
@@ -1768,7 +1882,8 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
             _recs = _build_signal_records(
                 df, code, name, _ts, SIG_THRESHOLD,
                 STOP_LOSS_SC, TAKE_PROFIT_SC,
-                lhb_row=_lhb_map.get(code))
+                lhb_row=_lhb_map.get(code), surge_ok=_surge_ok,
+                mid_weak_ok=_mid_weak_ok)
             sig_records.extend(_recs)
             total_days += len(df)
         except Exception as e:
@@ -1927,6 +2042,25 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
 
         if progress_callback:
             progress_callback("date_done", trade_dates.index(trade_date) + 1, len(trade_dates))
+
+    # ── 同步本次交易日龙虎榜（供隔日动量 + 强势突破硬过滤）──
+    # 历史 bug 修复：本函数（调度器 18:00 走的东财快速路径）原先不含龙虎榜抓取，
+    # 导致龙虎榜数据滞后；抓取失败不阻断主流程（与旧路径 daily_sync 同策略）。
+    # 必须放在后续 recalc_incremental_signals 之前，信号重算才能用上当日龙虎榜。
+    if total_rows > 0 and (NEXT_DAY_MOMENTUM.get("enabled") or SURGE_BREAKOUT.get("enabled")):
+        try:
+            from core.data_fetcher import fetch_lhb_detail
+            lhb_start = min(trade_dates)
+            lhb_end = max(trade_dates)
+            if verbose:
+                print(f"\n>>> 同步龙虎榜 {lhb_start}~{lhb_end}...")
+            lhb_df = fetch_lhb_detail(lhb_start, lhb_end)
+            n_lhb = upsert_lhb_detail(lhb_df) if lhb_df is not None and not lhb_df.empty else 0
+            if verbose:
+                print(f">>> 龙虎榜同步完成，写入/更新 {n_lhb} 条")
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 龙虎榜同步失败（不阻断同步主流程）: {e}")
 
     # 触发策略分数重算（按 target 过滤）
     if total_rows > 0:

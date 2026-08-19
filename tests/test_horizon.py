@@ -123,59 +123,99 @@ def test_scan_long_term_insufficient_rows():
 
 
 # ─────────────────────────────────────────────
-# 4. scan_mid_term（run_strategy 用 monkeypatch 隔离 strategy.py 内部细节）
+# 4. scan_mid_term 三过滤确认入场（2026-08-19 风格替换）
+#    run_strategy 用 monkeypatch 隔离 strategy.py 内部细节
 # ─────────────────────────────────────────────
-def _fake_strategy_df(df, score_last, buy=True, strong=False, stop=None, take=None):
-    """伪造 run_strategy 的输出：最后一行带指定评分/信号"""
+def _fake_mid_df(df, anchor_age=2, anchor_score=70.0, base_score=50.0,
+                 strong=False, ma20_divisor=1.0):
+    """伪造 run_strategy 输出：锚点日（倒数第 anchor_age+1 行）评分上穿 65，
+    其后维持高分（不再产生新上穿）；MA20 = close/ma20_divisor 控制偏离度。"""
     result = df.copy()
     n = len(result)
-    result["COMPOSITE_SCORE"] = [50.0] * (n - 1) + [score_last]
-    result["BUY_SIGNAL"] = [False] * (n - 1) + [buy]
+    scores = [base_score] * n
+    a = n - 1 - anchor_age
+    if 0 <= a < n:
+        for i in range(a, n):
+            scores[i] = anchor_score
+    result["COMPOSITE_SCORE"] = scores
     result["STRONG_BUY"] = [False] * (n - 1) + [strong]
-    # NaN 模拟 ATR 列缺失 → 触发止损止盈兜底
-    result["STOP_LOSS"] = [float("nan")] * n if stop is None else stop
-    result["TAKE_PROFIT"] = [float("nan")] * n if take is None else take
-    result["MA5"] = result["MA10"] = result["MA20"] = 0.0
-    result["DMI_ADX"] = 0.0
+    result["MA5"] = result["MA10"] = 0.0
+    result["MA20"] = result["close"].astype(float) / ma20_divisor
     return result
 
 
+def _flat_then_jump(jump=10.3, base=10.0, n=120):
+    """前 n-1 日平盘、最后一日跳涨：最后一日收盘可突破锚点日高点×1.002"""
+    return _make_ohlcv([base] * (n - 1) + [jump])
+
+
 def test_scan_mid_term_hit(monkeypatch):
-    """评分 70 ≥ 65 且当日 BUY_SIGNAL → 命中；ATR 缺失走 -8%/+20% 兜底"""
+    """锚点上穿65（2日前）+ 今日收盘突破锚点日高点 + 偏离MA20达标 → 命中；
+    ATR 缺失走 -8%/+20% 兜底"""
     import strategy.strategy as strat
-    df = _make_ohlcv([10 + 0.02 * i for i in range(120)])
+    df = _flat_then_jump()
     monkeypatch.setattr(
         strat, "run_strategy",
-        lambda d, name="composite": _fake_strategy_df(d, 70.0))
+        lambda d, name="composite": _fake_mid_df(d, anchor_age=2, anchor_score=70.0))
     sig = scan_mid_term(df)
     assert sig is not None
     assert sig["horizon"] == "mid"
     assert sig["strategy"] == "中线综合"
-    assert sig["fusion_score"] == pytest.approx(35.0)  # 70/2 量纲对齐
+    assert sig["fusion_score"] == pytest.approx(35.0)  # 锚点分 70/2 量纲对齐
     close = sig["buy_price"]
     assert sig["stop_loss"] == pytest.approx(round(close * 0.92, 2), abs=0.02)
     assert sig["take_profit"] == pytest.approx(round(close * 1.20, 2), abs=0.05)
-    assert any("中线综合评分" in t for t in sig["triggers"])
+    assert any("确认入场" in t for t in sig["triggers"])
 
 
-def test_scan_mid_term_below_threshold(monkeypatch):
-    """评分 60 < 65 → 不命中"""
+def test_scan_mid_term_anchor_outside_lookback(monkeypatch):
+    """锚点距今 10 日 > mid_anchor_lookback(5) → 不命中"""
     import strategy.strategy as strat
-    df = _make_ohlcv([10 + 0.02 * i for i in range(120)])
+    df = _flat_then_jump()
     monkeypatch.setattr(
         strat, "run_strategy",
-        lambda d, name="composite": _fake_strategy_df(d, 60.0))
+        lambda d, name="composite": _fake_mid_df(d, anchor_age=10))
     assert scan_mid_term(df) is None
 
 
-def test_scan_mid_term_no_buy_signal(monkeypatch):
-    """评分达标但当日无 BUY_SIGNAL（未上穿）→ 不命中"""
+def test_scan_mid_term_not_confirmed(monkeypatch):
+    """今日收盘未突破锚点日高点×1.002（平盘收尾）→ 不命中"""
     import strategy.strategy as strat
-    df = _make_ohlcv([10 + 0.02 * i for i in range(120)])
+    df = _make_ohlcv([10.0] * 120)
     monkeypatch.setattr(
         strat, "run_strategy",
-        lambda d, name="composite": _fake_strategy_df(d, 70.0, buy=False))
+        lambda d, name="composite": _fake_mid_df(d, anchor_age=2))
     assert scan_mid_term(df) is None
+
+
+def test_scan_mid_term_already_confirmed(monkeypatch):
+    """锚点与今日之间已有突破日 → 今日非首个确认日 → 不命中"""
+    import strategy.strategy as strat
+    df = _make_ohlcv([10.0] * 117 + [10.0, 10.3, 10.35])
+    monkeypatch.setattr(
+        strat, "run_strategy",
+        lambda d, name="composite": _fake_mid_df(d, anchor_age=2))
+    assert scan_mid_term(df) is None
+
+
+def test_scan_mid_term_dev_exceeded(monkeypatch):
+    """偏离 MA20 10% > mid_dev_ma20_max(5%)（追高）→ 不命中"""
+    import strategy.strategy as strat
+    df = _flat_then_jump()
+    monkeypatch.setattr(
+        strat, "run_strategy",
+        lambda d, name="composite": _fake_mid_df(d, anchor_age=2, ma20_divisor=1.10))
+    assert scan_mid_term(df) is None
+
+
+def test_scan_mid_term_weak_market_blocked(monkeypatch):
+    """弱市闸门关闭（weak_market_ok=False）→ 直接不命中"""
+    import strategy.strategy as strat
+    df = _flat_then_jump()
+    monkeypatch.setattr(
+        strat, "run_strategy",
+        lambda d, name="composite": _fake_mid_df(d, anchor_age=2))
+    assert scan_mid_term(df, weak_market_ok=False) is None
 
 
 def test_scan_mid_term_insufficient_rows():
