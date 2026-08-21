@@ -41,24 +41,10 @@ REGIME_LABEL = {
 
 # ─────────────────────────────────────────────
 # 大盘冷热：多日宽度 composite（替代单日均值，抗单日噪音）
+# 计算口径在 core/market_regime.py（日期参数化，历史可复现），此处仅加缓存
 # ─────────────────────────────────────────────
 _regime_cache = {"ts": 0.0, "regime": None}
 _REGIME_CACHE_TTL = 600  # 10 分钟（盘中数据低频变化）
-
-
-def _regime_from_avg_pct(avg_pct):
-    """单日全市场平均涨幅 → 5 档 regime（composite 数据不足时的回退口径）"""
-    if avg_pct is None:
-        return "unknown"
-    if avg_pct > 1.0:
-        return "hot"
-    if avg_pct > 0.3:
-        return "warm"
-    if avg_pct > -0.3:
-        return "neutral"
-    if avg_pct > -1.0:
-        return "cool"
-    return "cold"
 
 
 def _compute_market_regime(conn):
@@ -71,85 +57,16 @@ def _compute_market_regime(conn):
       3) 沪深300 / 中证500 近 5 日斜率均值
     composite = 50 + 三项贡献（各 ±20 / ±20 / ±15），正常区间约 25~75。
     档位：>=60 hot / >=55 warm / >=45 neutral / >=40 cool / else cold。
-    任一环节异常时回退单日均值逻辑（原行为）。
+    任一环节异常时回退单日均值逻辑（core.market_regime 内部处理）。
     """
+    from core.market_regime import compute_regime_on
     now = time.time()
     if _regime_cache["regime"] and (now - _regime_cache["ts"]) < _REGIME_CACHE_TTL:
         return _regime_cache["regime"]
 
-    try:
-        # 1) 涨跌家数比（近 5 个交易日）
-        rows = conn.execute(
-            """
-            SELECT trade_date,
-                   SUM(CASE WHEN pct_change > 0 THEN 1 ELSE 0 END) AS up,
-                   COUNT(*) AS total
-            FROM daily_price
-            WHERE trade_date >= date('now', '-12 days')
-            GROUP BY trade_date
-            ORDER BY trade_date DESC
-            LIMIT 5
-            """
-        ).fetchall()
-        if not rows:
-            regime = "unknown"
-            _regime_cache.update({"ts": now, "regime": regime})
-            return regime
-        up_ratio = sum((r["up"] or 0) / r["total"] for r in rows if r["total"]) / len(rows)
-
-        # 2) 宽度：全市场站上 MA20 的个股占比（近 5 个交易日）
-        wrows = conn.execute(
-            """
-            SELECT d.trade_date,
-                   AVG(CASE WHEN d.close > d.ma20 THEN 1.0 ELSE 0.0 END) AS width
-            FROM (
-                SELECT code, trade_date, close,
-                       AVG(close) OVER (
-                           PARTITION BY code ORDER BY trade_date
-                           ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-                       ) AS ma20
-                FROM daily_price
-                WHERE trade_date >= date('now', '-30 days')
-            ) d
-            GROUP BY d.trade_date
-            ORDER BY d.trade_date DESC
-            LIMIT 5
-            """
-        ).fetchall()
-        width = sum(float(r["width"] or 0) for r in wrows) / len(wrows) if wrows else 0.5
-
-        # 3) 指数斜率（沪深300 / 中证500，近 5 日）
-        slopes = []
-        for _icode in ("000300", "000905"):
-            irows = conn.execute(
-                "SELECT trade_date, close FROM index_daily WHERE code=? "
-                "ORDER BY trade_date DESC LIMIT 6", (_icode,)).fetchall()
-            if len(irows) >= 2 and irows[-1]["close"]:
-                slopes.append((float(irows[0]["close"]) - float(irows[-1]["close"]))
-                              / float(irows[-1]["close"]))
-        idx_slope = sum(slopes) / len(slopes) if slopes else 0.0
-
-        score = 50.0 + (up_ratio - 0.5) * 100.0 * 0.4 \
-                      + (width - 0.5) * 100.0 * 0.4 \
-                      + idx_slope * 300.0
-        if score >= 60:
-            regime = "hot"
-        elif score >= 55:
-            regime = "warm"
-        elif score >= 45:
-            regime = "neutral"
-        elif score >= 40:
-            regime = "cool"
-        else:
-            regime = "cold"
-    except Exception:
-        # composite 计算失败（表结构/数据异常）→ 回退原单日均值口径
-        avg_pct = conn.execute(
-            "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
-            "WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)"
-        ).fetchone()["avg_pct"]
-        regime = _regime_from_avg_pct(avg_pct)
-
+    latest_td = conn.execute(
+        "SELECT MAX(trade_date) FROM daily_price").fetchone()[0]
+    regime = compute_regime_on(conn, latest_td) if latest_td else "unknown"
     _regime_cache.update({"ts": now, "regime": regime})
     return regime
 
@@ -447,13 +364,15 @@ def today_recommendations():
 
     来源：stock_signal 表（融合分高 + 已有明确买入价/止损/止盈）
     分组：mid/long 按 fusion_score DESC；short 先 fusion≥门控、再按低扩展度排序，
-          各取 limit 条（默认 4）；regime 天花板 cold→0 / cool→2 / normal→4
+          各取 limit 条（默认 4）；short 组另受 short_top_n=3 约束（2026-08-20 收缩）；
+          regime 天花板 cold→0 / cool→2 / normal→组上限
     支持 ?date=2026-06-18 查看指定日期；?horizon=short 只看单组
     返回 {date, market_regime, count, groups:{short,mid,long}, items(=short 组别名，兼容旧前端)}
     """
     limit = request.args.get("limit", default=4, type=int)
     limit = max(0, min(limit, 8))   # 允许 0：cold 大盘由 regime 设为 0
-    SHORT_CAP = limit               # short 组上限（mid/long 仍用原 limit 逻辑）
+    # short 组上限：short_top_n（2026-08-20 由 4 → 3，精选；mid/long 仍用原 limit 逻辑）
+    SHORT_CAP = min(limit, max(1, int(get_param("short_top_n"))))
     horizon_filter = (request.args.get("horizon") or "").strip().lower() or None
     if horizon_filter not in (None, "short", "mid", "long"):
         return fail("horizon 仅支持 short / mid / long")
@@ -490,7 +409,11 @@ def today_recommendations():
                 f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
         rows_by_horizon: dict = {}
         # 短线置信门控（S4 口径，默认 22，可 DB 覆盖）：低于门控不推荐，弱日自然出 0
-        gate = get_param("short_conf_gate")
+        gate = float(get_param("short_conf_gate"))
+        # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按当日 regime 自动切换，
+        # 隔日动量豁免；参数 >=99 禁用）
+        from core.outcome_tracker import short_t1_filter_sql
+        t1_cond, t1_params = short_t1_filter_sql(conn, scan_date, scan_date)
         for hz in horizons:
             pe_filter = ""
             if hz == "long" and has_pe_ttm:
@@ -499,8 +422,8 @@ def today_recommendations():
             gate_sql = ""
             gate_params: list = []
             if hz == "short":
-                gate_sql = " AND s.fusion_score >= ?"
-                gate_params = [gate]
+                gate_sql = f" AND s.fusion_score >= ? AND {t1_cond}"
+                gate_params = [gate, *t1_params]
             # short 组选择标准（S4 口径 + 龙虎榜动量优先）：
             #   1) 隔日动量信号（独立正期望 alpha 线，fusion≥30 天然过门控）优先占名额；
             #   2) 低扩展度抄底信号补足剩余名额（融合分排序无选择力，按距 MA20 最近优先）。
@@ -806,7 +729,7 @@ def today_recommendations():
 
         # 构建候选卡片后剔除「避免」级（盈亏比 <1.5 一票否决），再截取前 limit 条
         # 短线数量天花板（docs/short-reco-dynamic-count-plan.md A）：
-        #   cold→0 / cool→2 / neutral/warm/hot→SHORT_CAP(4)，满足「最多4/最少0」；
+        #   cold→0 / cool→2 / neutral/warm/hot→SHORT_CAP(=short_top_n，现 3)，满足「最多3/最少0」；
         #   cold 整组出 0（不再 buy→wait 降级——本来就 0 条）。
         _REGIME_CAP = {"cold": 0, "cool": 2, "neutral": SHORT_CAP,
                        "warm": SHORT_CAP, "hot": SHORT_CAP, "unknown": SHORT_CAP}
@@ -1008,17 +931,23 @@ def exit_advice():
                        "THEN 1 ELSE 0 END")
         else:
             gap_sql = "0"
-        horizon_specs = {
-            # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐/推荐复盘同口径）
-            "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
-                      "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
-                      " AND s.fusion_score >= ?", [gate]),
-            "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
-            "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
-        }
 
         with _get_conn() as conn:
-            # 2026-07-20 起的推荐记录（与「推荐复盘」同口径：每天每周期前 4）
+            # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
+            # 隔日动量豁免；参数 >=99 禁用）——各信号日按当天历史 regime 判定
+            from core.outcome_tracker import short_t1_filter_sql
+            t1_cond, t1_params = short_t1_filter_sql(conn, EXIT_TRACK_START_DATE)
+            horizon_specs = {
+                # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐/推荐复盘同口径）
+                "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
+                          "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+                          f" AND s.fusion_score >= ? AND {t1_cond}", [gate, *t1_params]),
+                "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
+                "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
+            }
+            # 每日名额上限：short 取 short_top_n（2026-08-20 由 4 → 3），mid/long 保持前 4
+            caps = {"short": max(1, int(get_param("short_top_n"))), "mid": 4, "long": 4}
+            # 2026-07-20 起的推荐记录（与「推荐复盘」同口径：每日名额 short=3 / mid/long=4）
             signals = []
             for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
                 signals += conn.execute(f"""
@@ -1047,8 +976,8 @@ def exit_advice():
                           {board_filter}
                           {gate_sql_cond}
                     )
-                    WHERE rn <= 4
-                """, (EXIT_TRACK_START_DATE, hz, *gate_params)).fetchall()
+                    WHERE rn <= ?
+                """, (EXIT_TRACK_START_DATE, hz, *gate_params, caps[hz])).fetchall()
 
             if not signals:
                 return ok({"items": [], "groups": {"short": [], "mid": [], "long": []},
@@ -1355,8 +1284,9 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
     """对单条持仓运行 exit_advisor 出场诊断，返回 {status, reason, detail} 或 None。
 
     entry_price 取持仓成本价，entry_date 取建仓日；异常时降级为 None，不影响持仓主列表。
-    三周期统一移动止盈（2026-08 落地）：short 用 short_take_profit 启动线+回撤8%，
-    mid 用 +10% 启动线+回撤10%（持仓上限 60），long 用 +20% 启动线+回撤15%（不限仓期），
+    三周期统一移动止盈（2026-08 落地）：short 用 short_take_profit 启动线+
+    short_trailing_pct 回撤（2026-08-20 方案A：+8% 启动/3% 回撤/持10），
+    mid/long 各自启动线+回撤（持仓上限 60 / 不限仓期），
     参数均来自 TUNABLE_PARAMS（DB 可覆盖）。
     """
     if not code or not cost_price or cost_price <= 0 or not opened_at:
@@ -1976,7 +1906,7 @@ def recommendations_history():
 
     with get_conn() as conn:
         # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的；
-        # 每日取 fusion_score Top8，与 recommend_outcome/今日推荐同口径）
+        # 每日取 fusion_score 前 short_top_n，与 recommend_outcome/今日推荐同口径）
         signals = conn.execute(
             f"""
             SELECT code, name, scan_date, buy_price, stop_loss, take_profit, fusion_score
@@ -1993,10 +1923,10 @@ def recommendations_history():
                   AND COALESCE(s.horizon, 'short') = 'short'
                   {board_filter}
             )
-            WHERE rn <= 4
+            WHERE rn <= ?
             ORDER BY code ASC, scan_date ASC
             """,
-            (f"-{days} days",),
+            (f"-{days} days", max(1, int(get_param("short_top_n")))),
         ).fetchall()
 
         if not signals:

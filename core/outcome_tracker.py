@@ -23,6 +23,62 @@ from config.personal_config import (
 
 
 # ─────────────────────────────────────────────
+# 0. 短线 T1 辅助过滤（恐慌日闸门 + MA5 偏离，按大盘冷热自动切换）
+# ─────────────────────────────────────────────
+
+def short_t1_filter_sql(conn, start_date: str, end_date: str | None = None,
+                        alias: str = "s") -> tuple[str, list]:
+    """短线抄底推荐 T1 辅助过滤 SQL 片段（组合条件 C + regime 自动切换）。
+
+    2026-08-20 挖掘落地（tools/eval_short_t1_filter.py 特征分桶 +
+    eval_short_t1_filter2.py 实装语义复核）：抄底票应在市场下跌日推荐
+    （恐慌日反弹概率高），上涨日推荐等于追高。组合条件：
+      1) 恐慌日闸门：信号日全市场平均涨跌幅 < short_down_market_gate（默认 0）
+      2) MA5 偏离：信号日收盘价距 MA5 偏离 <= short_dev_ma5_max（默认 -2%）
+    test 窗 T1 胜率 42.1%→49.5%（+7.4pp），但强市段均值反向——闸门本质是
+    弱市减亏工具。故按信号日当天的大盘 regime 自动切换（与前端信号灯同口径，
+    core/market_regime.py，历史可复现）：
+      cold/cool（冰点/偏冷）→ 启用过滤；neutral/warm/hot/unknown → 不过滤。
+
+    隔日动量信号豁免（独立正 alpha 信号线，不受抄底过滤器约束）；
+    任一参数设 >=99 即禁用对应条件（两者都禁则恒真，等同回退）。
+    [start_date, end_date] 为信号日窗口（end_date 缺省到最新数据日）。
+    返回 (sql_cond, params)：sql_cond 为完整布尔表达式，AND 到 short 组 WHERE。
+    """
+    from config.strategy_params import get_param
+    mkt_gate = float(get_param("short_down_market_gate"))
+    dev = float(get_param("short_dev_ma5_max"))
+    if mkt_gate >= 99 and dev >= 99:
+        return "1", []
+    # regime 自动切换：仅信号日为冰点/偏冷的日期启用过滤
+    from core.market_regime import compute_regime_series
+    series = compute_regime_series(conn, start_date, end_date)
+    active = sorted(d for d, r in series.items() if r in ("cold", "cool"))
+    if not active:
+        return "1", []
+    parts: list = []
+    params: list = []
+    if mkt_gate < 99:
+        parts.append(f"(SELECT AVG(pct_change) FROM daily_price "
+                     f"WHERE trade_date = {alias}.scan_date) < ?")
+        params.append(mkt_gate)
+    if dev < 99:
+        # dev<=-2 → close/MA5-1 <= -2% → MA5 >= close/(1+dev/100)
+        # 抄底信号 s.price = 信号日收盘价（sync.py 写入），round(2) 误差可忽略
+        parts.append(f"(SELECT AVG(close) FROM (SELECT close FROM daily_price d "
+                     f"WHERE d.code = {alias}.code AND d.trade_date <= {alias}.scan_date "
+                     f"ORDER BY d.trade_date DESC LIMIT 5)) >= {alias}.price / ?")
+        params.append(1 + dev / 100.0)
+    if not parts:
+        return "1", []
+    ph = ",".join("?" * len(active))
+    # 非启用日（scan_date NOT IN）直接放行；启用日仅豁免隔日动量
+    return (f"(COALESCE({alias}.strategy, '') = '隔日动量' "
+            f"OR {alias}.scan_date NOT IN ({ph}) "
+            f"OR ({' AND '.join(parts)}))"), [*active, *params]
+
+
+# ─────────────────────────────────────────────
 # 1. 从 stock_signal 导入新推荐到 recommend_outcome
 # ─────────────────────────────────────────────
 
@@ -30,8 +86,10 @@ def insert_new_outcomes(days_back: int = 60):
     """将 stock_signal 中窗口内、尚未录入 recommend_outcome 的推荐写入。
 
     口径：与「今日推荐」面板一致（config/personal_config.py 的主板过滤 +
-    每周期 fusion_score 前 4 名才是真正的「推荐」；short 组额外与今日推荐同口径：
-    fusion≥short_conf_gate 门控 + 低扩展度(pct_above_ma20 升序)取前 4 +
+    每日名额上限才是真正的「推荐」：short 取 short_top_n=3（2026-08-20 由 4 收缩），
+    mid/long 取前 4；short 组额外与今日推荐同口径：
+    fusion≥short_conf_gate 门控 + T1 辅助过滤（恐慌日闸门 + MA5 偏离，
+    隔日动量豁免）+ 低扩展度(pct_above_ma20 升序)排序 +
     止盈离场(gap guard sell)剔除——2026-08 短线 8→4 改造）。
 
     窗口：近 N 天 与 EXIT_TRACK_START_DATE（2026-07-20，出场跟踪/推荐复盘起始日）
@@ -40,7 +98,7 @@ def insert_new_outcomes(days_back: int = 60):
     2026-08-09 修复：原 INSERT OR IGNORE 按 (code, scan_date, horizon) 去重追加，
     多次重算（v1/v2 引擎、不同过滤链）的 Top8 并集在表内累积，short 组每天
     19~28 条。改为窗口内「先清空再重写」：recommend_outcome 恒等于当前
-    stock_signal 的每日每组 Top8（收益字段清空后由 evaluate_outcomes 重新评估）。
+    stock_signal 的每日每组名额上限截取（收益字段清空后由 evaluate_outcomes 重新评估）。
     """
     from datetime import date, timedelta
     start_date = max(
@@ -66,22 +124,28 @@ def insert_new_outcomes(days_back: int = 60):
                    "THEN 1 ELSE 0 END")
     else:
         gap_sql = "0"
-    horizon_specs = {
-        # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐同口径）
-        "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
-                  "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
-                  " AND s.fusion_score >= ?", [gate]),
-        "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
-        "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
-    }
     with get_conn() as conn:
+        # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
+        # 隔日动量豁免；参数 >=99 禁用）——复盘窗内各信号日按当天历史 regime 判定
+        t1_cond, t1_params = short_t1_filter_sql(conn, start_date)
+        horizon_specs = {
+            # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐同口径）
+            "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
+                      "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+                      f" AND s.fusion_score >= ? AND {t1_cond}", [gate, *t1_params]),
+            "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
+            "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
+        }
+        # 每日名额上限：short 取 short_top_n（2026-08-20 由 4 → 3），mid/long 保持前 4
+        top_n = max(1, int(get_param("short_top_n")))
+        caps = {"short": top_n, "mid": 4, "long": 4}
         # 先清窗口内旧记录（随引擎/过滤链/推荐口径变化而更新，旧记录一并移除）
         conn.execute(
             "DELETE FROM recommend_outcome WHERE scan_date >= ?",
             (start_date,))
         for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
             # 注意：gap_sell 过滤必须发生在 ROW_NUMBER 之前（先剔除止盈离场、
-            # 再按扩展度取前 4），与今日推荐「先剔 sell 再截取」语义一致，
+            # 再按扩展度取前 caps[hz]），与今日推荐「先剔 sell 再截取」语义一致，
             # 被剔除的票不占排名、由后续候选替补。
             conn.execute(f"""
                 INSERT OR IGNORE INTO recommend_outcome
@@ -117,8 +181,8 @@ def insert_new_outcomes(days_back: int = 60):
                       {board_filter}
                       {gate_sql_cond}
                 )
-                WHERE rn <= 4
-            """, (start_date, hz, *gate_params))
+                WHERE rn <= ?
+            """, (start_date, hz, *gate_params, caps[hz]))
 
 
 # ─────────────────────────────────────────────
@@ -129,7 +193,8 @@ def evaluate_outcomes():
     """遍历 recommend_outcome 中尚未完全评估的记录，用 daily_price 填充收益。
 
     评估逻辑（horizon 感知）：
-      - short：T+1/2/3/5/10 收益 + 首次触及止损/止盈出场（原逻辑不变）。
+      - short：T+1/2/3/5/10 收益 + 移动止盈出场（2026-08-20 方案A：止损收盘判定、
+        启动线激活后高点回撤清仓、持满 short_max_hold_days 了结，与出场跟踪同口径）。
       - mid/long：长周期策略——用 evaluate_exit_by_prices 按真实出场纪律
         （移动止盈 + 周期持仓上限）逐日模拟出场。持仓期远超短线的 10 天：
         中线窗口 ~70 交易日（max_hold=60）、长线窗口 ~130 交易日（max_hold=None
@@ -171,14 +236,38 @@ def evaluate_outcomes():
 
 
 def _evaluate_short(conn, row, now_str: str) -> bool:
-    """短线评估（原逻辑不变）：15 交易日窗口内 T+N 收益 + 首次触及止损/止盈出场，
-    未触发则持有满 10 日以 T+10 收盘了结。"""
+    """短线评估：T+N 收益 + 移动止盈出场（2026-08-20 方案A 口径统一）。
+
+    出场与 routes/investor.py 出场跟踪（evaluate_exit_by_prices）及退出网格
+    回测（tools/eval_short_return_boost.py simulate）同口径：
+      - 止损：收盘价跌破止损价（推荐自带 stop_loss，缺失回退 entry×(1+short_stop_loss)）
+      - 移动止盈：持仓期最高价（盘中 high）首次达到启动线（short_take_profit 比例，
+        回退推荐自带 take_profit 价）后启用；移动止盈线 = 最高价×(1-short_trailing_pct)，
+        只上移不下移；收盘跌破 → trailing_stop 离场（不再有固定价达价即卖）
+      - 到期：持满 short_max_hold_days（方案A=10）以收盘了结
+    T+N 收益/max_return/min_return 口径不变（entry=信号日收盘价）。
+    未持满且未触发时 exit 字段保持 NULL，由后续交易日继续评估。"""
     rid = row["id"]
     code = row["code"]
     scan_date = row["scan_date"]
     entry = row["entry_price"]
     stop = row["stop_loss"]
     tp = row["take_profit"]
+
+    from config.strategy_params import get_param
+    from strategy.exit_advisor import get_max_hold
+    trail_pct = get_param("short_trailing_pct")
+    max_hold = get_max_hold("short") or 10
+    # 启动线：参数比例优先（新口径），回退推荐自带止盈价（旧信号兼容）
+    launch_price = None
+    launch_ratio = get_param("short_take_profit")
+    if launch_ratio and 0 < launch_ratio < 1.0 and entry > 0:
+        launch_price = entry * (1 + launch_ratio)
+    elif tp and tp > 0:
+        launch_price = tp
+    # 止损价：推荐自带优先，缺失回退参数比例
+    if (stop is None or stop <= 0) and entry > 0:
+        stop = entry * (1 + float(get_param("short_stop_loss")))
 
     prices = conn.execute("""
         SELECT trade_date, close, high, low
@@ -220,31 +309,44 @@ def _evaluate_short(conn, row, now_str: str) -> bool:
         min_ret = round(min_ret, 2)
 
     hit_stop = 0
-    hit_tp = 0
+    launched = 0
     exit_reason = None
     exit_date = None
     exit_return = None
 
-    for p in prices:
-        if stop and p["low"] and p["low"] <= stop:
+    # 移动止盈状态机（收盘判定口径）：启动线用盘中 high 触发，卖出用收盘价判定；
+    # 止损优先于移动止盈线判定（与回测 simulate/出场跟踪一致）
+    highest = None
+    tline = None
+    trail_ok = trail_pct is not None and 0.01 <= trail_pct < 1.0
+    for j, p in enumerate(prices[:max_hold], start=1):
+        close = p["close"]
+        if not close or close <= 0:
+            break
+        high = p["high"] or close
+        if highest is None or high > highest:
+            highest = high
+        if not launched and launch_price and highest >= launch_price:
+            launched = 1
+        if launched and trail_ok:
+            line = highest * (1 - trail_pct)
+            if tline is None or line > tline:
+                tline = line
+        if stop and close <= stop:
             hit_stop = 1
-            if exit_reason is None:
-                exit_reason = "stop_loss"
-                exit_date = p["trade_date"]
-                exit_return = round((stop - entry) / entry * 100, 2)
+            exit_reason = "stop_loss"
+            exit_date = p["trade_date"]
+            exit_return = round((close - entry) / entry * 100, 2)
             break
-        if tp and p["high"] and p["high"] >= tp:
-            hit_tp = 1
-            if exit_reason is None:
-                exit_reason = "take_profit"
-                exit_date = p["trade_date"]
-                exit_return = round((tp - entry) / entry * 100, 2)
+        if launched and tline is not None and close <= tline:
+            exit_reason = "trailing_stop"
+            exit_date = p["trade_date"]
+            exit_return = round((close - entry) / entry * 100, 2)
             break
-
-    if exit_reason is None and len(prices) >= 10:
-        exit_reason = "max_hold_days"
-        exit_date = prices[9]["trade_date"]
-        exit_return = t10
+        if j == max_hold:
+            exit_reason = "max_hold_days"
+            exit_date = p["trade_date"]
+            exit_return = round((close - entry) / entry * 100, 2)
 
     conn.execute("""
         UPDATE recommend_outcome
@@ -255,7 +357,7 @@ def _evaluate_short(conn, row, now_str: str) -> bool:
             evaluated_at = ?
         WHERE id = ?
     """, (t1, t2, t3, t5, t10, max_ret, min_ret,
-          hit_stop, hit_tp, exit_reason, exit_date, exit_return,
+          hit_stop, launched, exit_reason, exit_date, exit_return,
           now_str, rid))
     return True
 
