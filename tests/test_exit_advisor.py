@@ -210,9 +210,9 @@ def test_evaluate_exit_none_max_hold_no_expire():
 
 
 def test_get_max_hold_by_horizon():
-    """get_max_hold：short 读 TUNABLE_PARAMS（5），mid=60，long=None"""
+    """get_max_hold：short 读 TUNABLE_PARAMS（10，2026-08-20 方案A），mid=60，long=None"""
     assert get_max_hold("mid") == 60
     assert get_max_hold("long") is None
-    assert HORIZON_MAX_HOLD["short"] == 5   # 与 TUNABLE_PARAMS 同值，避免漂移
+    assert HORIZON_MAX_HOLD["short"] == 10  # 与 TUNABLE_PARAMS 同值，避免漂移
     short_v = get_max_hold("short")
     assert isinstance(short_v, int) and short_v >= 1

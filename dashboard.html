@@ -1535,6 +1535,7 @@ async function loadRecHistory() {
                 const sign = r.pnl_pct >= 0 ? '+' : '';
                 let status = '持有中';
                 if (r.hit_stop_loss) status = '<span style="color:var(--danger)">已止损</span>';
+                else if (r.exit_reason === 'trailing_stop') status = '<span style="color:var(--green, #10b981)">移止离场</span>';
                 else if (r.hit_take_profit) status = '<span style="color:var(--green, #10b981)">已止盈</span>';
                 else if (r.exit_reason === 'max_hold_days') status = '<span style="color:var(--text-muted)">到期出场</span>';
                 const fmtRet = (v) => v != null ? `<span class="${v>=0?'positive':'negative'}">${v>=0?'+':''}${v}%</span>` : '--';

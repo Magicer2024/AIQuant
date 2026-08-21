@@ -32,7 +32,7 @@ def tmp_db(tmp_path, monkeypatch):
 
 def test_get_param_default(tmp_db):
     assert get_param("sig_threshold") == TUNABLE_PARAMS["sig_threshold"]["default"]
-    assert get_param("short_stop_loss") == -0.06
+    assert get_param("short_stop_loss") == -0.05
 
 
 def test_get_param_override_and_clamp(tmp_db):

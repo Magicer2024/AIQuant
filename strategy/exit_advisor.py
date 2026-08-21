@@ -202,11 +202,11 @@ def evaluate_exit(
     }
 
 
-# 三周期持仓上限：短线 5 个交易日（2026-08 移动止盈落地：T5 回测最优 trail8_T5
-# -0.072% vs trail8_T3 -0.142%，给移动止盈奔跑空间；TUNABLE_PARAMS.short_max_hold_days
-# 是线上真实值（DB 可覆盖），此常量仅作 get_param 读取失败的兜底，保持同值避免漂移）
+# 三周期持仓上限：短线 10 个交易日（2026-08-20 方案A：退出网格回测「持10」全池
+# 全窗/近期窗全面优于「持5」；TUNABLE_PARAMS.short_max_hold_days 是线上真实值
+# （DB 可覆盖），此常量仅作 get_param 读取失败的兜底，保持同值避免漂移）
 # / 中线 60 个交易日 / 长线不限（None）
-HORIZON_MAX_HOLD: dict = {"short": 5, "mid": 60, "long": None}
+HORIZON_MAX_HOLD: dict = {"short": 10, "mid": 60, "long": None}
 
 
 def get_max_hold(horizon: str) -> Optional[int]:
