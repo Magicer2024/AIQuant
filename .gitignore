@@ -26,6 +26,8 @@ Thumbs.db
 
 # Project specific
 *.db
+*.db-wal
+*.db-shm
 *.bak
 data_cache/
 .sync_cache/

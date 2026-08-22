@@ -905,7 +905,7 @@ async function loadExitTrack() {
                     <span class="exit-group-count">持有 ${held} · 已卖出 ${cleared}</span>
                 </div>
                 <div class="table-wrapper"><table><thead><tr>
-                    <th>代码</th><th>名称</th><th>推荐日</th><th>买入日</th><th>买入价</th><th>持仓天数</th><th>盈亏</th><th>状态</th><th>说明</th>
+                    <th>代码</th><th>名称</th><th>推荐日</th><th>买入日</th><th>买入价</th><th>卖出价</th><th>持仓天数</th><th>盈亏</th><th>状态</th><th>说明</th>
                 </tr></thead><tbody>`;
             list.forEach(it => {
                 const detail = it.detail || {};
@@ -917,6 +917,10 @@ async function loadExitTrack() {
                     ? '<span style="color:var(--danger);font-weight:600">🔴 已卖出</span>'
                     : '<span style="color:var(--green, #10b981);font-weight:600">🟢 持有</span>';
                 const holdDays = detail.hold_days != null ? detail.hold_days + '天' : '--';
+                // 卖出价：仅已卖出（止盈/止损/到期）显示，持有中为空
+                const exitPriceHtml = (sold && detail.exit_price != null)
+                    ? `<span title="${detail.exit_date || ''} 卖出">${Number(detail.exit_price).toFixed(2)}</span>`
+                    : '<span style="color:var(--text-muted)">--</span>';
                 // 连续推荐：推荐日显示最新一次，附最早推荐日提示
                 const firstDate = detail.first_scan_date;
                 const scanHtml = (it.scan_date || '--')
@@ -928,6 +932,7 @@ async function loadExitTrack() {
                     <td>${scanHtml}</td>
                     <td>${detail.entry_date||'--'}</td>
                     <td>${it.entry_price||'--'}</td>
+                    <td>${exitPriceHtml}</td>
                     <td>${holdDays}</td>
                     <td class="${pnlCls}">${pnlStr}</td>
                     <td>${statusHtml}</td>
