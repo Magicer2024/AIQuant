@@ -240,10 +240,15 @@ def _evaluate_short(conn, row, now_str: str) -> bool:
 
     出场与 routes/investor.py 出场跟踪（evaluate_exit_by_prices）及退出网格
     回测（tools/eval_short_return_boost.py simulate）同口径：
-      - 止损：收盘价跌破止损价（推荐自带 stop_loss，缺失回退 entry×(1+short_stop_loss)）
-      - 移动止盈：持仓期最高价（盘中 high）首次达到启动线（short_take_profit 比例，
-        回退推荐自带 take_profit 价）后启用；移动止盈线 = 最高价×(1-short_trailing_pct)，
-        只上移不下移；收盘跌破 → trailing_stop 离场（不再有固定价达价即卖）
+      - 出场模拟 entry = 推荐日后首个交易日开盘价（2026-08-22 对齐出场跟踪/
+        实盘执行；开盘缺失回退当日收盘/信号价，同 _get_exit_advice 回退链）。
+        此前用信号日收盘价作 entry，启动线偏低导致出场判定与出场跟踪矛盾
+        （如 002379 复盘 +4.12% vs 出场跟踪 -11.11%）。
+      - A股 T+1：买入日只累计持仓/状态，不检查出场（与出场跟踪一致）
+      - 止损：收盘价跌破止损价（推荐自带 stop_loss，缺失回退 exec_entry×(1+short_stop_loss)）
+      - 移动止盈：持仓期最高价（盘中 high）首次达到启动线（short_take_profit 比例×
+        exec_entry，回退推荐自带 take_profit 价）后启用；移动止盈线 = 最高价×
+        (1-short_trailing_pct)，只上移不下移；收盘跌破 → trailing_stop 离场
       - 到期：持满 short_max_hold_days（方案A=10）以收盘了结
     T+N 收益/max_return/min_return 口径不变（entry=信号日收盘价）。
     未持满且未触发时 exit 字段保持 NULL，由后续交易日继续评估。"""
@@ -258,19 +263,9 @@ def _evaluate_short(conn, row, now_str: str) -> bool:
     from strategy.exit_advisor import get_max_hold
     trail_pct = get_param("short_trailing_pct")
     max_hold = get_max_hold("short") or 10
-    # 启动线：参数比例优先（新口径），回退推荐自带止盈价（旧信号兼容）
-    launch_price = None
-    launch_ratio = get_param("short_take_profit")
-    if launch_ratio and 0 < launch_ratio < 1.0 and entry > 0:
-        launch_price = entry * (1 + launch_ratio)
-    elif tp and tp > 0:
-        launch_price = tp
-    # 止损价：推荐自带优先，缺失回退参数比例
-    if (stop is None or stop <= 0) and entry > 0:
-        stop = entry * (1 + float(get_param("short_stop_loss")))
 
     prices = conn.execute("""
-        SELECT trade_date, close, high, low
+        SELECT trade_date, open, close, high, low
         FROM daily_price
         WHERE code = ? AND trade_date > ?
         ORDER BY trade_date ASC
@@ -279,6 +274,22 @@ def _evaluate_short(conn, row, now_str: str) -> bool:
 
     if not prices:
         return False
+
+    # 出场模拟 entry：次日开盘（与出场跟踪同口径），T+N 收益仍用信号日收盘 entry
+    first = prices[0]
+    exec_entry = float(first["open"]) if first["open"] else (
+        float(first["close"]) or entry)
+
+    # 启动线：参数比例优先（新口径，基于 exec_entry），回退推荐自带止盈价（旧信号兼容）
+    launch_price = None
+    launch_ratio = get_param("short_take_profit")
+    if launch_ratio and 0 < launch_ratio < 1.0 and exec_entry > 0:
+        launch_price = exec_entry * (1 + launch_ratio)
+    elif tp and tp > 0:
+        launch_price = tp
+    # 止损价：推荐自带优先，缺失回退参数比例（基于 exec_entry）
+    if (stop is None or stop <= 0) and exec_entry > 0:
+        stop = exec_entry * (1 + float(get_param("short_stop_loss")))
 
     def _ret(n):
         if len(prices) >= n:
@@ -332,21 +343,24 @@ def _evaluate_short(conn, row, now_str: str) -> bool:
             line = highest * (1 - trail_pct)
             if tline is None or line > tline:
                 tline = line
+        # T+1：买入日（j=1）只累计持仓/状态，不检查出场（与出场跟踪一致）
+        if j == 1:
+            continue
         if stop and close <= stop:
             hit_stop = 1
             exit_reason = "stop_loss"
             exit_date = p["trade_date"]
-            exit_return = round((close - entry) / entry * 100, 2)
+            exit_return = round((close - exec_entry) / exec_entry * 100, 2)
             break
         if launched and tline is not None and close <= tline:
             exit_reason = "trailing_stop"
             exit_date = p["trade_date"]
-            exit_return = round((close - entry) / entry * 100, 2)
+            exit_return = round((close - exec_entry) / exec_entry * 100, 2)
             break
         if j == max_hold:
             exit_reason = "max_hold_days"
             exit_date = p["trade_date"]
-            exit_return = round((close - entry) / entry * 100, 2)
+            exit_return = round((close - exec_entry) / exec_entry * 100, 2)
 
     conn.execute("""
         UPDATE recommend_outcome
