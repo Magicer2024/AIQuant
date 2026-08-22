@@ -126,12 +126,14 @@ from strategy.strategies import (
 from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.next_day_momentum import scan_next_day_momentum
 from strategy.surge_breakout import scan_surge_breakout
+from strategy.pullback_dip import scan_pullback_dip
 from strategy.rec_filters import (
     trend_gate_series, quality_series, passes_quality,
     chase_filter_series, chase_filter, extension_filter_series,
     rsi_sweet_spot_series,
 )
-from config.strategy_params import SHORT_ENGINE, NEXT_DAY_MOMENTUM, SURGE_BREAKOUT
+from config.strategy_params import (SHORT_ENGINE, NEXT_DAY_MOMENTUM,
+                                    SURGE_BREAKOUT, PULLBACK_DIP)
 
 # 短线抄底引擎选择：pure_bottom = v1 已反弹（线上默认，双口径回测验证组合）；
 # pure_bottom_v2 = 买回踩平滑版（P1-2.1 灰度，tools/_eval_pullback.py 34 cohort：
@@ -1487,6 +1489,38 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             "strategy": sig["strategy"],
             "pct_above_ma20": _pct_above_ma20(pd.Timestamp(sig["trade_date"]), sig["buy_price"]),
         })
+
+    # ── 缩量回踩低吸（2026-08-22 独立信号线，short horizon 优先占名额）──
+    # 仅最新交易日；追加在动量之前：同 horizon 同票 INSERT OR REPLACE 冲突时
+    # 动量信号胜出（成熟正 alpha 线优先）。挖掘与落地依据见 strategy/pullback_dip.py
+    if PULLBACK_DIP.get("enabled"):
+        pb_sig = scan_pullback_dip(df, name, total_shares, params=PULLBACK_DIP)
+        if pb_sig and passes_quality(name, df, total_shares):
+            records.append({
+                "scan_date": pb_sig["trade_date"],
+                "trade_date": pb_sig["trade_date"],
+                "code": code,
+                "name": name or code,
+                "price": pb_sig["buy_price"],
+                "fusion_score": pb_sig["fusion_score"],
+                "vol_score": 0,
+                "ma_score": 0,
+                "diverge_score": 0,
+                "bottom_score": 0,
+                "whale_score": 0,
+                "trigger_list": _json.dumps(pb_sig["triggers"], ensure_ascii=False),
+                "buy_price": pb_sig["buy_price"],
+                "stop_loss": pb_sig["stop_loss"],
+                "take_profit": pb_sig["take_profit"],
+                "buy_volume": 0,
+                "buy_money": 0,
+                "sent_wechat": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "horizon": pb_sig["horizon"],
+                "strategy": pb_sig["strategy"],
+                "pct_above_ma20": _pct_above_ma20(
+                    pd.Timestamp(pb_sig["trade_date"]), pb_sig["buy_price"]),
+            })
 
     # ── 隔日动量（龙虎榜净买占比）：仅最新交易日、可交易子集 ──
     # 追加在短线记录之后：同 horizon 同票 INSERT OR REPLACE 时动量信号胜出

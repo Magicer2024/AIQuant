@@ -72,10 +72,30 @@ def short_t1_filter_sql(conn, start_date: str, end_date: str | None = None,
     if not parts:
         return "1", []
     ph = ",".join("?" * len(active))
-    # 非启用日（scan_date NOT IN）直接放行；启用日仅豁免隔日动量
-    return (f"(COALESCE({alias}.strategy, '') = '隔日动量' "
+    # 非启用日（scan_date NOT IN）直接放行；启用日豁免独立正期望信号线
+    # （隔日动量/缩量回踩，不受抄底恐慌日过滤约束，与挖掘口径一致）
+    return (f"(COALESCE({alias}.strategy, '') IN ('隔日动量', '缩量回踩') "
             f"OR {alias}.scan_date NOT IN ({ph}) "
             f"OR ({' AND '.join(parts)}))"), [*active, *params]
+
+
+def short_order_clause(alias: str = "s") -> str:
+    """短线候选排序 SQL 子句：独立正期望信号线优先占名额，其余按扩展度排序。
+
+    名额优先级：隔日动量(0) > 缩量回踩(1, 2026-08-22 落地，train/test 双正，
+    见 strategy/pullback_dip.py) > 其余抄底票(2)。抄底票之间按扩展度排序，
+    方向由 short_ext_sort_desc 控制（1=降序 / 0=升序，当前默认升序）。
+    2026-08-22 曾依据 tools/eval_short_fusion_cap.py（候选缓存评估）短暂切换
+    降序，同日被真实复盘口径重放（tools/eval_short_sort_replay.py，recon 窗
+    desc -2.27% vs asc -0.29%）推翻并回退，详见参数注释。三处出口
+    （今日推荐/出场跟踪/复盘入库）共用本函数保证口径一致。
+    """
+    from config.strategy_params import get_param
+    direction = "DESC" if int(get_param("short_ext_sort_desc")) else "ASC"
+    return (f"CASE WHEN {alias}.strategy = '隔日动量' THEN 0 "
+            f"WHEN {alias}.strategy = '缩量回踩' THEN 1 ELSE 2 END, "
+            f"COALESCE({alias}.pct_above_ma20, 0) {direction}, "
+            f"COALESCE({alias}.fusion_score, 0) DESC")
 
 
 # ─────────────────────────────────────────────
@@ -89,8 +109,8 @@ def insert_new_outcomes(days_back: int = 60):
     每日名额上限才是真正的「推荐」：short 取 short_top_n=3（2026-08-20 由 4 收缩），
     mid/long 取前 4；short 组额外与今日推荐同口径：
     fusion≥short_conf_gate 门控 + T1 辅助过滤（恐慌日闸门 + MA5 偏离，
-    隔日动量豁免）+ 低扩展度(pct_above_ma20 升序)排序 +
-    止盈离场(gap guard sell)剔除——2026-08 短线 8→4 改造）。
+    隔日动量豁免）+ 扩展度排序（方向由 short_ext_sort_desc 控制，当前升序）
+    + 止盈离场(gap guard sell)剔除——2026-08 短线 8→4 改造）。
 
     窗口：近 N 天 与 EXIT_TRACK_START_DATE（2026-07-20，出场跟踪/推荐复盘起始日）
     取较晚者——该日期之前的推荐视为旧算法数据，不写入也不保留（清理后不回填）。
@@ -129,9 +149,9 @@ def insert_new_outcomes(days_back: int = 60):
         # 隔日动量豁免；参数 >=99 禁用）——复盘窗内各信号日按当天历史 regime 判定
         t1_cond, t1_params = short_t1_filter_sql(conn, start_date)
         horizon_specs = {
-            # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐同口径）
-            "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
-                      "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+            # short：龙虎榜动量信号优先占名额，抄底票按扩展度排序补足
+            # （方向由 short_ext_sort_desc 控制，见 short_order_clause；与今日推荐同口径）
+            "short": (short_order_clause(),
                       f" AND s.fusion_score >= ? AND {t1_cond}", [gate, *t1_params]),
             "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
             "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),

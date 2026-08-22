@@ -412,7 +412,7 @@ def today_recommendations():
         gate = float(get_param("short_conf_gate"))
         # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按当日 regime 自动切换，
         # 隔日动量豁免；参数 >=99 禁用）
-        from core.outcome_tracker import short_t1_filter_sql
+        from core.outcome_tracker import short_t1_filter_sql, short_order_clause
         t1_cond, t1_params = short_t1_filter_sql(conn, scan_date, scan_date)
         for hz in horizons:
             pe_filter = ""
@@ -426,12 +426,12 @@ def today_recommendations():
                 gate_params = [gate, *t1_params]
             # short 组选择标准（S4 口径 + 龙虎榜动量优先）：
             #   1) 隔日动量信号（独立正期望 alpha 线，fusion≥30 天然过门控）优先占名额；
-            #   2) 低扩展度抄底信号补足剩余名额（融合分排序无选择力，按距 MA20 最近优先）。
+            #   2) 抄底票按扩展度排序补足剩余名额（方向由 short_ext_sort_desc 控制，
+            #      当前升序=低扩展优先；2026-08-22 降序实验被真实复盘口径推翻回退，
+            #      见 short_order_clause 注释）。
             # mid/long 保持融合分排序
-            order_clause = (
-                "CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
-                "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC"
-                if hz == "short" else "COALESCE(s.fusion_score, 0) DESC")
+            order_clause = (short_order_clause()
+                            if hz == "short" else "COALESCE(s.fusion_score, 0) DESC")
             rows_by_horizon[hz] = conn.execute(
                 f"""
                 SELECT
@@ -935,12 +935,13 @@ def exit_advice():
         with _get_conn() as conn:
             # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
             # 隔日动量豁免；参数 >=99 禁用）——各信号日按当天历史 regime 判定
-            from core.outcome_tracker import short_t1_filter_sql
+            from core.outcome_tracker import short_t1_filter_sql, short_order_clause
             t1_cond, t1_params = short_t1_filter_sql(conn, EXIT_TRACK_START_DATE)
             horizon_specs = {
-                # short：龙虎榜动量信号优先占名额，低扩展度抄底补足（与今日推荐/推荐复盘同口径）
-                "short": ("CASE WHEN s.strategy = '隔日动量' THEN 0 ELSE 1 END, "
-                          "COALESCE(s.pct_above_ma20, 0) ASC, COALESCE(s.fusion_score, 0) DESC",
+                # short：龙虎榜动量信号优先占名额，抄底票按扩展度排序补足
+                # （方向由 short_ext_sort_desc 控制，见 short_order_clause；
+                # 与今日推荐/推荐复盘同口径）
+                "short": (short_order_clause(),
                           f" AND s.fusion_score >= ? AND {t1_cond}", [gate, *t1_params]),
                 "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
                 "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),

@@ -251,6 +251,28 @@ SURGE_BREAKOUT = {
 }
 
 
+# ── 缩量回踩低吸信号线（2026-08-22 落地，用户外部方案主推①）─────────────
+# 独立短线信号线（同隔日动量模式：short horizon、优先占 Top3 名额）。
+# Phase 1 挖掘（tools/mine_pullback_quality.py，真实复盘口径：次日开盘买 +
+# 信号日收盘定止损 + 方案A出场，主板 2024-01~2026-08）：
+#   V3 = 回踩 MA10 企稳 + 量缩至 5日均量 60% 内 + 趋势闸门(MA20向上且站上)
+#        + 前 20 日涨幅≥10%（题材强度近似替代，无板块数据管线）
+#   train +1.82%/胜率56.8%(n=12168)，test +0.40%/胜率46.0%(n=1795)，
+#   train/test 双正且方向一致；对比现网 Top3 链 test -0.97%。
+# 关键结论：V3 在 fusion>=22 抄底池内日均仅命中 0.18 条——低吸票抄底融合分
+# 天然偏低进不了候选池（外部方案「动量分低被 top-N 误杀」判断成立），
+# 故必须以独立信号线接入而非链内过滤。enabled=False 即一键下线。
+PULLBACK_DIP = {
+    "enabled": True,
+    "vol_shrink_max": 0.6,       # 量缩上限：当日量 <= 5日均量(含当日) × 该比例
+    "ma_touch_band": 0.01,       # 回踩触及带：low <= MA10×(1+band) 且 close >= MA10×(1-band)
+    "rally_window": 20,          # 前期涨幅回看窗口（交易日）
+    "rally_min": 0.10,           # 前期涨幅下限：窗口首日→窗口内最高 >= 10%（题材强度近似）
+    "stop_loss_pct": -0.05,      # 与挖掘 simulate_exit 同参（short_stop_loss 默认值）
+    "take_profit_pct": 0.08,     # 启动线 +8%（short_take_profit 同参）
+}
+
+
 # ── Phase 1: 模板穷举配置 ──
 PHASE1_CONFIG = {
     "ic_min_abs": 0.02,           # IC 过滤阈值
@@ -403,7 +425,8 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         # 2026-08-20 改为按大盘 regime 自动切换（用户决策）：仅信号日当天
         # regime 为 cold/cool（冰点/偏冷，core/market_regime.py 与前端信号灯
         # 同口径、历史可复现）时启用本闸门，neutral/warm/hot 不过滤——
-        # 弱市减亏、强市不误伤。设 >=99 完全禁用。不适用于「隔日动量」信号线。
+        # 弱市减亏、强市不误伤。设 >=99 完全禁用。不适用于独立正期望信号线
+        # （隔日动量/缩量回踩，豁免列表见 short_t1_filter_sql）。
         "default": 0.0, "type": float,
         "min": -5.0, "max": 100.0, "label": "短线恐慌日闸门(市场宽度上限%)",
     },
@@ -414,9 +437,24 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         # 6个月窗 42.6→49.4%。单独使用（无恐慌日闸门）会被替补票稀释而劣化，
         # 必须组合使用。随闸门按 regime 自动切换（cold/cool 日启用，
         # 见 short_down_market_gate 注释）。设 >=99 禁用。
-        # 不适用于「隔日动量」信号线。
+        # 不适用于独立正期望信号线（隔日动量/缩量回踩）。
         "default": -2.0, "type": float,
         "min": -15.0, "max": 100.0, "label": "短线MA5偏离上限(%)",
+    },
+    "short_ext_sort_desc": {
+        # 短线候选排序方向（2026-08-22 评估与撤回）：
+        # 最初基于 tools/eval_short_fusion_cap.py（候选缓存 + 理想化止损出场模拟）
+        # 得出 ext 降序（趋势确认优先）全窗翻正的结论并短暂实装；同日用真实复盘
+        # 口径复核（tools/eval_short_sort_replay.py：stock_signal 真实信号 +
+        # gap guard + T1 regime 过滤 + 与 _evaluate_short 同源的信号自带止损出场
+        # 模拟）推翻——缓存评估漏算了信号自带止损口径下高扩展票的跳空大跌尾部：
+        #   asc : train +0.44 / test -1.04 / w6m -1.04 / recon -0.29(胜率42.4%)
+        #   desc: train +0.63 / test -0.51 / w6m -0.66 / recon -2.27(胜率34.9%)
+        # desc 仅 train 窗占优，近 6 个月与对账窗（真实实盘执行窗）明显劣化，
+        # 回退升序为默认。隔日动量仍优先占名额，不受排序方向影响。
+        # 1=降序(趋势确认优先) / 0=升序(默认)。
+        "default": 0, "type": int,
+        "min": 0, "max": 1, "label": "短线候选排序方向(1=扩展度降序/0=升序)",
     },
     "mid_partial_tp": {
         # 中线移动止盈启动线（2026-08 落地：中/长线同短线改为移动止盈，让利润奔跑）：
