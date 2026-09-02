@@ -10,6 +10,9 @@ routes/investor.py —— 个人投资者专属 API
 - 风险告警（接近止损/单股集中度过高等）
 """
 import json
+import os
+import subprocess
+import sys
 import time
 from datetime import date, datetime
 from typing import Optional
@@ -412,8 +415,12 @@ def today_recommendations():
         gate = float(get_param("short_conf_gate"))
         # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按当日 regime 自动切换，
         # 隔日动量豁免；参数 >=99 禁用）
-        from core.outcome_tracker import short_t1_filter_sql, short_order_clause
+        from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
+                                          short_market_gate_sql)
         t1_cond, t1_params = short_t1_filter_sql(conn, scan_date, scan_date)
+        # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量（正期望 alpha 线），
+        # 抄底/回踩类一律不推；与出场跟踪/复盘入库同口径。
+        mk_cond, mk_params = short_market_gate_sql(conn, scan_date, scan_date)
         for hz in horizons:
             pe_filter = ""
             if hz == "long" and has_pe_ttm:
@@ -422,8 +429,8 @@ def today_recommendations():
             gate_sql = ""
             gate_params: list = []
             if hz == "short":
-                gate_sql = f" AND s.fusion_score >= ? AND {t1_cond}"
-                gate_params = [gate, *t1_params]
+                gate_sql = f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond}"
+                gate_params = [gate, *t1_params, *mk_params]
             # short 组选择标准（S4 口径 + 龙虎榜动量优先）：
             #   1) 隔日动量信号（独立正期望 alpha 线，fusion≥30 天然过门控）优先占名额；
             #   2) 抄底票按扩展度排序补足剩余名额（方向由 short_ext_sort_desc 控制，
@@ -468,6 +475,9 @@ def today_recommendations():
                   AND s.name NOT LIKE '%退%'
                   -- 强势突破是首页独立栏目信号线，不占今日推荐名额
                   AND COALESCE(s.strategy, '') != '强势突破'
+                  -- 缩量回踩 2026-08-26 停用（出场跟踪实证负期望，挤占正期望动量名额），
+                  -- 与退出跟踪/复盘入库同口径不占名额
+                  AND COALESCE(s.strategy, '') != '缩量回踩'
                   {board_filter}
                   {pe_filter}
                   {gate_sql}
@@ -935,14 +945,18 @@ def exit_advice():
         with _get_conn() as conn:
             # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
             # 隔日动量豁免；参数 >=99 禁用）——各信号日按当天历史 regime 判定
-            from core.outcome_tracker import short_t1_filter_sql, short_order_clause
+            from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
+                                              short_market_gate_sql)
             t1_cond, t1_params = short_t1_filter_sql(conn, EXIT_TRACK_START_DATE)
+            # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量，与今日推荐同口径
+            mk_cond, mk_params = short_market_gate_sql(conn, EXIT_TRACK_START_DATE)
             horizon_specs = {
                 # short：龙虎榜动量信号优先占名额，抄底票按扩展度排序补足
                 # （方向由 short_ext_sort_desc 控制，见 short_order_clause；
                 # 与今日推荐/推荐复盘同口径）
                 "short": (short_order_clause(),
-                          f" AND s.fusion_score >= ? AND {t1_cond}", [gate, *t1_params]),
+                          f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond}",
+                          [gate, *t1_params, *mk_params]),
                 "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
                 "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
             }
@@ -973,6 +987,8 @@ def exit_advice():
                           AND s.name NOT LIKE '%退%'
                           -- 强势突破是首页独立栏目信号线，不纳入出场跟踪
                           AND COALESCE(s.strategy, '') != '强势突破'
+                          -- 缩量回踩 2026-08-26 停用（实证负期望），不纳入出场跟踪
+                          AND COALESCE(s.strategy, '') != '缩量回踩'
                           AND ({gap_sql}) = 0
                           {board_filter}
                           {gate_sql_cond}
@@ -2287,7 +2303,425 @@ def rule_signals():
 
 
 # ─────────────────────────────────────────────
+# 9. 个股深度 · 买卖建议（量价关系 + 涨跌节奏 + 买卖建议）
+# ─────────────────────────────────────────────
+@investor_bp.route("/stock_deep/market", methods=["GET"])
+def stock_deep_market():
+    """明日买入候选：优先返回最近一次「全市场深析扫描」结果；无结果时回退到已关注池扫描。
+
+    GET /api/investor/stock_deep/market?limit=10
+      全市场深析扫描：每日盘后同步+打分后由 scheduler 触发（也可 POST /stock_deep/scan 手动跑），
+      结果落库 stock_deep_signal；本接口读最近一次。若尚无全市场结果，则用已关注池（今日推荐+
+      自选+持仓 ≤60 只）实时计算。返回 { items, source: 'full'|'pool', scan_date, ... }。
+    """
+    try:
+        limit = request.args.get("limit", 10, type=int)
+        limit = max(1, min(limit, 30))
+        from strategy.stock_deep import get_market_signal_latest, scan_market_buy
+        with get_conn() as conn:
+            items = get_market_signal_latest(conn, limit)
+            source = "full"
+            scan_date = (items[0].get("scan_date") if items else None) or None
+            if not items:
+                # 回退：已关注池实时计算
+                codes: dict = {}
+                for r in conn.execute(
+                    "SELECT code FROM stock_signal WHERE scan_date=(SELECT MAX(scan_date) FROM stock_signal)"
+                ).fetchall():
+                    codes.setdefault(r["code"], "推荐")
+                for r in conn.execute("SELECT code FROM personal_watchlist").fetchall():
+                    codes.setdefault(r["code"], "自选")
+                for r in conn.execute(
+                    "SELECT code FROM personal_position WHERE status='holding'"
+                ).fetchall():
+                    codes.setdefault(r["code"], "持仓")
+                pool = list(codes.keys())[:60]
+                items = scan_market_buy(conn, pool, limit)
+                source = "pool"
+        return ok(_sanitize({
+            "items": items,
+            "source": source,
+            "scan_date": scan_date,
+            "note": "source=full 为全市场深析扫描落库结果；source=pool 为已关注池(今日推荐+自选+持仓)结果",
+        }))
+    except Exception as e:
+        return fail(f"明日候选计算失败: {e}", 500)
+
+
+@investor_bp.route("/stock_deep/scan", methods=["POST"])
+def stock_deep_scan():
+    """手动触发全市场深析扫描（异步后台任务，结果落库 stock_deep_signal）。
+
+    POST /api/investor/stock_deep/scan
+    返回 { task_id, running, message }；前端可轮询 /stock_deep/scan_status。
+    """
+    try:
+        from core.task_queue import submit_task, is_any_running
+        if is_any_running("sd_scan"):
+            return ok({"running": True, "task_id": None,
+                       "message": "全市场深析扫描已在运行，请稍候"})
+
+        def _run(progress_callback=None):
+            from strategy.stock_deep import run_full_market_scan
+            from core.db import get_conn as _gc
+            with _gc() as conn:
+                return run_full_market_scan(conn, progress_callback=progress_callback)
+
+        task_id = submit_task(_run, kind="sd_scan")
+        return ok({"running": True, "task_id": task_id,
+                   "message": "全市场深析扫描已启动（约几分钟），完成后可在「明日候选」查看"})
+    except Exception as e:
+        return fail(f"触发全市场深析扫描失败: {e}", 500)
+
+
+@investor_bp.route("/stock_deep/scan_status", methods=["GET"])
+def stock_deep_scan_status():
+    """全市场深析扫描状态：是否在运行 + 进度 + 最近一次扫描日期/候选数。"""
+    try:
+        from core.task_queue import is_any_running, get_running_task
+        running = is_any_running("sd_scan")
+        running_task = get_running_task("sd_scan")
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(scan_date) AS d, COUNT(*) AS c FROM stock_deep_signal"
+            ).fetchone()
+        return ok({
+            "running": running,
+            "progress": (running_task or {}).get("progress", 0),
+            "message": (running_task or {}).get("message", ""),
+            "scan_date": row["d"] if row else None,
+            "candidates": row["c"] if row else 0,
+        })
+    except Exception as e:
+        return fail(f"查询扫描状态失败: {e}", 500)
+
+
+@investor_bp.route("/stock_deep/<code>", methods=["GET"])
+def stock_deep(code: str):
+    """个股深度分析：学习该股历史走势与量价关系 → 识别涨跌节奏 → 给出近期买卖建议。
+
+    GET /api/investor/stock_deep/600519?lookback=260&recent_days=45
+    返回 { code, name, industry, as_of, latest, trend, volume_price, rhythm,
+           signal, recent_advice, chart }。
+    数据不足返回 { insufficient: true, reason }。
+    """
+    try:
+        lookback = request.args.get("lookback", 260, type=int)
+        recent_days = request.args.get("recent_days", 45, type=int)
+        lookback = max(120, min(lookback, 600))
+        recent_days = max(10, min(recent_days, 90))
+
+        from strategy.stock_deep import analyze_stock
+        with get_conn() as conn:
+            result = analyze_stock(conn, code, lookback=lookback, recent_days=recent_days)
+        return ok(_sanitize(result))
+    except Exception as e:
+        return fail(f"个股深度分析失败: {e}", 500)
+
+
+@investor_bp.route("/stocks/search", methods=["GET"])
+def stock_search():
+    """个股搜索（供深度面板的股票切换器自动补全）。
+
+    GET /api/investor/stocks/search?q=贵州&limit=20
+    q 为空时返回自选/持仓/今日推荐里的热门候选（v1 做切换点击的种子）。
+    匹配规则：code 前缀 或 name 包含；仅返回 is_active=1 且有行情数据的股票。
+    """
+    q = (request.args.get("q") or "").strip()
+    limit = request.args.get("limit", 20, type=int)
+    limit = max(1, min(limit, 50))
+
+    with get_conn() as conn:
+        if q:
+            # 按代码（前缀）或名称（包含）匹配。非数字时代码前缀置为不可能匹配的值，
+            # 否则 f"{''}%" 会变成 "%" 导致 code LIKE '%' 匹配全部股票。
+            is_digit = q.isdigit()
+            code_pat = f"{q}%" if is_digit else "zzzz"   # 非数字：代码完全不匹配，仅按名称
+            like = f"%{q}%"
+            rows = conn.execute(
+                """
+                SELECT i.code, i.name, i.industry, i.market
+                FROM stock_info i
+                WHERE i.is_active = 1
+                  AND (i.code LIKE ? OR i.name LIKE ?)
+                  AND EXISTS (SELECT 1 FROM daily_price d WHERE d.code = i.code)
+                ORDER BY
+                    CASE WHEN i.code LIKE ? THEN 0 WHEN i.name LIKE ? THEN 1 ELSE 2 END,
+                    i.code
+                LIMIT ?
+                """,
+                (code_pat, like, code_pat, like, limit),
+            ).fetchall()
+        else:
+            # 无关键词：返回自选 + 持仓 + 今日推荐里的股票，作为切换种子
+            seed_codes = {}
+            for r in conn.execute(
+                "SELECT code, '自选' AS src FROM personal_watchlist "
+                "UNION ALL SELECT code, '持仓' AS src FROM personal_position WHERE status='holding' "
+                "UNION ALL SELECT code, '推荐' AS src FROM stock_signal "
+                "WHERE scan_date = (SELECT MAX(scan_date) FROM stock_signal)"
+            ).fetchall():
+                seed_codes.setdefault(r["code"], r["src"])
+            codes = list(seed_codes.keys())
+            if not codes:
+                return ok({"items": []})
+            ph = ",".join("?" * len(codes))
+            rows = conn.execute(
+                f"""
+                SELECT i.code, i.name, i.industry, i.market
+                FROM stock_info i WHERE i.is_active = 1 AND i.code IN ({ph})
+                LIMIT ?
+                """,
+                [*codes, limit],
+            ).fetchall()
+
+    items = [dict(r) for r in rows]
+    if q:
+        # 过滤掉无行情数据的（保险起见，前端再兜底）
+        pass
+    return ok(_sanitize({"items": items, "query": q}))
+
+
+@investor_bp.route("/stock_deep/recent", methods=["GET"])
+def stock_deep_recent():
+    """个股深度面板的"近期关注"候选：自选 + 持仓 + 最新推荐，供一键切换。
+
+    GET /api/investor/stock_deep/recent
+    返回 { items: [{code, name, industry, src}] }
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT code, '自选' AS src, created_at AS ts FROM personal_watchlist
+            UNION ALL
+            SELECT code, '持仓' AS src, opened_at AS ts FROM personal_position WHERE status='holding'
+            UNION ALL
+            SELECT code, '推荐' AS src, scan_date AS ts FROM stock_signal
+              WHERE scan_date = (SELECT MAX(scan_date) FROM stock_signal)
+            ORDER BY ts DESC
+            """,
+        ).fetchall()
+        seen = set()
+        out = []
+        for r in rows:
+            if r["code"] in seen:
+                continue
+            seen.add(r["code"])
+            info = conn.execute(
+                "SELECT name, industry FROM stock_info WHERE code = ?", (r["code"],)
+            ).fetchone()
+            out.append({
+                "code": r["code"],
+                "name": info["name"] if info else r["code"],
+                "industry": info["industry"] if info and "industry" in info.keys() else None,
+                "src": r["src"],
+            })
+            if len(out) >= 14:
+                break
+    return ok(_sanitize({"items": out}))
+
+
+# ─────────────────────────────────────────────
+# 10. 个股深度 · 推荐跟踪（买点建仓 → 卖点出场 → 每笔持仓时间与收益）
+# ─────────────────────────────────────────────
+@investor_bp.route("/deep_track", methods=["GET"])
+def deep_track_list():
+    """个股深度跟踪列表 + 汇总统计。
+
+    GET /api/investor/deep_track?status=holding&limit=100&days=90
+      status 为空=全部；days 只影响统计的回溯范围（按 scan_date），不影响列表。
+    返回 { items, stats, updated_at, total }：
+      items 每笔含推荐买点/止损/止盈、建仓日与成交价、出场日与出场价、
+      持仓交易日 hold_tdays、收益 return_pct；持仓中另有 float_return 浮盈。
+      total 为**符合当前 status 过滤**的总笔数（不是返回条数）——回补后动辄
+      几百笔，前端靠它判断还有没有更多、要不要显示「加载更多」。
+    """
+    try:
+        from strategy.deep_tracker import ensure_table, get_tracks, get_stats
+        status = request.args.get("status", "").strip() or None
+        limit = max(1, min(request.args.get("limit", 100, type=int), 1000))
+        days = request.args.get("days", None, type=int)
+        with get_conn() as conn:
+            ensure_table(conn)
+            items = get_tracks(conn, status=status, limit=limit)
+            stats = get_stats(conn, days=days)
+            last = conn.execute(
+                "SELECT MAX(updated_at) AS t FROM deep_track").fetchone()
+            # 与 get_tracks 相同的过滤条件，统计「符合条件」的总数
+            where, args = "", []
+            if status:
+                keys = [s.strip() for s in str(status).split(",") if s.strip()]
+                if keys:
+                    where = "WHERE status IN ({})".format(",".join("?" * len(keys)))
+                    args.extend(keys)
+            total = conn.execute(
+                f"SELECT COUNT(*) AS c FROM deep_track {where}", args).fetchone()["c"]
+        return ok(_sanitize({
+            "items": items,
+            "stats": stats,
+            "updated_at": (last["t"] if last else None),
+            "total": int(total or 0),
+        }))
+    except Exception as e:
+        return fail(f"跟踪列表读取失败: {e}", 500)
+
+
+@investor_bp.route("/deep_track/refresh", methods=["POST"])
+def deep_track_refresh():
+    """手动跑一次跟踪推进（调度每日盘后自动跑，这里用于补跑/回补）。
+
+    POST /api/investor/deep_track/refresh  body: { "backfill_days": 0 }
+      backfill_days > 0 时对最近 N 个扫描日补建跟踪单（首次接入时用，让统计立刻有样本）。
+    """
+    try:
+        from strategy.deep_tracker import refresh, backfill
+        body = request.get_json(silent=True) or {}
+        days = int(body.get("backfill_days") or 0)
+        with get_conn() as conn:
+            if days > 0:
+                res = backfill(conn, days=min(days, 180))
+                res["mode"] = "backfill"
+            else:
+                res = refresh(conn)
+                res["mode"] = "refresh"
+        return ok(_sanitize(res))
+    except Exception as e:
+        return fail(f"跟踪推进失败: {e}", 500)
+
+
+# ─────────────────────────────────────────────
+# 历史扫描日回补（后台独立进程）
+# ─────────────────────────────────────────────
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BACKFILL_SCRIPT = os.path.join(_ROOT, "tools", "backfill_deep_scan.py")
+_BACKFILL_PROGRESS = os.path.join(_ROOT, "data_cache", "backfill_deep_scan.json")
+
+
+def _read_backfill_progress() -> dict:
+    """读取回补进度文件；文件不存在/损坏时返回 idle 状态。"""
+    if not os.path.exists(_BACKFILL_PROGRESS):
+        return {"status": "idle", "progress": 0, "message": "尚未运行"}
+    try:
+        with open(_BACKFILL_PROGRESS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"status": "idle", "progress": 0, "message": "进度文件读取失败"}
+
+
+def _write_progress_atomic(data: dict) -> None:
+    """原子写进度文件（临时文件 + os.replace），避免前端读到写了一半的 JSON。"""
+    os.makedirs(os.path.dirname(_BACKFILL_PROGRESS), exist_ok=True)
+    tmp = _BACKFILL_PROGRESS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, _BACKFILL_PROGRESS)
+
+
+@investor_bp.route("/deep_track/backfill_scan", methods=["POST"])
+def deep_track_backfill_scan():
+    """启动「历史扫描日回补」（后台独立进程，接口立即返回）。
+
+    POST body: { "days": 30, "procs": 8 }
+       days  回补最近 N 个交易日（1~180）
+       procs 并行进程数（默认 8；实测 8 进程约 46s/扫描日）
+
+    为什么要独立进程：回补一天就要对 4500+ 只股票跑全套指标，单进程约 5 分钟/天，
+    30 天就是 2.4 小时，不可能放在 Flask 请求里跑完。脚本内部用多进程（线程池无效——
+    analyze_stock 是纯 Python 计算不释放 GIL，实测 8 线程反而慢 4 倍）。
+    每天扫描都传 as_of=该交易日，杜绝未来函数。
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        days = max(1, min(int(body.get("days") or 30), 180))
+        procs = max(1, min(int(body.get("procs") or 8), 16))
+
+        cur = _read_backfill_progress()
+        if cur.get("status") == "running":
+            return fail(f"回补任务正在运行中（{cur.get('message') or ''}），请等待完成", 409)
+
+        if not os.path.exists(_BACKFILL_SCRIPT):
+            return fail(f"回补脚本不存在: {_BACKFILL_SCRIPT}", 500)
+
+        os.makedirs(os.path.dirname(_BACKFILL_PROGRESS), exist_ok=True)
+
+        # 先落一个 running 状态再拉进程：脚本启动（Python 解释器 + 进程池 spawn）
+        # 需要几秒，若这段时间前端来轮询，会读到上一次任务残留的 success/error
+        # 而误判本轮已结束。预写 running 消除这个竞态。
+        _write_progress_atomic({
+            "status": "running", "progress": 0, "message": "正在启动…",
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": None, "error": None, "scanned_dates": [],
+        })
+
+        kwargs = {"cwd": _ROOT}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(
+            [sys.executable, _BACKFILL_SCRIPT,
+             "--days", str(days), "--procs", str(procs),
+             "--progress-file", _BACKFILL_PROGRESS],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+        return ok({"started": True, "days": days, "procs": procs,
+                   "message": f"已启动回补（{days} 个交易日），请在下方查看进度"})
+    except Exception as e:
+        return fail(f"启动回补失败: {e}", 500)
+
+
+@investor_bp.route("/deep_track/backfill_scan/status", methods=["GET"])
+def deep_track_backfill_scan_status():
+    """轮询回补进度：{ status, progress, message, result, error, scanned_dates }。
+
+    status: idle / running / success / error。脚本用临时文件+os.replace 原子写，
+    不会读到半截 JSON。
+    """
+    try:
+        return ok(_read_backfill_progress())
+    except Exception as e:
+        return fail(f"进度读取失败: {e}", 500)
+
+
+@investor_bp.route("/deep_track/<int:tid>/close", methods=["POST"])
+def deep_track_close(tid: int):
+    """手动平仓：body { "price": 12.34 }；不传价格则用最新收盘价。"""
+    try:
+        from strategy.deep_tracker import close_track
+        body = request.get_json(silent=True) or {}
+        price = body.get("price")
+        with get_conn() as conn:
+            res = close_track(
+                conn, tid,
+                price=float(price) if price not in (None, "") else None,
+            )
+        return ok(_sanitize(res))
+    except ValueError as e:
+        return fail(str(e), 400)
+    except Exception as e:
+        return fail(f"平仓失败: {e}", 500)
+
+
+@investor_bp.route("/deep_track/<int:tid>", methods=["DELETE"])
+def deep_track_delete(tid: int):
+    """删除一笔跟踪（误录入或不想再跟踪）。删除不进入收益统计。"""
+    try:
+        from strategy.deep_tracker import delete_track
+        with get_conn() as conn:
+            deleted = delete_track(conn, tid)
+        if not deleted:
+            return fail("跟踪单不存在", 404)
+        return ok({"deleted": tid})
+    except Exception as e:
+        return fail(f"删除失败: {e}", 500)
+
+
+# ─────────────────────────────────────────────
 # 启动时确保表存在（被 app.py 注册时调用）
 # ─────────────────────────────────────────────
 def init_investor_tables():
     _ensure_personal_tables()
+    try:
+        from strategy.deep_tracker import ensure_table
+        with get_conn() as conn:
+            ensure_table(conn)
+    except Exception:
+        pass  # 建表失败不阻断启动

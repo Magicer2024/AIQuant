@@ -3,7 +3,7 @@ AIQuant —— 个人股票评分系统
 Flask 入口
 """
 import os
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, make_response
 from flask_cors import CORS
 from utils.logger import setup_logging
 from utils.timing import init_app as init_timing
@@ -54,7 +54,12 @@ except Exception as e:
 @app.route("/")
 @app.route("/dashboard")
 def dashboard():
-    return send_from_directory(".", "dashboard.html")
+    # 不缓存 HTML：前端改动（尤其实时重算/图表）需立即生效，避免浏览器用旧缓存
+    resp = make_response(send_from_directory(".", "dashboard.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/reports/<path:filename>")

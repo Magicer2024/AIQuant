@@ -144,6 +144,51 @@ def fetch_kline(code: str, adjust: str = "qfq", klt: str = "d",
     return df if df is not None else pd.DataFrame()
 
 
+# ─────────────────────────────────────────────
+# 指数：东财直连日 K 线（供市场速览 / 大盘择时）
+# ─────────────────────────────────────────────
+def fetch_index_klines(code: str, start_date: str | None = None,
+                       end_date: str | None = None) -> pd.DataFrame:
+    """
+    单指数东财直连日 K 线，与个股快路径(daily_sync_by_date)同源，不依赖 baostock。
+
+    :param code: 纯指数代码 '000001'(上证指数) / '399001'(深证成指) / '000300'(沪深300)
+    :param start_date: 'YYYYMMDD' 或 'YYYY-MM-DD'，默认近 1 年
+    :param end_date: 同上，默认今天
+    :return: DataFrame, index=trade_date（列含 open/high/low/close/volume/amount/pct_change）
+    """
+    if end_date is None:
+        end_date = datetime.today().strftime("%Y%m%d")
+    if start_date is None:
+        start_date = (datetime.today() - timedelta(days=365)).strftime("%Y%m%d")
+    beg = str(start_date).replace("-", "")
+    end = str(end_date).replace("-", "")
+
+    # 指数 secid：399xxx 属深市(market 0)，其余指数(000xxx/000300/000688/000905 等)属沪市(market 1)。
+    # 注意：不能复用个股 to_em_secid（它把 000001 判成深市平安银行）。
+    secid = f"0.{code}" if code.startswith("399") else f"1.{code}"
+
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": secid,
+        "ut": _UT,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "klt": "101",
+        "fqt": "1",
+        "beg": beg,
+        "end": end,
+        "lmt": "1000",
+    }
+    resp = _SESSION.get(url, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    klines = (data or {}).get("data", {}).get("klines") or []
+    if not klines:
+        return pd.DataFrame()
+    return _parse_klines(klines)
+
+
 def _parse_klines(klines: list[str]) -> pd.DataFrame:
     """把东财返回的 kline 字符串列表解析为 DataFrame"""
     rows = [k.split(",") for k in klines]

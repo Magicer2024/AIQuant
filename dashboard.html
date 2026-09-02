@@ -8,7 +8,114 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260811">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260825">
+    <style id="stockDeepCss">
+        .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+        .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:13px}
+        .sd-search:focus{outline:none;border-color:var(--accent)}
+        .sd-nav{display:flex;align-items:center;gap:8px}
+        .sd-count{font-size:12px;color:var(--text-secondary);font-family:var(--font-mono)}
+        .sd-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+        .sd-chip{cursor:pointer;padding:4px 10px;font-size:12px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:14px;color:var(--text-secondary)}
+        .sd-chip:hover{border-color:var(--accent);color:var(--text-primary)}
+        .sd-chip.sd-chip-active{background:rgba(var(--accent-rgb),.14);border-color:var(--accent);color:var(--text-primary);font-weight:600}
+        .sd-chip-src{opacity:.6;margin-left:4px;font-size:10px}
+        .sd-chip-del{margin-left:6px;background:transparent;border:none;color:var(--text-muted);font-size:14px;line-height:1;cursor:pointer;padding:0 2px}
+        .sd-chip-del:hover{color:var(--danger)}
+        .sd-chips-empty{font-size:12px;color:var(--text-muted)}
+        .sd-market-title{font-size:13px;font-weight:600;color:var(--text-primary);margin:10px 0 8px;display:flex;align-items:center;gap:6px}
+        .sd-market-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+        @media(max-width:1280px){.sd-market-grid{grid-template-columns:repeat(3,1fr)}}
+        @media(max-width:900px){.sd-market-grid{grid-template-columns:repeat(2,1fr)}}
+        @media(max-width:560px){.sd-market-grid{grid-template-columns:1fr}}
+        .sd-market-card{cursor:pointer;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:9px 11px;transition:border-color .15s,box-shadow .15s;display:flex;flex-direction:column;gap:5px;min-height:108px}
+        .sd-market-card:hover{border-color:var(--accent);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.18)}
+        .sd-market-head{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:20px}
+        .sd-market-name{font-size:13px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+        .sd-market-meta{font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
+        .sd-market-prices{display:flex;gap:3px 8px;flex-wrap:wrap;font-size:11px;color:var(--text-secondary);font-family:var(--font-mono);line-height:1.6}
+        .sd-market-prices b{color:var(--text-muted);font-weight:500;margin-right:2px;font-family:inherit}
+        .sd-market-prices .sd-price-entry{color:var(--accent);font-weight:600}
+        .sd-market-reasons{display:flex;gap:4px;flex-wrap:wrap;margin-top:auto}
+        .sd-market-reasons .reason-chip{font-size:10px;padding:1px 6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .sd-market-empty-col{grid-column:1/-1;text-align:center;padding:30px 14px;color:var(--text-muted);font-size:12px}
+        .sd-scan-progress{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px}
+        .sd-scan-progress .row{display:flex;justify-content:space-between;font-size:12px;color:var(--text-secondary);margin-bottom:5px}
+        .sd-scan-progress .bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+        .sd-scan-progress .fill{height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width 0.3s}
+        .sd-scan-progress .msg{font-size:11px;color:var(--text-muted);margin-top:5px}
+        .sd-summary{display:flex;gap:10px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--border);margin-bottom:14px}
+        .sd-metric{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:8px 12px;min-width:120px}
+        .sd-metric .lbl{font-size:10px;color:var(--text-muted);letter-spacing:.04em}
+        .sd-metric .val{font-size:16px;font-weight:600;color:var(--text-primary);margin-top:2px}
+        .sd-metric .sub{font-size:11px;color:var(--text-secondary);margin-top:2px}
+        .sd-grid-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+        @media(max-width:900px){.sd-grid-2col{grid-template-columns:1fr}}
+        .sd-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+        .sd-card h4{margin:0 0 6px;font-size:13px;color:var(--text-primary)}
+        .sd-card .sd-card-desc{font-size:12px;color:var(--text-secondary);line-height:1.6}
+        .sd-kv{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--text-secondary)}
+        .sd-kv b{color:var(--text-primary)}
+        .sd-signal{display:grid;grid-template-columns:150px 1fr;gap:14px;align-items:stretch;margin-bottom:14px}
+        @media(max-width:700px){.sd-signal{grid-template-columns:1fr}}
+        .sd-signal-side{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center}
+        .sd-signal-emoji{font-size:44px;line-height:1}
+        .sd-signal-level{font-size:18px;font-weight:700}
+        .sd-signal-note{font-size:11px;color:var(--text-secondary)}
+        .sd-plan{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+        @media(max-width:600px){.sd-plan{grid-template-columns:1fr}}
+        .sd-plan-cell{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center}
+        .sd-plan-cell .lbl{font-size:11px;color:var(--text-muted)}
+        .sd-plan-cell .val{font-size:18px;font-weight:700;margin-top:4px}
+        .sd-plan-cell .sub{font-size:11px;color:var(--text-secondary);margin-top:2px}
+        .sd-reason-list{list-style:none;margin:0;padding:0}
+        .sd-reason-list li{font-size:12px;line-height:1.7;color:var(--text-secondary);padding-left:14px;position:relative}
+        .sd-reason-list li::before{content:'·';position:absolute;left:0;color:var(--accent)}
+        .sd-reason-list li.sd-risk::before{color:var(--danger)}
+        .sd-chart{width:100%;height:420px;margin-top:4px}
+        .sd-chart-hint{font-size:11px;color:var(--text-muted);margin:4px 0 2px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+        .sd-chart-hint b{font-weight:600}
+        .sd-timeline{max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px}
+        .sd-tl-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-size:12px}
+        .sd-tl-item:nth-child(even){background:rgba(var(--accent-rgb),.05)}
+        .sd-tl-item .date{font-family:var(--font-mono);color:var(--text-secondary);width:84px;flex:none}
+        .sd-tl-item .close{width:64px;text-align:right;font-family:var(--font-mono);color:var(--text-primary);flex:none}
+        .sd-tl-item .pct{width:56px;text-align:right;font-family:var(--font-mono);flex:none}
+        .sd-tl-item .lvl{width:88px;flex:none}
+        .sd-tl-item .brief{flex:1;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .sd-lvl-chip{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+        .sd-lvl-buy{background:rgba(var(--green-rgb),.16);color:var(--green)}
+        .sd-lvl-add{background:rgba(255,170,60,.16);color:#ffaa3c}
+        .sd-lvl-hold{background:rgba(var(--accent-rgb),.14);color:var(--accent)}
+        .sd-lvl-sell{background:rgba(var(--danger-rgb),.14);color:var(--danger)}
+        .sd-tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;margin-right:6px;vertical-align:middle}
+        .sd-trade-table{width:100%;border-collapse:collapse;font-size:11px;color:var(--text-secondary)}
+        .sd-trade-table th{position:sticky;top:0;background:var(--bg-elevated);color:var(--text-muted);font-weight:600;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;z-index:1}
+        .sd-trade-table td{padding:6px 8px;border-bottom:1px solid var(--border);font-family:var(--font-mono);white-space:nowrap}
+        .sd-trade-table tr:last-child td{border-bottom:none}
+        .sd-trade-table tbody tr:hover{background:rgba(var(--accent-rgb),.06)}
+        /* 个股深度 · 推荐跟踪（买点建仓 → 卖点出场 → 每笔持仓与收益） */
+        .sd-track-head{display:flex;align-items:center;gap:8px;margin:14px 0 8px;flex-wrap:wrap}
+        .sd-track-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+        .sd-track-stat{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:6px 10px;min-width:84px}
+        .sd-track-stat .lbl{font-size:10px;color:var(--text-muted);letter-spacing:.03em}
+        .sd-track-stat .val{font-size:14px;font-weight:600;color:var(--text-primary);font-family:var(--font-mono);margin-top:1px}
+        .sd-track-stat .val.pos{color:var(--positive)}
+        .sd-track-stat .val.neg{color:var(--negative)}
+        .sd-track-table .num{font-family:var(--font-mono)}
+        .sd-track-table .pos{color:var(--positive)}
+        .sd-track-table .neg{color:var(--negative)}
+        .sd-track-table td.name-td{font-family:inherit;white-space:normal}
+        .sd-st{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;white-space:nowrap}
+        .sd-st-holding{background:rgba(var(--accent-rgb),.16);color:var(--accent)}
+        .sd-st-watching{background:rgba(var(--warning-rgb),.14);color:var(--warning)}
+        .sd-st-closed{background:rgba(var(--success-rgb),.12);color:var(--success)}
+        .sd-st-expired{background:rgba(var(--text-muted),.12);color:var(--text-muted)}
+        .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:11px;padding:1px 6px;cursor:pointer;margin-right:4px}
+        .sd-op:hover{border-color:var(--accent);color:var(--text-primary)}
+        .sd-op.danger:hover{border-color:var(--danger);color:var(--danger)}
+        .sd-track-note{font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.6}
+    </style>
     <script>
         // 尽早应用已保存主题，避免首屏闪烁（FOUC）
         (function () {
@@ -71,6 +178,15 @@
         </div>
         <div class="chart" id="klineChart"></div>
         <div class="trade-info" id="klineTradeInfo"></div>
+    </div>
+</div>
+
+<div class="kline-overlay" id="sdDeepPanel" onclick="if(event.target===this)closeSdDeep()">
+    <div class="sd-deep-popup">
+        <button class="close-btn" onclick="closeSdDeep()" aria-label="关闭弹窗">&#x2715;</button>
+        <div id="sdDeepBody"></div>
+        <div id="sdDeepChart" style="width:100%;height:0;display:none"></div>
+        <div id="sdDeepIndicators" style="display:none"></div>
     </div>
 </div>
 
@@ -324,6 +440,7 @@ function switchTab(tab) {
         document.getElementById('content').innerHTML = cached.html;
         var scrollEl = document.querySelector('.content');
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
+        if (tab === 'home') restoreStockDeep();   // cache 恢复时重绘个股深度图表
         return;
     }
 
@@ -406,9 +523,31 @@ async function loadHomeTab(container) {
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
                 <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">📋 一键复制</button>
                 <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:12px;padding:2px 6px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
-                <span class="text-muted" style="font-size:12px">基于量价 + 主力 + 趋势综合评估，点击查看 K 线</span>
+                <span class="text-muted" style="font-size:12px">基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）</span>
             </div>
             <div id="todayPicks" class="action-plan-grid">加载中…</div>
+        </div>
+
+        <div class="panel" id="stockDeepPanel">
+            <div class="panel-header">
+                <h3>🎯 个股深度 · 买卖建议</h3>
+                <span class="text-muted" id="sdHint" style="font-size:12px">切换个股后自动学习其历史走势、量价关系与涨跌节奏，给出近期可执行建议</span>
+            </div>
+            <div class="sd-toolbar">
+                <input class="sd-search" id="sdSearch" list="sdDatalist" placeholder="🔍 输入代码或名称（如 600100 / TCL科技），回车分析"
+                       autocomplete="off" onkeydown="if(event.key==='Enter')onSdSearchPick()" onchange="onSdSearchPick()" oninput="onSdSearchInput(this.value)">
+                <datalist id="sdDatalist"></datalist>
+                <div class="sd-nav">
+                    <button class="btn btn-sm" onclick="sdCycle(-1)" title="上一只">◀ 上一只</button>
+                    <span class="sd-count" id="sdCount"></span>
+                    <button class="btn btn-sm" onclick="sdCycle(1)" title="下一只">下一只 ▶</button>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="loadSdMarket()" title="在今日推荐+自选+持仓候选池上跑深析信号，筛出明日可推荐买入的股票">⭐ 明日候选</button>
+            </div>
+            <div id="sdChips" class="sd-chips">加载中…</div>
+            <div id="sdMarketBox"></div>
+            <div id="sdTrackBox"></div>
+            <div id="stockDeepContent">加载中…</div>
         </div>
 
         <div class="panel">
@@ -417,14 +556,6 @@ async function loadHomeTab(container) {
                 <span class="text-muted" style="font-size:12px" id="surgePicksHint">大阳突破 × 龙虎榜净买双重严筛 · 次日开盘买入 · 严守止损、仓位从轻 · 宁缺毋滥</span>
             </div>
             <div id="surgePicks" class="action-plan-grid">加载中…</div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h3>出场跟踪 · 7月20日起推荐的出场状态</h3>
-                <span class="text-muted" style="font-size:12px" id="exitTrackHint">按推荐自带止损/止盈价跟踪 · 买入价=推荐次日开盘价 · 短线≤10日 / 中线≤60日 / 长线不限，未卖出前持续跟踪</span>
-            </div>
-            <div id="exitTrackPanel">加载中…</div>
         </div>
 
         <div class="grid-2col">
@@ -485,7 +616,8 @@ async function loadHomeTab(container) {
         loadMarketOverview(),
         loadTodayPicks(),
         loadSurgePicks(),
-        loadExitTrack(),
+        // 出场跟踪已并入 loadTodayPicks（按 hz 嵌入对应推荐小板块底下）
+        loadStockDeep(),
         loadMyPositions(),
         loadMyWatchlist(),
         loadPositionHistory(),
@@ -564,7 +696,7 @@ async function loadMarketOverview() {
             const trend5Html = trend5 == null ? '' :
                 `<div class="idx-trend ${trend5>=0?'idx-up':'idx-down'}">5日 ${trend5>=0?'+':''}${trend5}%</div>`;
             return `
-                <div class="idx-card">
+                <div class="idx-card idx-clickable" onclick="openIndexKline('${idx.code}','${idx.name.replace(/'/g, "\\'")}')" title="点击查看 ${idx.name} 的K线">
                     <div class="idx-name">${idx.name}</div>
                     <div class="idx-price">${idx.close.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
                     <div class="idx-pct ${cls}">${sign}${chg.toFixed(2)}%</div>
@@ -750,21 +882,207 @@ async function loadTodayPicks(isFallback) {
             box.innerHTML = '<div class="empty-state">暂无推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「高级筛选」跑一遍打分</span></div>';
             return;
         }
-        box.innerHTML = HORIZON_GROUPS.map(g => {
-            const list = groups[g.key] || [];
-            const cards = list.length
-                ? list.map(it => renderPickCard(it)).join('')
-                : '<div class="empty-state" style="padding:20px;font-size:12px">该周期暂无推荐，请先在首页点「立即重算打分」</div>';
-            return `<div class="pick-group">
-                <div class="pick-group-head">
-                    <span class="horizon-tag hz-${g.key}">${g.label} · ${g.desc}</span>
-                    <span class="pick-group-count">${list.length} 只</span>
-                </div>
-                <div class="action-plan-grid">${cards}</div>
-            </div>`;
-        }).join('');
+        box.innerHTML = HORIZON_GROUPS.map(g => renderPickGroup(g, groups[g.key] || [])).join('');
+        // 出场跟踪嵌入到对应周期小板块底下（与 pickDate 无关——出场跟踪是「7月20日起累计」，
+        // 切换推荐日期不影响出场统计，故只拉一次缓存到 _exitTrackData）
+        try {
+            if (!window._exitTrackData) {
+                const er = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice');
+                window._exitTrackData = (er && er.data) || {};
+            }
+            HORIZON_GROUPS.forEach(g => renderPickExitEmbed(g.key, window._exitTrackData));
+        } catch (e) { /* 出场跟踪嵌入失败不阻断推荐展示 */ }
     } catch(e) {
         if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+// 出场跟踪嵌入：找到对应 hz 的 .pick-exit-mount，把迷你版渲染进去
+function renderPickExitEmbed(hz, d) {
+    var mount = document.querySelector('#todayPicks .pick-group[data-hz="' + hz + '"] .pick-exit-mount');
+    if (!mount) return;
+    d = d || {};
+    var groups = d.groups || {};
+    var perf = d.perf || (d.summary && d.summary.perf) || {};
+    var list = groups[hz] || [];
+    if (!list.length) {
+        mount.innerHTML = '<div class="pick-exit-empty">该周期暂无出场跟踪记录（短线 ≤10 日 / 中线 ≤60 日 / 长线不限）</div>';
+        return;
+    }
+    mount.innerHTML = renderPickExitMini(hz, list, perf);
+}
+
+// 紧凑版出场跟踪（嵌入到推荐小板块底部）
+function renderPickExitMini(hz, list, perf) {
+    var held = list.filter(function (it) { return it.status === 'hold'; }).length;
+    var cleared = list.length - held;
+    var expanded = !!EXIT_EXPANDED[hz];
+    var meta = EXIT_HORIZON_META[hz] || { icon: '📊', label: hz };
+    return '<div class="pick-exit-mini">' +
+        '<div class="pick-exit-head">' +
+            '<span class="pick-exit-title">📊 出场跟踪 · ' + meta.label + '（7月20日起累计）</span>' +
+            '<span class="hz-spacer"></span>' +
+            '<span class="pick-exit-chips">' + exitStatChip(hz, perf) +
+                '<span class="exit-group-stat">持有 ' + held + '</span>' +
+                '<span class="exit-group-stat">已卖出 ' + cleared + '</span>' +
+            '</span>' +
+            '<button class="pick-detail-btn pick-exit-toggle' + (expanded ? ' active' : '') + '"' +
+                    ' onclick="togglePickExit(\'' + hz + '\')"' +
+                    ' title="' + (expanded ? '收起跟踪明细' : '展开该周期的详细跟踪列表') + '">' +
+                (expanded ? '收起' : '详情') + '<span class="caret">▾</span>' +
+            '</button>' +
+        '</div>' +
+        (expanded ? '<div class="pick-exit-body">' + renderExitGroupBody(list) + '</div>' : '') +
+    '</div>';
+}
+
+// 切换某 hz 出场跟踪明细折叠态
+function togglePickExit(hz) {
+    EXIT_EXPANDED[hz] = !EXIT_EXPANDED[hz];
+    saveExitExpandState(EXIT_EXPANDED);
+    renderPickExitEmbed(hz, window._exitTrackData || {});
+}
+
+// ── 今日推荐三小板块：默认简略，点右上角「详情」展开完整推荐卡 ──
+// 展开状态按周期记忆到 localStorage，刷新后保持
+const PICK_EXPAND_KEY = 'aiq_pick_expanded';
+function loadPickExpandState() {
+    try {
+        const obj = JSON.parse(localStorage.getItem(PICK_EXPAND_KEY) || '{}');
+        return { short: !!obj.short, mid: !!obj.mid, long: !!obj.long };
+    } catch(e) { return { short: false, mid: false, long: false }; }
+}
+function savePickExpandState(st) {
+    try { localStorage.setItem(PICK_EXPAND_KEY, JSON.stringify(st)); } catch(e) {}
+}
+let PICK_EXPANDED = loadPickExpandState();
+
+// 简略行：一行一只，只保留 名称/代码 + 综合分 + 买入/止盈/止损 + 盈亏比
+function renderPickMiniRow(it) {
+    const ap = it.action_plan || {};
+    const sg = it.signal || {};
+    const num = v => (v != null ? Number(v).toFixed(2) : '--');
+    const pct = it.latest_pct;
+    const pctHtml = pct != null
+        ? ` · <span class="${pct >= 0 ? 'idx-up' : 'idx-down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>` : '';
+    const rr = ap.risk_reward_ratio;
+    const rrCls = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
+    const rrHtml = rr != null
+        ? `<span class="rr-tag ${rrCls}">${rr.toFixed(2)}</span>`
+        : '<span style="color:var(--text-muted);font-size:11px">--</span>';
+    const label = (sg.label || '').replace(/"/g, '');
+    return `<div class="pick-mini-row" onclick="openKline('${it.code}')" title="点击查看 K 线">
+        <div class="pm-stock">
+            <div class="pm-name">${sg.emoji ? `<span class="pm-sig" title="${label}">${sg.emoji}</span>` : ''}${it.name || it.code}${it.strategy ? `<span class="strategy-badge">${it.strategy}</span>` : ''}</div>
+            <div class="pm-code">${it.code}${pctHtml}</div>
+        </div>
+        <div class="pm-score">${it.fusion_score != null ? it.fusion_score : '--'}</div>
+        <div class="pm-price pm-buy" title="建议买入">${num(ap.entry_price)}</div>
+        <div class="pm-price pm-tp" title="止盈目标">${num(ap.take_profit)}</div>
+        <div class="pm-price pm-stop" title="止损">${num(ap.stop_loss)}</div>
+        <div class="pm-rr" title="盈亏比">${rrHtml}</div>
+    </div>`;
+}
+
+// 小板块内容区：简略列表 / 完整推荐卡
+function renderPickGroupBody(g, list) {
+    if (!list.length) {
+        return '<div class="empty-state" style="padding:16px;font-size:12px">该周期暂无推荐，请先在首页点「立即重算打分」</div>';
+    }
+    if (PICK_EXPANDED[g.key]) {
+        return '<div class="action-plan-grid">' + list.map(it => renderPickCard(it)).join('') + '</div>';
+    }
+    return `<div class="pick-mini-list">
+        <div class="pick-mini-head"><span>股票</span><span>综合分</span><span>买入</span><span>止盈</span><span>止损</span><span>盈亏比</span></div>
+        ${list.map(it => renderPickMiniRow(it)).join('')}
+    </div>`;
+}
+
+// 小板块整体：头部（周期标签 + 只数 + 右上「详情」按钮）+ 内容区
+function renderPickGroup(g, list) {
+    const has = list.length > 0;
+    const expanded = has && !!PICK_EXPANDED[g.key];
+    return `<div class="pick-group" data-hz="${g.key}">
+        <div class="pick-group-head">
+            <span class="horizon-tag hz-${g.key}">${g.label}</span>
+            <span class="hz-desc">${g.desc}</span>
+            <span class="pick-group-count">${list.length} 只</span>
+            <span class="hz-spacer"></span>
+            <button class="pick-detail-btn" ${has ? '' : 'disabled'}
+                    onclick="copyPickGroup('${g.key}', this)"
+                    title="只复制本板块${g.label}推荐的股票与买卖价位">📋 复制</button>
+            <button class="pick-detail-btn pick-detail-toggle${expanded ? ' active' : ''}" ${has ? '' : 'disabled'}
+                    onclick="togglePickDetail('${g.key}')"
+                    title="${expanded ? '收起详细推荐' : '展开该周期的完整推荐信息'}">${expanded ? '收起' : '详情'}<span class="caret">▾</span></button>
+        </div>
+        <div class="pick-group-body">${renderPickGroupBody(g, list)}</div>
+        <div class="pick-exit-mount" data-hz="${g.key}"></div>
+    </div>`;
+}
+
+// ── 单板块复制：生成一个周期的推荐文本（全量复制 copyTodayPicks 也复用）──
+function buildPickGroupLines(list) {
+    return list.map((it, i) => {
+        const ap = it.action_plan || {};
+        const entry   = ap.entry_price   != null ? ap.entry_price.toFixed(2)   : '--';
+        const stop    = ap.stop_loss     != null ? ap.stop_loss.toFixed(2)     : '--';
+        const tp      = ap.take_profit   != null ? ap.take_profit.toFixed(2)   : '--';
+        const confirm = it.confirm_trigger != null ? it.confirm_trigger.toFixed(2) : '--';
+        return (i + 1) + '. ' + (it.name || it.code) + ' ' + (it.code || '') +
+            '｜建议买入 ' + entry +
+            '｜止盈 ' + tp +
+            '｜止损 ' + stop +
+            '｜突破确认 ' + confirm;
+    });
+}
+
+// 复制单个板块（只复制自己周期的股票）
+function copyPickGroup(key, btn) {
+    const store = window._todayPicks;
+    const g = HORIZON_GROUPS.find(x => x.key === key);
+    if (!store || !store.groups || !g) {
+        showToast('暂无推荐数据，请先重算打分', 'error');
+        return;
+    }
+    const list = store.groups[key] || [];
+    if (!list.length) {
+        showToast(g.label + '暂无推荐数据', 'error');
+        return;
+    }
+    const dateStr = store.date ? '（' + store.date + '）' : '';
+    const text = '📋 今日推荐·' + g.label + dateStr + '\n' + buildPickGroupLines(list).join('\n');
+    copyTextToClipboard(text, function(ok) {
+        if (ok) {
+            if (btn) {
+                const orig = btn.textContent;
+                btn.textContent = '✓ 已复制';
+                setTimeout(function() { btn.textContent = orig; }, 2000);
+            }
+            showToast('已复制' + g.label + '推荐 ' + list.length + ' 只', 'success');
+        } else {
+            showToast('复制失败，请手动复制', 'error');
+        }
+    });
+}
+
+// 点击「详情」：只重绘该小板块，避免整块刷新
+function togglePickDetail(key) {
+    PICK_EXPANDED[key] = !PICK_EXPANDED[key];
+    savePickExpandState(PICK_EXPANDED);
+    const store = window._todayPicks;
+    if (!store || !store.groups) return;
+    const g = HORIZON_GROUPS.find(x => x.key === key);
+    const groupEl = document.querySelector('#todayPicks .pick-group[data-hz="' + key + '"]');
+    if (!g || !groupEl) return;
+    const body = groupEl.querySelector('.pick-group-body');
+    const btn = groupEl.querySelector('.pick-detail-toggle');
+    const list = store.groups[key] || [];
+    if (body) body.innerHTML = renderPickGroupBody(g, list);
+    if (btn) {
+        const on = !!PICK_EXPANDED[key];
+        btn.classList.toggle('active', on);
+        btn.innerHTML = (on ? '收起' : '详情') + '<span class="caret">▾</span>';
+        btn.title = on ? '收起详细推荐' : '展开该周期的完整推荐信息';
     }
 }
 
@@ -849,102 +1167,1018 @@ function renderSurgeCard(it) {
         </div>`;
 }
 
-// P0: 出场跟踪（7月20日起推荐的出场状态，按短线/中线/长线三组，未卖出持续跟踪）
-async function loadExitTrack() {
-    const box = document.getElementById('exitTrackPanel');
-    if (!box) return;
+// ─── 个股深度 · 买卖建议（切换个股 → 学习历史走势/量价关系 → 识别涨跌节奏 → 近期建议）──
+var _sd = { list: [], idx: -1, data: null, code: null };
+
+function _sdColor(name, fb) {
+    name = String(name || '');
+    if (name.charAt(0) === '#' || name.indexOf('rgb') === 0 || name.indexOf('hsl') === 0) return name;
+    name = name.replace(/^var\(\s*/, '').replace(/\s*\)$/, '');
+    return cssVar(name, fb || '#8a93b5');
+}
+
+function _sdSignalColor(level) {
+    var m = { buy: '--green', add: '#ffaa3c', hold: '--accent', sell: '--danger' };
+    return m[level] || '--text-secondary';
+}
+
+// ─── 个股搜索历史缓存（非内置；最近搜索在前，可删除）───
+var _SD_HIST_KEY = 'aiq_sd_history';
+var _SD_HIST_MAX = 14;
+
+function _sdLoadHistory() {
     try {
-        const resp = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice');
-        const d = (resp && resp.data) || {};
-        const items = d.items || [];
-        const groups = d.groups || { short: [], mid: [], long: [] };
+        var h = JSON.parse(localStorage.getItem(_SD_HIST_KEY) || '[]');
+        return (Array.isArray(h) ? h : []).filter(function(x) { return x && x.code; });
+    } catch(e) { return []; }
+}
+function _sdSaveHistory() {
+    try { localStorage.setItem(_SD_HIST_KEY, JSON.stringify(_sd.list.slice(0, _SD_HIST_MAX))); } catch(e) {}
+}
+
+// ─── 个股深度 · 详情弹窗（详情从板块主体剥出，进居中弹窗；板块主区只放极简占位）───
+var _sdDeepMode = false;
+function _sdGetBody()       { return document.getElementById(_sdDeepMode ? 'sdDeepBody' : 'stockDeepContent'); }
+function _sdGetChart()      { return document.getElementById(_sdDeepMode ? 'sdDeepChart' : 'stockDeepChart'); }
+function _sdGetIndicators() { return document.getElementById(_sdDeepMode ? 'sdDeepIndicators' : 'sdIndicators'); }
+
+async function openSdDeep(code) {
+    var panel = document.getElementById('sdDeepPanel');
+    if (!panel) return;
+    _sdDeepMode = true;                                 // 先切模式，refreshStockDeep 内的 _sdGetBody 才指向弹窗
+    panel.classList.add('open');
+    var body = _sdGetBody();
+    if (body) body.innerHTML = '<div class="empty-state" style="padding:60px 14px;font-size:13px">⏳ 正在深度学习该股历史走势、量价关系与涨跌节奏…</div>';
+    try {
+        await refreshStockDeep(code, { reorder: true });
+    } catch (e) {
+        if (body) body.innerHTML = '<div class="empty-state">分析失败：' + (e.message || e) + '</div>';
+    }
+    var popup = panel.querySelector('.sd-deep-popup');
+    if (popup) popup.scrollTop = 0;
+}
+
+function closeSdDeep() {
+    var panel = document.getElementById('sdDeepPanel');
+    if (panel) panel.classList.remove('open');
+    _sdDeepMode = false;
+    // 弹窗内的 ECharts 实例 detach（避免后台持续监听 resize 造成内存增长）
+    var ch = document.getElementById('sdDeepChart');
+    if (ch && window.echarts) {
+        try { var inst = echarts.getInstanceByDom(ch); if (inst) inst.dispose(); } catch (e) {}
+    }
+    // 关弹窗后刷新板块主区占位（用最新 _sd.code）
+    if (typeof renderSdPanelPlaceholder === 'function') renderSdPanelPlaceholder();
+}
+
+// ESC 关闭弹窗
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+        var p = document.getElementById('sdDeepPanel');
+        if (p && p.classList.contains('open')) closeSdDeep();
+    }
+});
+
+function renderSdPanelPlaceholder() {
+    var box = document.getElementById('stockDeepContent');
+    if (!box) return;
+    var cur = (_sd.idx >= 0 && _sd.list[_sd.idx]) || null;
+    if (!cur) {
+        box.innerHTML = '<div class="sd-panel-empty">' +
+            '👇 点 chip 选中并打开弹窗 · 再点同一 chip 可取消' +
+            '<div class="sd-panel-tip">也支持：在「明日候选」或「推荐跟踪」中点击股票名直接打开</div></div>';
+        return;
+    }
+    box.innerHTML = '<div class="sd-panel-hero">' +
+        '<div><span class="sd-hero-name">' + (cur.name || cur.code) +
+        '</span><span class="sd-hero-code">' + cur.code + '</span></div>' +
+        '<div class="sd-hero-hint">已选中 · 在弹窗中查看深度分析（量价 + 节奏 + 信号 + K 线 + 近期建议时间线）</div>' +
+        '<button class="btn btn-primary" onclick="openSdDeep(\'' + cur.code + '\')">🔍 查看深度分析</button>' +
+        '</div>';
+}
+
+async function loadStockDeep() {
+    var box = document.getElementById('stockDeepContent');
+    if (!box) return;
+    _sd.list = _sdLoadHistory();
+    renderSdChips();
+    // 盘后自动产出的「明日候选」与「推荐跟踪」随板块一起加载，不必手动点按钮
+    loadSdMarket();
+    loadSdTrack();
+    // 不默认选中：进板块只展示候选 + 跟踪 + 历史 chips，由用户主动点 chip / 搜索 / 选候选
+    _sd.idx = -1; _sd.code = null; _sd.data = null;
+    renderSdPanelPlaceholder();
+}
+
+function renderSdChips() {
+    var chips = document.getElementById('sdChips');
+    if (!chips) return;
+    var count = document.getElementById('sdCount');
+    if (!_sd.list.length) {
+        chips.innerHTML = '<span class="sd-chips-empty">搜索过的股票会显示在这里（最近在前），点击 × 可删除</span>';
+        if (count) count.textContent = '';
+        return;
+    }
+    chips.innerHTML = _sd.list.map(function(it, i) {
+        var active = i === _sd.idx ? ' sd-chip-active' : '';
+        return `<span class="sd-chip${active}" onclick="_sdToggleChip(${i})" title="${it.code} · ${it.name}（再点取消选中）">${it.name}<button class="sd-chip-del" title="从历史删除" onclick="event.stopPropagation();_sdRemoveHistory('${it.code}')">×</button></span>`;
+    }).join('');
+    if (count) count.textContent = (_sd.idx >= 0 ? (_sd.idx + 1) + ' / ' + _sd.list.length : '');
+}
+
+// 切换 chip 选中态：点未选中的 → 选中并打开弹窗；点当前已选中的 → 取消并关弹窗
+function _sdToggleChip(i) {
+    if (i < 0 || i >= _sd.list.length) return;
+    if (i === _sd.idx) {
+        // 再点同一只 → 取消选中
+        _sd.idx = -1; _sd.code = null; _sd.data = null;
+        closeSdDeep();
+        renderSdChips();
+        renderSdPanelPlaceholder();
+        return;
+    }
+    // 切到新的 chip
+    _sd.idx = i;
+    _sd.code = _sd.list[i].code;
+    renderSdChips();
+    renderSdPanelPlaceholder();
+    openSdDeep(_sd.list[i].code);
+}
+
+function selectSdByIndex(i) {
+    if (i < 0 || i >= _sd.list.length) return;
+    _sd.idx = i;
+    renderSdChips();
+    openSdDeep(_sd.list[i].code);   // 详情进弹窗，不再渲染到板块主区
+}
+
+function sdCycle(dir) {
+    if (!_sd.list.length) return;
+    var n = _sd.list.length;
+    var nxt = ((_sd.idx + dir) % n + n) % n;
+    selectSdByIndex(nxt);
+}
+
+function _sdRemoveHistory(code) {
+    _sd.list = _sd.list.filter(function(x) { return x.code !== code; });
+    _sdSaveHistory();
+    // 删的是否当前选中：原 _sd.code 是否还在列表里
+    var stillIn = _sd.list.some(function(x) { return x.code === _sd.code; });
+    if (!stillIn) {
+        // 删的正是当前 → 关弹窗不重选（保持「不默认选」）
+        _sd.idx = -1; _sd.data = null; _sd.code = null;
+        closeSdDeep();
+    }
+    if (!_sd.list.length) {
+        var box = document.getElementById('stockDeepContent');
+        if (box) box.innerHTML = '<div class="empty-state">暂无历史股票<br><span style="color:var(--text-muted);font-size:12px">在上方搜索框输入代码或名称，回车查看</span></div>';
+        var s = document.getElementById('sdSearch'); if (s) s.value = '';
+    }
+    renderSdChips();
+    if (!stillIn) renderSdPanelPlaceholder();
+}
+
+function onSdSearchPick() {
+    var input = document.getElementById('sdSearch');
+    if (!input) return;
+    var raw = input.value.trim();
+    if (!raw) return;
+    // ① 值里含 6 位代码（如 datalist 选出的 "600100 TCL科技"）
+    var mc = raw.match(/^\s*(\d{6})/);
+    if (mc) {
+        var code = mc[1];
+        var item = _sd.list.find(function(it) { return it.code === code; });
+        if (item) { selectSdByIndex(_sd.list.indexOf(item)); return; }
+        openSdDeep(code); return;
+    }
+    // ② 名称匹配历史缓存
+    var matched = _sd.list.find(function(it) { return it.name && raw.indexOf(it.name) >= 0; });
+    if (matched) { selectSdByIndex(_sd.list.indexOf(matched)); return; }
+    // ③ 后端按名称搜索
+    RequestManager.fetch('sd-search-' + raw, API + '/investor/stocks/search?q=' + encodeURIComponent(raw))
+      .then(function(resp) {
+          var items = (resp && resp.data && resp.data.items) || [];
+          if (items.length) openSdDeep(items[0].code);
+          else showToast('未找到该股票，请核对代码或名称', 'warning');
+      });
+}
+
+var _sdSearchTimer = null;
+function onSdSearchInput(v) {
+    if (_sdSearchTimer) clearTimeout(_sdSearchTimer);
+    _sdSearchTimer = setTimeout(function() {
+        var dl = document.getElementById('sdDatalist');
+        if (!dl) return;
+        RequestManager.fetch('sd-dl-' + v, API + '/investor/stocks/search?q=' + encodeURIComponent(v))
+          .then(function(resp) {
+              var items = (resp && resp.data && resp.data.items) || [];
+              dl.innerHTML = items.map(function(it) { return `<option value="${it.code} ${it.name}">`; }).join('');
+          });
+    }, 250);
+}
+
+async function refreshStockDeep(code, opts) {
+    opts = opts || {};
+    var box = _sdGetBody();
+    if (!box) return;
+    box.innerHTML = '<div class="empty-state">正在深度学习该股历史走势、量价关系与涨跌节奏…</div>';
+    try {
+        var resp = await RequestManager.fetch('sd-deep-' + code, API + '/investor/stock_deep/' + code);
+        var data = (resp && resp.data) || {};
+        _sd.data = data; _sd.code = code;
+        var name = data.name || code;
+        // 入历史：reorder=true 置顶（新搜索）；false 保持原位置（点历史）
+        if (opts.reorder) {
+            _sd.list = _sd.list.filter(function(x) { return x.code !== code; });
+            _sd.list.unshift({ code: code, name: name });
+            if (_sd.list.length > _SD_HIST_MAX) _sd.list.length = _SD_HIST_MAX;
+            _sd.idx = 0;
+        } else {
+            var ni = -1;
+            for (var i = 0; i < _sd.list.length; i++) if (_sd.list[i].code === code) { ni = i; break; }
+            if (ni < 0) { _sd.list.unshift({ code: code, name: name }); if (_sd.list.length > _SD_HIST_MAX) _sd.list.length = _SD_HIST_MAX; _sd.idx = 0; }
+            else _sd.idx = ni;
+        }
+        // 用后端更全的名称更新缓存项
+        var cur = _sd.list[_sd.idx];
+        if (cur && data.name) cur.name = data.name;
+        _sdSaveHistory();
+        renderSdChips();
+        var searchEl = document.getElementById('sdSearch');
+        if (searchEl && data.code) searchEl.value = data.code + ' ' + (data.name || '');
+        renderStockDeep(data);
+    } catch(e) {
+        box.innerHTML = '<div class="empty-state">分析失败：' + (e.message || e) + '</div>';
+    }
+}
+
+// 明日买入候选：在今日推荐+自选+持仓候选池上跑深析信号
+async function loadSdMarket() {
+    var box = document.getElementById('sdMarketBox');
+    if (!box) return;
+    box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">正在读取明日候选…</div>';
+    try {
+        var resp = await RequestManager.fetch('sd-market', API + '/investor/stock_deep/market?limit=10');
+        var data = (resp && resp.data) || {};
+        var items = data.items || [];
+        var src = data.source || 'pool';
+        var scanDate = data.scan_date || '';
+        var headBtn = `<button class="btn btn-sm" style="margin-left:auto" onclick="triggerSdScan()" title="每日盘后自动运行；也可手动触发一次全市场深析扫描">🔄 全市场深析</button>`;
+        var srcNote = '<span class="sd-chip-src" style="margin-left:8px">' +
+            (src === 'full'
+                ? (scanDate ? '全市场深析 · ' + scanDate : '全市场深析')
+                : '已关注池（今日推荐+自选+持仓）') + '</span>';
         if (!items.length) {
-            box.innerHTML = '<div class="empty-state">暂无需要跟踪的推荐<br><span style="color:var(--text-muted);font-size:12px">7月20日起暂无推荐或推荐后尚无行情</span></div>';
+            box.innerHTML = `<div class="sd-market-title">⭐ 明日买入候选${srcNote}</div>` +
+                '<div class="sd-market-grid"><div class="sd-market-empty-col">暂无明日候选<br><span style="color:var(--text-muted)">可点右上「🔄 全市场深析」运行一次，或候选池为空</span></div></div>';
             return;
         }
-        const horizonMeta = {
-            short: { label: '短线', icon: '⚡', hint: '持仓上限 10 个交易日' },
-            mid:   { label: '中线', icon: '📈', hint: '持仓上限 60 个交易日' },
-            long:  { label: '长线', icon: '🏔️', hint: '不限持仓期 · 趋势跟踪' },
-        };
-        // 汇总徽章（持有 / 已卖出）
-        let totalHold = 0, totalClear = 0;
-        ['short', 'mid', 'long'].forEach(hz => (groups[hz] || []).forEach(it => {
-            if (it.status === 'clear') totalClear++; else totalHold++;
-        }));
-        // 各周期累计统计（summary.perf：累计收益 = 全部段盈亏之和，累计胜率 = 盈亏>0 的段占比）
-        const perf = (d.summary && d.summary.perf) || {};
-        const statChip = (hz) => {
-            const p = perf[hz] || {};
-            let s = '';
-            if (p.cum_pnl != null) {
-                const sign = p.cum_pnl >= 0 ? '+' : '';
-                s += `<span class="exit-group-stat ${p.cum_pnl >= 0 ? 'positive' : 'negative'}">累计收益 ${sign}${p.cum_pnl}%</span>`;
-            }
-            if (p.win_rate != null) {
-                s += `<span class="exit-group-stat ${p.win_rate >= 50 ? 'positive' : 'negative'}" title="${p.segments || 0} 段中盈利 ${p.win_rate >= 0 ? Math.round(p.win_rate * (p.segments || 0) / 100) : 0} 段">累计胜率 ${p.win_rate}%</span>`;
-            }
-            return s;
-        };
-        let html = `<div class="exit-summary" style="margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap">
-            <span class="exit-sum-chip" style="background:rgba(var(--green-rgb),0.1);color:var(--green);padding:4px 12px;border-radius:12px;font-size:12px">🟢 持有 ${totalHold}</span>
-            <span class="exit-sum-chip" style="background:rgba(var(--positive-rgb),0.1);color:var(--positive);padding:4px 12px;border-radius:12px;font-size:12px">🔴 已卖出 ${totalClear}</span>
-        </div>`;
-        // 短线 / 中线 / 长线 三组
-        ['short', 'mid', 'long'].forEach(hz => {
-            const list = groups[hz] || [];
-            if (!list.length) return;
-            const meta = horizonMeta[hz];
-            const held = list.filter(it => it.status === 'hold').length;
-            const cleared = list.length - held;
-            html += `<div class="exit-group">
-                <div class="exit-group-head">
-                    <span class="exit-group-title">${meta.icon} ${meta.label}</span>
-                    <span class="exit-group-hint">${meta.hint}</span>
-                    ${statChip(hz)}
-                    <span class="exit-group-count">持有 ${held} · 已卖出 ${cleared}</span>
-                </div>
-                <div class="table-wrapper"><table><thead><tr>
-                    <th>代码</th><th>名称</th><th>推荐日</th><th>买入日</th><th>买入价</th><th>卖出价</th><th>持仓天数</th><th>盈亏</th><th>状态</th><th>说明</th>
-                </tr></thead><tbody>`;
-            list.forEach(it => {
-                const detail = it.detail || {};
-                const pnl = detail.current_pnl_pct;
-                const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
-                const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
-                const sold = it.status === 'clear';
-                const statusHtml = sold
-                    ? '<span style="color:var(--danger);font-weight:600">🔴 已卖出</span>'
-                    : '<span style="color:var(--green, #10b981);font-weight:600">🟢 持有</span>';
-                const holdDays = detail.hold_days != null ? detail.hold_days + '天' : '--';
-                // 卖出价：仅已卖出（止盈/止损/到期）显示，持有中为空
-                const exitPriceHtml = (sold && detail.exit_price != null)
-                    ? `<span title="${detail.exit_date || ''} 卖出">${Number(detail.exit_price).toFixed(2)}</span>`
-                    : '<span style="color:var(--text-muted)">--</span>';
-                // 连续推荐：推荐日显示最新一次，附最早推荐日提示
-                const firstDate = detail.first_scan_date;
-                const scanHtml = (it.scan_date || '--')
-                    + (firstDate && firstDate !== it.scan_date
-                        ? `<div style="font-size:10px;color:var(--text-muted)">自 ${firstDate} 连续推荐</div>` : '');
-                html += `<tr>
-                    <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
-                    <td>${it.name||''}</td>
-                    <td>${scanHtml}</td>
-                    <td>${detail.entry_date||'--'}</td>
-                    <td>${it.entry_price||'--'}</td>
-                    <td>${exitPriceHtml}</td>
-                    <td>${holdDays}</td>
-                    <td class="${pnlCls}">${pnlStr}</td>
-                    <td>${statusHtml}</td>
-                    <td style="font-size:11px;color:var(--text-secondary);max-width:220px">${it.reason||''}</td>
-                </tr>`;
-            });
-            html += '</tbody></table></div></div>';
-        });
-        box.innerHTML = html;
+        var fmt = function(v) { return (v != null && !isNaN(v)) ? Number(v).toFixed(2) : '--'; };
+        box.innerHTML = `<div class="sd-market-title">⭐ 明日买入候选（深析信号=买入/加仓，且不追高；点击查看详情）${srcNote}${headBtn}</div>` +
+            '<div class="sd-market-grid">' +
+            items.map(function(it) {
+                var ap = it.action_plan || {};
+                var ext = it.pct_above_ma20 != null ? it.pct_above_ma20.toFixed(1) + '%' : '--';
+                var reasons = (it.reasons || []).slice(0, 2);
+                return `<div class="sd-market-card" onclick="pickSdCandidate('${it.code}')" title="${it.name} (${it.code})">
+                    <div class="sd-market-head">
+                        <span class="sd-market-name">${it.name}</span>
+                        <span class="sd-lvl-chip ${it.level==='buy'?'sd-lvl-buy':'sd-lvl-add'}">${it.label || (it.level==='buy'?'建议买入':'可加仓')}</span>
+                    </div>
+                    <div class="sd-market-meta">${it.code} · 偏离MA20 ${ext}</div>
+                    <div class="sd-market-prices">
+                        <span><b>入场</b><span class="sd-price-entry">${fmt(ap.entry_price)}</span></span>
+                        <span><b>止损</b>${fmt(ap.stop_loss)}</span>
+                        <span><b>止盈</b>${fmt(ap.take_profit)}</span>
+                    </div>
+                    <div class="sd-market-reasons">${reasons.map(function(r){return '<span class="reason-chip">'+r+'</span>';}).join('')}</div>
+                </div>`;
+            }).join('') +
+            '</div>';
     } catch(e) {
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
+        box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">扫描失败：' + (e.message || e) + '</div>';
     }
+}
+
+function pickSdCandidate(code) {
+    openSdDeep(code);
+}
+
+// ─────────────────────────────────────────────
+// 个股深度 · 推荐跟踪
+// 每日 19:00 盘后：全市场深析扫描出候选 → 自动建跟踪单 → 逐日按买点建仓、卖点出场，
+// 这里只负责展示与手动干预（推进 / 回补 / 平仓 / 删除）。
+// ─────────────────────────────────────────────
+// 列表分页：回补后动辄几百笔，一次全塞进 DOM 会卡，所以首屏只取一批，
+// 底部给「加载更多」逐批追加。_sdTrackTotal 由接口返回（符合当前状态过滤的总数）。
+var _SD_TRACK_PAGE = 100;      // 每批条数
+var _sdTrackLimit = _SD_TRACK_PAGE;
+var _sdTrackTotal = 0;
+
+function _sdPct(v, digits) {
+    if (v === null || v === undefined || isNaN(v)) return '--';
+    return (v > 0 ? '+' : '') + Number(v).toFixed(digits == null ? 2 : digits) + '%';
+}
+function _sdPctCls(v) {
+    if (v === null || v === undefined || isNaN(v) || !v) return '';
+    return v > 0 ? 'pos' : 'neg';
+}
+function _sdPx(v) {
+    return (v === null || v === undefined || isNaN(v)) ? '--' : Number(v).toFixed(2);
+}
+
+// 只展示「持仓中」与「已清仓」：待回踩（还没买）和已失效（没回踩就过期）只是候选噪音，
+// 不占列表。这两类仍计入顶部统计条，方便知道还有多少在等买点。
+var _SD_TRACK_STATUS = 'holding,closed';
+
+async function loadSdTrack(opts) {
+    opts = opts || {};
+    var box = document.getElementById('sdTrackBox');
+    if (!box) return;
+    // 非「加载更多」的调用都回到首屏条数，否则推进/回补/平仓后刷新会沿用上次累加的 limit
+    if (!opts.keepLoading) {
+        _sdTrackLimit = _SD_TRACK_PAGE;
+    }
+    if (!opts.keepLoading) {
+        box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:12px">正在读取推荐跟踪…</div>';
+    }
+    try {
+        var resp = await RequestManager.fetch('sd-track',
+            API + '/investor/deep_track?status=' + encodeURIComponent(_SD_TRACK_STATUS) + '&limit=' + _sdTrackLimit);
+        var d = (resp && resp.data) || {};
+        var items = d.items || [];
+        // total 是「符合当前状态过滤」的总笔数；老版本接口没有该字段时退化为本次条数
+        _sdTrackTotal = (d.total != null) ? d.total : items.length;
+        renderSdTrack(items, d.stats || {}, d.updated_at);
+        if (opts.scrollToMore) {
+            var btn = document.getElementById('sdTrackMoreBtn');
+            if (btn && btn.scrollIntoView) btn.scrollIntoView({ block: 'center' });
+        }
+    } catch (e) {
+        if (box) box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:12px">跟踪读取失败：' + (e.message || e) + '</div>';
+    }
+}
+
+function loadMoreSdTrack() {
+    _sdTrackLimit += _SD_TRACK_PAGE;
+    loadSdTrack({ keepLoading: true, scrollToMore: true });
+}
+
+function renderSdTrack(items, st, updatedAt) {
+    var box = document.getElementById('sdTrackBox');
+    if (!box) return;
+    var p = st.params || {};
+    var stat = function(lbl, val, cls) {
+        return '<div class="sd-track-stat"><div class="lbl">' + lbl + '</div>' +
+               '<div class="val ' + (cls || '') + '">' + val + '</div></div>';
+    };
+    var head =
+        '<div class="sd-track-head">' +
+          '<span style="font-size:13px;font-weight:600;color:var(--text-primary)">📌 推荐跟踪 · 每笔持仓与收益</span>' +
+          '<button class="btn btn-sm" onclick="refreshSdTrack(0)" title="立即按最新行情推进一次：检查是否触发建仓/出场，并结算收益">🔄 推进</button>' +
+          '<input id="sdBackfillDays" type="number" class="bt-mini-input" value="30" min="1" max="90" style="width:54px;text-align:center;padding:3px 6px" title="回补交易日的天数（每个交易日都要全市场扫描一次，约 45 秒）" onkeydown="if(event.key===\'Enter\')refreshSdTrackFromInput()">' +
+          '<button class="btn btn-sm" onclick="refreshSdTrackFromInput()" title="先补跑这些交易日的全市场深析扫描（用当天及之前的行情，无未来函数），再建跟踪单并推进出场。后台执行，约 45 秒/天">⏪ 回补</button>' +
+          '<span class="text-muted" style="font-size:11px">每日 19:00 盘后自动跑 · 买点回踩才成交 · 卖点=止损/移动止盈/到期</span>' +
+          (updatedAt ? '<span class="text-muted" style="font-size:11px;margin-left:auto">更新 ' + updatedAt + '</span>' : '') +
+        '</div>';
+
+    var stats =
+        '<div class="sd-track-stats">' +
+          stat('已平仓', (st.total_closed || 0) + ' 笔') +
+          stat('胜率', st.win_rate == null ? '--' : st.win_rate + '%',
+               st.win_rate == null ? '' : (st.win_rate >= 50 ? 'pos' : 'neg')) +
+          stat('平均持仓', st.avg_hold_tdays == null ? '--' : st.avg_hold_tdays + ' 日') +
+          stat('平均收益', _sdPct(st.avg_return), _sdPctCls(st.avg_return)) +
+          stat('盈亏比', st.profit_factor == null ? '--' : st.profit_factor) +
+          stat('累计收益', _sdPct(st.cum_return), _sdPctCls(st.cum_return)) +
+          stat('持仓中', (st.holding || 0) + ' 笔') +
+          stat('待回踩', (st.watching || 0) + ' 笔') +
+          stat('已失效', (st.expired || 0) + ' 笔') +
+        '</div>';
+
+    if (!items.length) {
+        var waiting = st.watching || 0;
+        box.innerHTML = head + stats +
+            '<div class="empty-state" style="padding:14px;font-size:12px">暂无「持仓中 / 已清仓」的跟踪记录<br>' +
+            '<span style="color:var(--text-muted)">' +
+            (waiting > 0
+                ? '当前 ' + waiting + ' 笔候选还在等回踩买点，成交后自动进入本列表'
+                : '每日盘后同步后自动建单；也可输入天数后点「⏪ 回补」补建历史样本') +
+            '</span></div>';
+        return;
+    }
+
+    var ST_CLS = { holding: 'sd-st-holding', watching: 'sd-st-watching',
+                   closed: 'sd-st-closed', expired: 'sd-st-expired' };
+    var rows = items.map(function(it) {
+        var isClosed = it.status === 'closed';
+        var ret = isClosed ? it.return_pct : it.float_return;
+        var retTxt = isClosed ? _sdPct(ret) : (ret == null ? '--' : _sdPct(ret) + '<span style="opacity:.6"> 浮</span>');
+        var holdTxt = it.hold_tdays != null ? it.hold_tdays + ' 日' : '--';
+        var entryTxt = it.entry_date ? it.entry_date.slice(5) + ' @' + _sdPx(it.entry_price) : '<span style="opacity:.6">待回踩</span>';
+        var exitTxt = it.exit_date ? it.exit_date.slice(5) + ' @' + _sdPx(it.exit_price) : '--';
+        var stTxt = it.status_label + (it.exit_reason_label ? ' · ' + it.exit_reason_label : '');
+        var ops = (it.status === 'holding' || it.status === 'watching'
+                     ? '<button class="sd-op" onclick="closeSdTrack(' + it.id + ',\'' + (it.name || it.code) + '\')">平仓</button>' : '') +
+                  '<button class="sd-op danger" onclick="delSdTrack(' + it.id + ',\'' + (it.name || it.code) + '\')">删</button>';
+        return '<tr>' +
+            '<td class="name-td"><span style="cursor:pointer;color:var(--text-primary)" onclick="pickSdCandidate(\'' + it.code + '\')">' +
+                (it.name || it.code) + '</span>' +
+                '<span class="text-muted" style="margin-left:6px">' + it.code + '</span></td>' +
+            '<td class="num">' + (it.scan_date || '--').slice(5) + '</td>' +
+            '<td class="num">' + _sdPx(it.sig_entry) + '</td>' +
+            '<td class="num">' + entryTxt + '</td>' +
+            '<td class="num">' + exitTxt + '</td>' +
+            '<td class="num">' + holdTxt + '</td>' +
+            '<td class="num ' + _sdPctCls(ret) + '">' + retTxt + '</td>' +
+            '<td><span class="sd-st ' + (ST_CLS[it.status] || '') + '">' + stTxt + '</span></td>' +
+            '<td style="white-space:nowrap">' + ops + '</td>' +
+        '</tr>';
+    }).join('');
+
+    var note = '<div class="sd-track-note">口径：买点=推荐日收盘，其后 ' + (p.entry_window_days || 5) +
+        ' 个交易日内<b>回踩</b>才成交（涨上去不追，未回踩判失效且不计胜率）；' +
+        '出场用推荐自带止损，浮盈达 ' + ((p.take_profit_pct || 0) * 100).toFixed(0) + '% 启动移动止盈（回撤 ' +
+        ((p.trailing_pct || 0) * 100).toFixed(0) + '% 清仓），持满 ' + (p.max_hold_days || 10) +
+        ' 个交易日按收盘了结。持仓时间按<b>交易日</b>计。</div>';
+
+    // 回补后会有几百笔，一次全渲染既卡又难找，这里分批 + 「加载更多」
+    var moreHtml = '';
+    if (_sdTrackTotal > items.length) {
+        var nextN = Math.min(_SD_TRACK_PAGE, _sdTrackTotal - items.length);
+        moreHtml = '<div style="text-align:center;padding:10px 0">' +
+            '<div class="text-muted" style="font-size:11px;margin-bottom:6px">已显示 ' +
+            items.length + ' / 共 ' + _sdTrackTotal + ' 笔（按推荐日从新到旧）</div>' +
+            '<button id="sdTrackMoreBtn" class="btn btn-sm" onclick="loadMoreSdTrack()">加载更多（+' + nextN + '）</button>' +
+            '</div>';
+    } else if (items.length > _SD_TRACK_PAGE) {
+        moreHtml = '<div class="text-muted" style="text-align:center;padding:8px 0;font-size:11px">已显示全部 ' +
+            items.length + ' 笔</div>';
+    }
+
+    box.innerHTML = head + stats +
+        '<div style="max-height:420px;overflow:auto">' +
+        '<table class="sd-trade-table sd-track-table"><thead><tr>' +
+        '<th>股票</th><th>推荐日</th><th>买点</th><th>建仓</th><th>卖出</th>' +
+        '<th>持仓</th><th>收益</th><th>状态</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>' + note + moreHtml;
+}
+
+function refreshSdTrackFromInput() {
+    var input = document.getElementById('sdBackfillDays');
+    var days = input ? parseInt(input.value, 10) : 30;
+    if (isNaN(days) || days < 1) days = 1;
+    if (days > 90) days = 90;
+    if (input) input.value = days;
+    startBackfillScan(days);
+}
+
+// ── 历史扫描日回补（后台独立进程 + 轮询进度）──────────
+// 回补一天要对 4500+ 只股票跑全套指标（8 进程约 46s/天），30 天就是 20+ 分钟，
+// 绝不能同步等待；这里拉起后台进程后按 2s 轮询进度文件，完成后再刷新列表。
+var _bfPollTimer = null;
+var _bfPollKey = 'sd-track-bf-status';
+
+function _bfProgressHtml(pct, msg) {
+    return '<div class="empty-state" style="padding:18px;font-size:12px">' +
+        '<div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px">⏳ 正在回补历史扫描日…</div>' +
+        '<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:4px;height:8px;overflow:hidden;max-width:420px;margin:0 auto">' +
+          '<div style="width:' + (pct || 0) + '%;height:100%;background:var(--accent);transition:width .3s"></div>' +
+        '</div>' +
+        '<div style="font-size:11px;color:var(--text-muted);margin-top:8px">' + (msg || '') + '</div>' +
+        '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">每天扫描只用当天及之前的行情，无未来函数</div>' +
+        '</div>';
+}
+
+function _bfStopPoll() {
+    if (_bfPollTimer) { clearInterval(_bfPollTimer); _bfPollTimer = null; }
+    RequestManager.cancel(_bfPollKey);
+}
+
+async function startBackfillScan(days) {
+    var box = document.getElementById('sdTrackBox');
+    if (box) box.innerHTML = _bfProgressHtml(0, '正在启动…');
+    try {
+        await RequestManager.fetch('sd-track-bf-start',
+            API + '/investor/deep_track/backfill_scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ days: days, procs: 8 })
+            });
+        showToast('已启动回补（' + days + ' 个交易日），后台扫描中…', 'success');
+        _bfStartPoll();
+    } catch (e) {
+        showToast('启动回补失败：' + (e.message || e), 'error');
+        loadSdTrack();
+    }
+}
+
+function _bfStartPoll() {
+    _bfStopPoll();
+    var box = document.getElementById('sdTrackBox');
+    _bfPollTimer = setInterval(async function () {
+        try {
+            var resp = await RequestManager.fetch(_bfPollKey,
+                API + '/investor/deep_track/backfill_scan/status');
+            var d = (resp && resp.data) || {};
+            if (d.status === 'running' && box) {
+                box.innerHTML = _bfProgressHtml(d.progress, d.message);
+                return;
+            }
+            _bfStopPoll();
+            if (d.status === 'success') {
+                var r = d.result || {};
+                showToast('回补完成：扫描 ' + (r.scanned || 0) + ' 天，新增 ' + (r.added || 0) +
+                          ' 单，建仓 ' + (r.filled || 0) + ' 笔，出场 ' + (r.closed || 0) + ' 笔' +
+                          (r.errors ? '｜⚠ ' + r.errors + ' 笔异常' : ''), 'success');
+            } else if (d.status === 'error') {
+                showToast('回补失败：' + (d.error || '未知错误'), 'error');
+            } else {
+                showToast('回补结束：' + (d.message || ''), 'info');
+            }
+            loadSdTrack();
+        } catch (e) {
+            // 单次轮询失败不中止（可能瞬时超时），下一轮继续
+        }
+    }, 2000);
+}
+
+async function refreshSdTrack(backfillDays) {
+    var box = document.getElementById('sdTrackBox');
+    var label = backfillDays ? ('回补最近 ' + backfillDays + ' 天') : '推进';
+    try {
+        if (box) box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">⏳ 正在' + label + '…</div>';
+        var resp = await RequestManager.fetch('sd-track-refresh', API + '/investor/deep_track/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backfill_days: backfillDays || 0 })
+        });
+        var d = (resp && resp.data) || {};
+        var u = d.update || {};
+        var s = d.sync || {};
+        var msg;
+        if (d.mode === 'backfill') {
+            var avail = d.avail_days, req = d.requested_days || backfillDays, got = d.days;
+            // 数据源不足是最常见的"点了没反应"原因，必须说清楚，否则用户以为接口坏了
+            var srcTip = (avail != null && req && got < req)
+                ? ('（数据源仅 ' + avail + ' 个扫描日，不足 ' + req + ' 天）')
+                : (avail != null ? '（数据源共 ' + avail + ' 个扫描日）' : '');
+            msg = '回补 ' + got + ' 个扫描日' + srcTip + '：新增 ' + (d.added || 0) +
+                  ' 单，已存在跳过 ' + (d.skipped || 0) + ' 单，建仓 ' + (u.filled || 0) +
+                  ' 笔，出场 ' + (u.closed || 0) + ' 笔';
+            if (u.errors) {
+                msg += '｜⚠ ' + u.errors + ' 笔处理异常' +
+                       (u.error_samples && u.error_samples[0] ? '（' + u.error_samples[0] + '）' : '');
+            }
+            if (!d.added && !u.filled && !u.closed) {
+                // 区分三种"看起来什么都没发生"的原因，否则用户只能猜
+                msg += d.skipped
+                    ? ('｜这些扫描日已建过单（跳过 ' + d.skipped + ' 单）' +
+                       (got && avail && got >= avail ? '，数据源已用尽，需先跑新的全市场深析扫描' : ''))
+                    : '｜无可补样本';
+            }
+        } else {
+            msg = '推进完成：新增 ' + (s.added || 0) + ' 单，建仓 ' + (u.filled || 0) +
+                  ' 笔，出场 ' + (u.closed || 0) + ' 笔';
+        }
+        showToast(msg, 'success');
+        loadSdTrack();
+    } catch (e) {
+        showToast(label + '失败：' + (e.message || e), 'error');
+        loadSdTrack();
+    }
+}
+
+async function closeSdTrack(id, name) {
+    if (!confirm('按最新收盘价平仓「' + name + '」？\n这笔将计入已平仓统计（胜率/持仓天数/收益）。')) return;
+    try {
+        await RequestManager.fetch('sd-track-close-' + id, API + '/investor/deep_track/' + id + '/close', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+        });
+        showToast('已平仓：' + name, 'success');
+        loadSdTrack();
+    } catch (e) {
+        showToast('平仓失败：' + (e.message || e), 'error');
+    }
+}
+
+async function delSdTrack(id, name) {
+    if (!confirm('删除跟踪「' + name + '」？\n删除后不进入收益统计。')) return;
+    try {
+        await RequestManager.fetch('sd-track-del-' + id, API + '/investor/deep_track/' + id, { method: 'DELETE' });
+        showToast('已删除：' + name, 'success');
+        loadSdTrack();
+    } catch (e) {
+        showToast('删除失败：' + (e.message || e), 'error');
+    }
+}
+
+// 手动触发全市场深析扫描（异步），并实时显示进度条，完成时刷新候选
+var _sdScanPoll = null;
+function triggerSdScan() {
+    var box = document.getElementById('sdMarketBox');
+    if (!box) return;
+    box.innerHTML = `<div class="sd-scan-progress">
+        <div class="row"><span>⏳ 正在启动全市场深析扫描…</span><span id="sdScanPct">0%</span></div>
+        <div class="bar"><div class="fill" id="sdScanBar"></div></div>
+        <div class="msg" id="sdScanMsg">逐只扫描全市场股票，约几分钟；完成后自动刷新下方候选</div>
+    </div>`;
+    RequestManager.fetch('scan-start', API + '/investor/stock_deep/scan', { method: 'POST' })
+      .then(function(resp) {
+          if (_sdScanPoll) clearInterval(_sdScanPoll);
+          _sdScanPoll = setInterval(function() {
+              RequestManager.fetch('scan-status', API + '/investor/stock_deep/scan_status')
+                .then(function(sr) {
+                    var d = (sr && sr.data) || {};
+                    var pctEl = document.getElementById('sdScanPct');
+                    var barEl = document.getElementById('sdScanBar');
+                    var msgEl = document.getElementById('sdScanMsg');
+                    if (pctEl) pctEl.textContent = (d.progress != null ? Number(d.progress).toFixed(0) : 0) + '%';
+                    if (barEl) barEl.style.width = Math.min(100, Math.max(0, d.progress || 0)) + '%';
+                    if (msgEl) msgEl.textContent = d.message || '全市场深析扫描中…';
+                    if (!d.running && d.candidates != null) {
+                        clearInterval(_sdScanPoll); _sdScanPoll = null;
+                        showToast('全市场深析扫描完成，候选 ' + d.candidates + ' 只', 'success');
+                        loadSdMarket();
+                    }
+                });
+          }, 3000);
+      })
+      .catch(function(e) {
+          box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">启动失败：' + (e.message || e) + '</div>';
+      });
+}
+
+function renderStockDeep(data) {
+    var box = _sdGetBody();
+    if (!box) return;
+    if (data && data.insufficient) {
+        box.innerHTML = '<div class="empty-state">该股历史数据不足，暂无法深度分析<br><span style="color:var(--text-muted);font-size:12px">' + (data.reason || '请先同步该股行情') + '</span></div>';
+        return;
+    }
+    var sig = data.signal || {};
+    var plan = sig.action_plan || {};
+    var trend = data.trend || {};
+    var vp = data.volume_price || {};
+    var rhythm = data.rhythm || {};
+    var latest = data.latest || {};
+    var sigColor = _sdColor(_sdSignalColor(sig.level));
+    var fmt = function(v, d) { return (v != null && !isNaN(v)) ? Number(v).toFixed(d == null ? 2 : d) : '--'; };
+
+    var pctCls = (latest.pct_change != null) ? (latest.pct_change >= 0 ? 'idx-up' : 'idx-down') : '';
+    var pctHtml = latest.pct_change != null ?
+        `<span class="${pctCls}">${latest.pct_change >= 0 ? '+' : ''}${fmt(latest.pct_change)}%</span>` : '--';
+
+    var reasonsHtml = (sig.reasons || []).map(function(r){ return '<li>' + r + '</li>'; }).join('');
+    var risksHtml = (sig.risks || []).map(function(r){ return '<li class="sd-risk">' + r + '</li>'; }).join('');
+
+    // 近期建议时间线
+    var tls = (data.recent_advice || []).map(function(a) {
+        var pctCls2 = a.pct_change != null ? (a.pct_change >= 0 ? 'idx-up' : 'idx-down') : '';
+        var pctTxt = a.pct_change != null ? (a.pct_change >= 0 ? '+' : '') + fmt(a.pct_change) + '%' : '--';
+        return `<div class="sd-tl-item">
+            <span class="date">${a.date}</span>
+            <span class="close">${fmt(a.close)}</span>
+            <span class="pct ${pctCls2}">${pctTxt}</span>
+            <span class="lvl"><span class="sd-lvl-chip sd-lvl-${a.level}">${a.emoji} ${a.label}</span></span>
+            <span class="brief">${a.brief || ''}</span>
+        </div>`;
+    }).join('');
+    var tlBlock = tls ? `<div class="sd-timeline">${tls}</div>` :
+        '<div class="empty-state" style="padding:14px;font-size:12px">暂无近期建议数据</div>';
+
+    // 节奏/量价统计
+    var rhythmKv = [
+        rhythm.up_leg_avg_days != null ? `<span>上涨波均 <b>${fmt(rhythm.up_leg_avg_days,1)} 天</b></span>` : '',
+        rhythm.down_leg_avg_days != null ? `<span>回调波均 <b>${fmt(rhythm.down_leg_avg_days,1)} 天</b></span>` : '',
+        rhythm.cycle_avg_days != null ? `<span>涨跌周期 <b>${fmt(rhythm.cycle_avg_days,1)} 天</b></span>` : '',
+        rhythm.up_amp_avg != null ? `<span>上涨波均 <b>+${fmt(rhythm.up_amp_avg,1)}%</b></span>` : '',
+        rhythm.down_amp_avg != null ? `<span>回调波均 <b>-${fmt(rhythm.down_amp_avg,1)}%</b></span>` : '',
+        rhythm.current_leg ? `<span>当前 <b>${rhythm.current_leg}${rhythm.position_hint ? '·' + rhythm.position_hint : ''}</b></span>` : '',
+    ].filter(Boolean).join('');
+    var vpKv = [
+        vp.volume_ratio != null ? `<span>量比 <b>${fmt(vp.volume_ratio)}</b></span>` : '',
+        vp.updown_volume_ratio != null ? `<span>涨/跌量比 <b>${fmt(vp.updown_volume_ratio)}</b></span>` : '',
+        vp.obv_trend ? `<span>OBV 近20日 <b>${vp.obv_trend}</b></span>` : '',
+        vp.divergence ? `<span>背离 <b>${vp.divergence}</b></span>` : '',
+        trend.atr_pct != null ? `<span>波动(ATR) <b>${fmt(trend.atr_pct)}%</b></span>` : '',
+    ].filter(Boolean).join('');
+
+    var __html = `
+        <div class="sd-summary">
+            <div class="sd-metric"><div class="lbl">最新价</div><div class="val">${fmt(latest.close)}</div><div class="sub">${latest.date || ''} · ${pctHtml}</div></div>
+            <div class="sd-metric"><div class="lbl">趋势</div><div class="val">${trend.regime || '--'}</div><div class="sub">${trend.alignment || ''} · ${trend.macd || ''}${trend.pct_above_ema20 != null ? ' · EMA20 ' + fmt(trend.pct_above_ema20,1) + '%' : ''}</div></div>
+            <div class="sd-metric"><div class="lbl">涨跌节奏</div><div class="val">${rhythm.pattern || '--'}</div><div class="sub">${rhythm.current_leg || ''}${rhythm.position_hint ? ' · ' + rhythm.position_hint : ''}</div></div>
+            <div class="sd-metric"><div class="lbl">量价关系</div><div class="val">${vp.health || '--'}</div><div class="sub">量比 ${fmt(vp.volume_ratio)} · ${vp.divergence || '未见背离'}</div></div>
+            <div class="sd-metric"><div class="lbl">波动</div><div class="val">${trend.volatility || '--'}</div><div class="sub">RSI ${fmt(trend.rsi14,1)}</div></div>
+        </div>
+
+        <div class="sd-signal">
+            <div class="sd-signal-side">
+                <div class="sd-signal-emoji">${sig.emoji || '·'}</div>
+                <div class="sd-signal-level" style="color:${sigColor}">${sig.label || '--'}</div>
+                <div class="sd-signal-note">节奏：${sig.rhythm_note || '--'} · 盈亏比 ${fmt(plan.risk_reward_ratio)}</div>
+            </div>
+            <div class="sd-card">
+                <h4>💡 当前决策依据</h4>
+                <ul class="sd-reason-list">${reasonsHtml}</ul>
+                <h4 style="margin-top:8px">⚠️ 风险提示</h4>
+                <ul class="sd-reason-list">${risksHtml}</ul>
+                <div class="sd-plan">
+                    <div class="sd-plan-cell"><div class="lbl">参考入场价</div><div class="val" style="color:${_sdColor('var(--green)')}">${fmt(plan.entry_price)}</div></div>
+                    <div class="sd-plan-cell"><div class="lbl">止损价</div><div class="val" style="color:var(--danger)">${fmt(plan.stop_loss)}</div><div class="sub">${plan.risk_pct != null ? '-' + fmt(plan.risk_pct,1) + '%' : ''}</div></div>
+                    <div class="sd-plan-cell"><div class="lbl">止盈价</div><div class="val" style="color:#ffaa3c">${fmt(plan.take_profit)}</div><div class="sub">${plan.reward_pct != null ? '+' + fmt(plan.reward_pct,1) + '%' : ''}</div></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="sd-chart-hint">
+            <span><b>⤢ 结构与 K 线弹窗一致</b>（成交量/MACD/KDJ 副图可切换）；悬停查看当日信息</span>
+            <span><b>B/S 标记</b>=推荐买点/卖点（复盘正确性）</span>
+            <span>‑‑ 虚线 = 当前建议参考入场/止损/止盈</span>
+        </div>
+        <div class="sd-indicator-bar" id="sdIndicators">
+            <button class="indicator-btn active" data-indicator="vol" onclick="sdToggleIndicator('vol')">成交量</button>
+            <button class="indicator-btn" data-indicator="macd" onclick="sdToggleIndicator('macd')">MACD</button>
+            <button class="indicator-btn" data-indicator="kdj" onclick="sdToggleIndicator('kdj')">KDJ</button>
+        </div>
+        <div class="sd-chart" id="stockDeepChart"></div>
+
+        <div class="sd-grid-2col">
+            <div class="sd-card">
+                <h4>📐 涨跌节奏 · ${rhythm.pattern || ''}</h4>
+                <div class="sd-card-desc">${rhythm.desc || '数据不足，暂无法识别节奏'}</div>
+                <div class="sd-kv">${rhythmKv}</div>
+            </div>
+            <div class="sd-card">
+                <h4>📊 量价关系 · ${vp.health || ''}</h4>
+                <div class="sd-card-desc">${vp.note || '数据不足'}</div>
+                <div class="sd-kv">${vpKv}</div>
+            </div>
+        </div>
+
+        <div class="sd-card">
+            <h4>🕒 近期建议时间线（近 ${(data.recent_advice || []).length} 个交易日）</h4>
+            ${tlBlock}
+        </div>
+
+        ${renderSdPositionStats(data)}
+    `;
+    renderStockDeepChart(data);
+    sdUpdateIndicatorButtons();
+}
+
+// ─── 持仓统计：把 buy/add 建议转成逐笔模拟持仓并聚合收益（回测每日候选票的收益）──
+function renderSdPositionStats(data) {
+    var ps = data.position_stats;
+    if (!ps || !ps.summary) {
+        return `<div class="sd-card">
+            <h4>💼 持仓统计 · 建议回测</h4>
+            <div class="empty-state" style="padding:14px;font-size:12px">近期（近 ${(data.recent_advice||[]).length} 个交易日）暂无 buy/add 建议可回测</div>
+        </div>`;
+    }
+    var s = ps.summary || {};
+    var fmt = function(v, d) { return (v != null && !isNaN(v)) ? Number(v).toFixed(d == null ? 2 : d) : '--'; };
+    var pctCls = function(v) { return (v != null && v >= 0) ? 'idx-up' : 'idx-down'; };
+    var pct = function(v, d) {
+        if (v == null || isNaN(v)) return '--';
+        return `<span class="${pctCls(v)}">${v >= 0 ? '+' : ''}${fmt(v, d == null ? 2 : d)}%</span>`;
+    };
+    var capNote = (s.max_hold_cap != null) ? ` · 最长持有 ${s.max_hold_cap} 个交易日` : '';
+    var basisNote = s.basis_pct ? `<span style="color:var(--text-muted);font-size:11px">（口径：${s.basis_pct}）</span>` : '';
+
+    // 指标卡
+    var metricCells = [
+        ['建议笔数', s.n_trades, `${s.n_closed} 了结 · ${s.n_open} 持仓中`],
+        ['胜率', fmt(s.win_rate, 1) + '%', `最佳 ${pct(s.best_return_pct)} · 最差 ${pct(s.worst_return_pct)}`],
+        ['平均单笔', pct(s.avg_return_pct), `中位 ${pct(s.median_return_pct)}`],
+        ['盈亏比', fmt(s.profit_factor, 2), `期望 ${pct(s.expectancy_pct)}`],
+        ['均持仓天数', s.avg_hold_days != null ? fmt(s.avg_hold_days, 1) : '--', `最长 ${s.max_hold_days != null ? s.max_hold_days : '--'} 天`],
+        ['最大回撤', s.max_drawdown_pct != null ? fmt(s.max_drawdown_pct, 2) + '%' : '--', '组合净值口径'],
+    ].map(function(c) {
+        return `<div class="sd-metric"><div class="lbl">${c[0]}</div><div class="val">${c[1]}</div><div class="sub">${c[2] || ''}</div></div>`;
+    }).join('');
+
+    // 出场原因分布
+    var er = ps.exit_reasons || {};
+    var erKeys = Object.keys(er);
+    var erHtml = erKeys.length
+        ? erKeys.map(function(k) { return `<span class="reason-chip">${k} ×${er[k]}</span>`; }).join(' ')
+        : '<span class="reason-chip">暂无已了结</span>';
+
+    // 每笔明细
+    var trades = (ps.trades || []);
+    var trHtml = trades.map(function(t) {
+        var status = t.status === 'clear' ? '已了结' : '持仓中';
+        var stColor = t.status === 'clear' ? 'var(--accent)' : '#ffaa3c';
+        return `<tr>
+            <td>${t.signal_date || '--'}</td>
+            <td>${fmt(t.entry_price)}</td>
+            <td>${t.entry_date || '--'}</td>
+            <td>${t.exit_date || '--'}</td>
+            <td>${t.exit_price != null ? fmt(t.exit_price) : '--'}</td>
+            <td>${pct(t.return_pct)}</td>
+            <td>${t.hold_days != null ? t.hold_days + '天' : '--'}</td>
+            <td style="color:${stColor}">${t.exit_reason || status}</td>
+        </tr>`;
+    }).join('');
+
+    return `<div class="sd-card">
+        <h4>💼 持仓统计 · 建议回测${capNote}${basisNote}</h4>
+        <div class="sd-summary" style="grid-template-columns:repeat(3,1fr)">${metricCells}</div>
+        <div class="sd-kv" style="margin-top:10px">
+            <span>回测口径：信号日次日开盘买入、T+1，按收盘价判定止损/止盈/到期出场</span>
+            <span>出场原因：${erHtml}</span>
+        </div>
+        <h4 style="margin-top:10px">🧾 每笔明细（近期 buy/add 建议 → 模拟持仓）</h4>
+        <div style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px">
+            <table class="sd-trade-table">
+                <thead><tr>
+                    <th>信号日</th><th>买入价</th><th>买入日</th><th>出场日</th><th>出场价</th>
+                    <th>收益</th><th>持有</th><th>状态/原因</th>
+                </tr></thead>
+                <tbody>${trHtml || '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">无可回测明细</td></tr>'}</tbody>
+            </table>
+        </div>
+    </div>`;
+    // 弹窗模式：把模板里硬编码的 chart/indicators id 替换为弹窗内的 id（让 _sdGetChart/_sdGetIndicators 能取到）
+    if (_sdDeepMode) {
+        __html = __html.replace(/id="sdIndicators"/g, 'id="sdDeepIndicators"')
+                       .replace(/id="stockDeepChart"/g, 'id="sdDeepChart"');
+    }
+    box.innerHTML = __html;
+}
+
+// ─── 个股深度 K 线：与「个股 K 线弹窗」完全一致的结构（复用 buildKlineOption）──
+var _sdIndicators = { vol: true, macd: false, kdj: false };
+
+function _sdBuildKlineInputs(data) {
+    var c = data.chart || {};
+    var dates = c.dates || [];
+    if (!dates.length) return null;
+    var code = data.code || '', ra = data.recent_advice || [];
+    var kdata = [];
+    for (var i = 0; i < dates.length; i++) {
+        var o = c.open[i] != null ? c.open[i] : c.close[i];
+        var cl = c.close[i], l = c.low[i] != null ? c.low[i] : cl, h = c.high[i] != null ? c.high[i] : cl;
+        var v = c.volume[i] || 0;
+        var prev = i > 0 ? c.close[i - 1] : o;
+        var chg = prev > 0 ? (cl / prev - 1) * 100 : 0;
+        var n = /^30/.test(code) || /^688/.test(code) ? 19.5 : (/^[48]/.test(code) ? 29.5 : 9.5);
+        var lt = chg >= n ? 'limit_up' : (chg <= -n ? 'limit_down' : 'normal');
+        kdata.push({ date: dates[i], open: o, close: cl, low: l, high: h, vol: v, chgPct: chg, limitType: lt });
+    }
+    var ohlc = kdata.map(function(d) {
+        var color = klineColor(d);
+        return { value: [d.open, d.close, d.low, d.high], itemStyle: { color: color, color0: color, borderColor: color, borderColor0: color } };
+    });
+    var volData = kdata.map(function(d) {
+        return { value: d.vol, itemStyle: { color: d.chgPct >= 0 ? _klinePalette.up : _klinePalette.down } };
+    });
+    // 买卖点标记（仅在信号切换当天标注）
+    // 买点锚定在当日最低价（买在支撑/回调低点），卖点锚定在当日最高价，让标记贴住蜡烛而非悬空
+    var dateK = {};
+    kdata.forEach(function(d) { dateK[d.date] = d; });
+    var marks = [];
+    for (var j = 0; j < ra.length; j++) {
+        var a = ra[j], pA = j > 0 ? ra[j - 1] : null;
+        var inBuy = a.level === 'buy' || a.level === 'add';
+        var prevInBuy = pA && (pA.level === 'buy' || pA.level === 'add');
+        var inSell = a.level === 'sell';
+        var k = dateK[a.date];
+        if (!k) continue;
+        if (inBuy && !prevInBuy) marks.push({ date: a.date, price: k.low, type: 'buy' });
+        if (inSell && (!pA || pA.level !== 'sell')) marks.push({ date: a.date, price: k.high, type: 'sell' });
+    }
+    return { kdata: kdata, dates: dates, ohlc: ohlc, volData: volData, marks: marks };
+}
+
+function sdToggleIndicator(name) {
+    _sdIndicators[name] = !_sdIndicators[name];
+    sdUpdateIndicatorButtons();
+    if (_sd.data) renderStockDeepChart(_sd.data);
+}
+
+function sdUpdateIndicatorButtons() {
+    var bar = _sdGetIndicators();
+    if (!bar) return;
+    bar.querySelectorAll('.indicator-btn').forEach(function(btn) {
+        var k = btn.dataset.indicator;
+        if (_sdIndicators[k]) btn.classList.add('active'); else btn.classList.remove('active');
+    });
+}
+
+function renderStockDeepChart(data) {
+    var dom = _sdGetChart();
+    if (!dom) return;
+    resolveKlinePalette();
+    var inx = _sdBuildKlineInputs(data);
+    if (!inx) return;
+    var activeCount = Object.keys(_sdIndicators).filter(function(k) { return _sdIndicators[k]; }).length;
+    var baseH = window.innerWidth < 480 ? 280 : (window.innerWidth < 768 ? 360 : 440);
+    var h = Math.min(baseH + (activeCount - 1) * 90, window.innerWidth < 768 ? 520 : 800);
+    dom.style.height = h + 'px';
+    var chart = ChartManager.get('stockdeep', dom);
+    var opt = buildKlineOption(inx.kdata, inx.dates, inx.ohlc, inx.volData, inx.marks, _sdIndicators);
+    opt.title.text = (data.code ? (data.code + ' · ' + (data.name || '')) : '') + '  K线';
+    // 在弹窗同构结构上叠加当前建议参考价位（体现深度，不影响结构一致）
+    var ap = (data.signal && data.signal.action_plan) || {};
+    var ml = [];
+    if (ap.entry_price != null) ml.push({ yAxis: ap.entry_price, lineStyle: { color: '#f39c12', type: 'dashed' }, label: { formatter: '参考入场', color: '#f39c12' } });
+    if (ap.stop_loss != null) ml.push({ yAxis: ap.stop_loss, lineStyle: { color: '#e74c3c', type: 'dashed' }, label: { formatter: '止损', color: '#e74c3c' } });
+    if (ap.take_profit != null) ml.push({ yAxis: ap.take_profit, lineStyle: { color: '#2ecc71', type: 'dashed' }, label: { formatter: '止盈', color: '#2ecc71' } });
+    if (ml.length && opt.series[0]) {
+        opt.series[0].markLine = { silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1 }, label: { position: 'insideEndTop', fontSize: 10 }, data: ml };
+    }
+    chart.clear();
+    chart.setOption(opt);
+    chart.resize();
+}
+
+// 切换 tab 后恢复缓存时，重新渲染个股深度图表（ECharts 实例绑定到新 DOM 失效）
+function restoreStockDeep() {
+    // 详情进弹窗后，切 tab 不影响弹窗内图表（弹窗是 position:fixed，z-index 1000，始终在顶层）
+    // 只有在弹窗已关闭 / 板块首次回到时需要刷新主区占位
+    if (!_sdDeepMode) renderSdPanelPlaceholder();
+}
+
+// P0: 出场跟踪（7月20日起推荐的出场状态，按短线/中线/长线三组）
+// 每组为折叠小板块：默认只显示统计（累计收益/累计胜率/持有/已卖出），点「显示详情」展开跟踪列表
+const EXIT_EXPAND_KEY = 'aiq_exit_expanded';
+function loadExitExpandState() {
+    try {
+        const obj = JSON.parse(localStorage.getItem(EXIT_EXPAND_KEY) || '{}');
+        return { short: !!obj.short, mid: !!obj.mid, long: !!obj.long };
+    } catch(e) { return { short: false, mid: false, long: false }; }
+}
+function saveExitExpandState(st) {
+    try { localStorage.setItem(EXIT_EXPAND_KEY, JSON.stringify(st)); } catch(e) {}
+}
+let EXIT_EXPANDED = loadExitExpandState();
+const EXIT_HORIZON_META = {
+    short: { label: '短线', icon: '⚡', hint: '持仓上限 10 个交易日' },
+    mid:   { label: '中线', icon: '📈', hint: '持仓上限 60 个交易日' },
+    long:  { label: '长线', icon: '🏔️', hint: '不限持仓期 · 趋势跟踪' },
+};
+
+// 各周期统计 chips（summary.perf：累计收益 = 全部段盈亏之和，累计胜率 = 盈亏>0 的段占比）
+function exitStatChip(hz, perf) {
+    const p = (perf && perf[hz]) || {};
+    let s = '';
+    if (p.cum_pnl != null) {
+        const sign = p.cum_pnl >= 0 ? '+' : '';
+        s += `<span class="exit-group-stat ${p.cum_pnl >= 0 ? 'positive' : 'negative'}">累计收益 ${sign}${p.cum_pnl}%</span>`;
+    }
+    if (p.win_rate != null) {
+        s += `<span class="exit-group-stat ${p.win_rate >= 50 ? 'positive' : 'negative'}" title="${p.segments || 0} 段中盈利 ${p.win_rate >= 0 ? Math.round(p.win_rate * (p.segments || 0) / 100) : 0} 段">累计胜率 ${p.win_rate}%</span>`;
+    }
+    return s;
+}
+
+// 跟踪列表行（展开态表格 tbody）
+function renderExitRows(list) {
+    return list.map(it => {
+        const detail = it.detail || {};
+        const pnl = detail.current_pnl_pct;
+        const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
+        const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
+        const sold = it.status === 'clear';
+        const statusHtml = sold
+            ? '<span style="color:var(--danger);font-weight:600">🔴 已卖出</span>'
+            : '<span style="color:var(--green, #10b981);font-weight:600">🟢 持有</span>';
+        const holdDays = detail.hold_days != null ? detail.hold_days + '天' : '--';
+        // 卖出价：仅已卖出（止盈/止损/到期）显示，持有中为空
+        const exitPriceHtml = (sold && detail.exit_price != null)
+            ? `<span title="${detail.exit_date || ''} 卖出">${Number(detail.exit_price).toFixed(2)}</span>`
+            : '<span style="color:var(--text-muted)">--</span>';
+        // 连续推荐：推荐日显示最新一次，附最早推荐日提示
+        const firstDate = detail.first_scan_date;
+        const scanHtml = (it.scan_date || '--')
+            + (firstDate && firstDate !== it.scan_date
+                ? `<div style="font-size:10px;color:var(--text-muted)">自 ${firstDate} 连续推荐</div>` : '');
+        return `<tr>
+            <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
+            <td>${it.name||''}</td>
+            <td>${scanHtml}</td>
+            <td>${detail.entry_date||'--'}</td>
+            <td>${it.entry_price||'--'}</td>
+            <td>${exitPriceHtml}</td>
+            <td>${holdDays}</td>
+            <td class="${pnlCls}">${pnlStr}</td>
+            <td>${statusHtml}</td>
+            <td style="font-size:11px;color:var(--text-secondary);max-width:220px">${it.reason||''}</td>
+        </tr>`;
+    }).join('');
+}
+
+// 展开态内容：完整跟踪表
+function renderExitGroupBody(list) {
+    if (!list.length) {
+        return '<div class="empty-state" style="padding:14px;font-size:12px">该周期暂无跟踪记录</div>';
+    }
+    return `<div class="table-wrapper"><table><thead><tr>
+        <th>代码</th><th>名称</th><th>推荐日</th><th>买入日</th><th>买入价</th><th>卖出价</th><th>持仓天数</th><th>盈亏</th><th>状态</th><th>说明</th>
+    </tr></thead><tbody>${renderExitRows(list)}</tbody></table></div>`;
 }
 
 // 策略规则命中（常驻规则今日筛出，独立于融合分信号）
@@ -1212,18 +2446,7 @@ function copyTodayPicks() {
         if (!list.length) return;
         count += list.length;
         lines.push('【' + g.label + '】' + g.desc);
-        list.forEach((it, i) => {
-            const ap = it.action_plan || {};
-            const entry   = ap.entry_price   != null ? ap.entry_price.toFixed(2)   : '--';
-            const stop    = ap.stop_loss     != null ? ap.stop_loss.toFixed(2)     : '--';
-            const tp      = ap.take_profit   != null ? ap.take_profit.toFixed(2)   : '--';
-            const confirm = it.confirm_trigger != null ? it.confirm_trigger.toFixed(2) : '--';
-            lines.push((i + 1) + '. ' + (it.name || it.code) + ' ' + (it.code || '') +
-                '｜建议买入 ' + entry +
-                '｜止盈 ' + tp +
-                '｜止损 ' + stop +
-                '｜突破确认 ' + confirm);
-        });
+        lines.push(...buildPickGroupLines(list));
         lines.push('');
     });
     if (!count) {
@@ -2436,7 +3659,7 @@ var klineIndicators = { vol: true, macd: false, kdj: false };
 /**
  * 根据当前激活的指标，动态构建 ECharts 配置
  */
-function buildKlineOption(kdata, dates, ohlc, volData, marks) {
+function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
     var C = {
         // fallback 为纯回退值（CSS 变量缺失时才生效）
         axis: cssVar('--chart-axis', '#6B7A9A'),
@@ -2452,7 +3675,7 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks) {
         l3: cssVar('--chart-line-3', '#AB47BC'),
         accentRgb: cssVar('--accent-rgb', '0,212,240')
     };
-    var ind = klineIndicators;
+    var ind = indicatorState || klineIndicators;
     // 决定需要哪些副图 grid
     var subCharts = [];
     if (ind.vol) subCharts.push('vol');
@@ -2705,9 +3928,47 @@ function renderKlineWithIndicators(cache) {
     klineChartInst.resize();
 }
 
+// 市场速览：点击指数卡片 → 打开指数K线（读 index_daily 表，/scoring/index-kline）
+async function openIndexKline(code, name) {
+    const panel = document.getElementById('klinePanel'); panel.classList.add('open');
+    window._klineCode = code;      // 供「实时行情」跳转按钮使用（指数走 zs 前缀）
+    window._klineIsIndex = true;
+    let start = '2024-01-01', end = new Date().toISOString().split('T')[0];
+    let url = API + '/scoring/index-kline/' + code + '?start=' + start + '&end=' + end;
+
+    let kdata = [], marks = [];
+    try {
+        const resp = await RequestManager.fetch('idx-kline-' + code, url);
+        kdata = (resp.data?.kline || []).map(d => ({ date: d[0], open: d[1], close: d[2], low: d[3], high: d[4], vol: d[5] || 0 }));
+        marks = resp.data?.marks || [];
+    } catch(e) {
+        console.error('index kline fetch error:', e);
+        showToast('K线数据获取失败', 'error');
+    }
+
+    if (kdata.length === 0) {
+        document.getElementById('klineTradeInfo').innerHTML = '<p class="text-muted">无K线数据</p>';
+        return;
+    }
+
+    // 计算涨跌幅；指数无涨跌停，limitType 全部为 normal
+    for (let i = 0; i < kdata.length; i++) {
+        kdata[i].prevClose = i > 0 ? kdata[i-1].close : kdata[i].open;
+        kdata[i].chgPct = kdata[i].prevClose > 0 ? ((kdata[i].close / kdata[i].prevClose - 1) * 100) : 0;
+        kdata[i].limitType = 'normal';
+    }
+
+    window._klineCache = { code: (name || '') + ' ' + code, kdata: kdata, marks: marks };
+    updateIndicatorButtons();
+    renderKlineWithIndicators(window._klineCache);
+    document.getElementById('klineTradeInfo').innerHTML =
+        `<h4 style="font-family:var(--font-mono);margin-bottom:8px;color:var(--text-primary)">${name || ''} ${code}</h4>`;
+}
+
 async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resultId) {
     const panel = document.getElementById('klinePanel'); panel.classList.add('open');
     window._klineCode = code;  // 供「实时行情」跳转按钮使用（即使K线拉取失败也能跳）
+    window._klineIsIndex = false;
     let start = '2024-01-01', end = new Date().toISOString().split('T')[0];
     if (entryDate) { const d = new Date(entryDate); d.setMonth(d.getMonth()-2); start = d.toISOString().split('T')[0]; }
     if (exitDate) { const d = new Date(exitDate); d.setMonth(d.getMonth()+2); end = d.toISOString().split('T')[0]; }
@@ -2769,6 +4030,7 @@ function closeKline() {
     document.getElementById('klinePanel').classList.remove('open');
     window._klineCache = null; // 关闭弹窗时清理缓存
     window._klineCode = null;
+    window._klineIsIndex = false;
 }
 
 // 跳转到东方财富实时行情页（新标签页打开）
@@ -2781,7 +4043,14 @@ function quoteUrlFor(code) {
 function openQuotePage() {
     const code = window._klineCode || (window._klineCache && window._klineCache.code);
     if (!code) { showToast('未获取到股票代码', 'warning'); return; }
-    window.open(quoteUrlFor(code), '_blank', 'noopener');
+    let url;
+    if (window._klineIsIndex) {
+        // 指数行情页走 zs 前缀（上证指数 zs000001、深证成指 zs399001、沪深300 zs000300）
+        url = 'https://quote.eastmoney.com/zs' + String(code).replace(/[^0-9]/g, '') + '.html';
+    } else {
+        url = quoteUrlFor(code);
+    }
+    window.open(url, '_blank', 'noopener');
 }
 
 // ─── Init ───

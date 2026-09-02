@@ -232,7 +232,9 @@ def calc_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ma = calc_ma(close, [5, 10, 20, 60])
     result = pd.concat([result, ma], axis=1)
 
-    ema = calc_ema(close, [12, 26])
+    # EMA12/26 供 MACD 复用；另加 EMA20 供个股深度/短线辅助判断短端动能（近端价格加权，
+    # 比等权 MA20 更早反映拐点）。MACD 自行内联计算 ema12/ema26，不受此列表影响。
+    ema = calc_ema(close, [12, 26, 20])
     result = pd.concat([result, ema], axis=1)
 
     macd = calc_macd(close)

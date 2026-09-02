@@ -1,95 +1,88 @@
 # AIQuant 项目长期记忆
 
-> ⚠️ **记忆校准声明（2026-08-06 重写）**：本文件描述**主工作树 `dev_0.0.1`** 的真实状态。
-> 项目另有一个未合并的 git worktree 分支 `worktree-feature+aiquant-9-improvements`（路径 `.claude/worktrees/feature+aiquant-9-improvements`），其中包含 LLM、`deployment/`、三省六部 `governance/`+`ministries/`、`risk_config.yaml`、AI模型(RandomForest)、WebSocket 行情等**拓展功能，尚未合并进主树**。切勿把这些 worktree 内容当作主树现状。
-> 本记忆曾严重失实（把 worktree 状态当主树），已整体重写。
+> ⚠️ 本文件描述**主工作树 `dev_0.0.1`**。另有未合并 worktree `.claude/worktrees/feature+aiquant-9-improvements`
+> （LLM / deployment / governance / risk_config / AI 模型 / WebSocket），**切勿当作主树现状**。
 
-## 项目概述
-AIQuant —— A股量化投资系统，基于 Flask 后端 + 前端仪表板（dashboard.html）。
-当前 git 分支：**`dev_0.0.1`**。主树无显式项目版本号（仅 `config/strategies/default.yaml` 有 `version: "1.0" 策略配置版本`）。
+## 项目与用户
+- A股量化系统：Flask + SQLite(`core/quant.db`，3.9G) + akshare；前端单文件 `dashboard.html`(3700+行)
+  + `static/css/dashboard.css`，无构建步骤。
+- 路径 `E:\小项目\Project\AIQuant`；Windows；`start.bat` 启动、`install.bat` 装依赖（主树无 start-bg.bat）。
+- 用户"寇豆码"，成都；偏好中文、表格/编号列表、根因+代码改动说明、精简 UI；A股**红涨绿跌**。
+- 主树**无** sklearn / LLM / 风控(`risk/` 空) / 三省六部 / WebSocket / `config/risk_config.yaml`（均在 worktree）。
 
-## 用户偏好
-- 操作系统：Windows
-- 路径：`E:\小项目\Project\AIQuant`
-- 启动方式：Bat 脚本（`start.bat` 前台 / `install.bat` 装依赖；主树**无** `start-bg.bat`）
-- 颜色惯例：A股红涨绿跌（涨红跌绿）
+## 关键实测结论（不可推导，改动前必读）
+- **buy 档裸持有选股能力为负，但加纪律后转正**：T+10 裸持有 -0.75%/44.9%；
+  加回踩入场+止损+移动止盈后 **+1.38%/61.5%**（与 deep_track 实测 +1.32%/61.13% 吻合 → 模拟器可信）。
+  → **收益主要来自出场纪律，不是选股**。add 档真实规则下 +0.82%/54.5%，**不要改成 add 优先**。
+- **daily_top_n 保持 10**：5→+1.35%、10→+1.38%、20→+1.22%、30→+0.71%（断崖）。扩样本应加扫描天数。
+- **max_hold_days 待决策**：T+7 +1.40%/周转快 21% vs T+10 +1.38%/61.5%（用户 2026-09-02 暂不改）。
+- **buy 档衰减拐点**：裸持有 T+5~T+6 峰值，T+9 转负，T+15 -2.33%（buy 选出的已是启动票，后劲不足）。
 
-## 主树真实模块结构（基于 2026-08-06 扫描）
-```
-app.py                  Flask 入口，注册 7 个 Blueprint
-routes/                 system, sync, scoring, screen, backtest, optimizer, investor
-core/                   data_fetcher, data_cleaner, db, sync, repository,
-                        em_kline/em_realtime/em_guard(东方财富行情), outcome_tracker, task_queue
-strategy/               strategies(5策略), scorer, factor_lib, indicators, rec_filters,
-                        rule_scanner, rules_store, optimizer, exit_advisor, mid_long,
-                        next_day_momentum, adaptive_weights, config, intent/
-risk/                   ⚠️ 主树仅空 __pycache__（风控实现在 worktree，未合并）
-config/                 strategy_params.py, thresholds.py, settings.py, personal_config.py,
-                        llm_config.yaml, strategies/(default.yaml)
-scheduler/              runner.py(daily_sync_by_date 调度主路径)
-backtest/               回测引擎（本地因子计算，不读 stock_signal 表）
-qlib_engine/            Qlib 初始化封装
-utils/                  logger, timing, api 等
-tools/ reports/ static/ docs/ tests/ data_cache/ logs/
-```
-**说明**：以上为文件/目录层面的真实存在。各模块的功能成熟度以源码为准，本记忆不夸大"已完成"。
+## 个股深度 · 候选排序键（2026-09-02 定案，见 `stock_deep.candidate_order_by`）
+- **旧逻辑只用 `pct_above_ma20 ASC`**：buy 池扩展度**全部 ≥0**（跌破 MA20 凑不到 buy 的 5 分门槛），
+  故该键实为"选价格恰好等于 MA20 的票"，维度单一、区分度极差。
+- **新逻辑（三档）**：`level buy优先 → score≥6 归强信号档 → 档内 ext ASC → code`（已实现并落地）。
+  评估（`tools/eval_topk_pick.py`，**修正末段剔除偏差后** 60 扫描日，复刻真实入场出场）：
+  均值 **+0.07%→+1.56%**、PF **1.02→1.48**、胜率 60.2%→62.9%、止损率 12.6%；逐日 39/56 天胜出（全场最高）；
+  弱市前半段 -2.51%→-0.26%；topn 5/8/10/15/20 新键全为正、旧键在 5/15 为负。
+  ⚠ 两套数字口径不同：上述是"as_of 修正后候选表"上的**前瞻**增益(+1.5pp)；若重放当初修正前建的 620 只
+  真实旧单，增益仅 +0.19pp（旧单本身在旧数据上挑的，ext 分布不同）。新键实现与模拟器已交叉验证一致(+1.56%)。
+- **机制（buy 池全样本分层归因）**：
+  - score=5 占 88.6% 均值 -0.05%(PF 0.99)；score=6 占 10.9% **+0.62%(PF 1.16)**；
+    score=7 仅 20 只 **-1.18%(PF 0.79)** → **score 必须封顶成两档**（无脑 DESC 会让 20 只极端票霸榜）。
+  - ext<1 **+0.91%(PF 1.29)**；ext 1~3 -0.14%；ext 3~6 -0.43% → 同档内挑贴 MA20 的。
+  - frac20 分层最单调（<0.33 +2.27%/PF 1.97；≥0.66 -1.02%/PF 0.77）但占比仅 1.4%，
+    做主键 top10 区分度不足（PF 1.14），仅落库保留。
+  - risk_pct / atr_pct **无区分度**（PF≈1.0），勿用。
+- **配套**：`stock_deep_signal` 增列 score/base_score/frac20/risk_pct/atr_pct（旧库自动 ALTER）；
+  历史行需 `tools/backfill_signal_features.py` 回填，否则 score 为 NULL 会**静默退化成旧排序**。
+- 展示端 `get_market_signal_latest` 原按 `level, code`（字典序！），已改为共用同一排序键。
 
-## 短线推荐引擎关键事实（主树，2026-08-06 核实）
-- `SHORT_ENGINE="pure_bottom"`（config/strategy_params.py）：每日短线推荐 **100% 由 `strategy_bottom_fishing`（抄底型）驱动**；`PURE_BOTTOM_WEIGHTS=[0,0,0,1,0]`，其余 4 策略融合分贡献为 0，`FUSION_MODE="max"` 下融合分 = `BOTTOM_SCORE × 5`。
-- **"推荐已涨过的票/挂高位"根因**：`strategy_bottom_fishing.score_rebound` 奖励"较10日最低反弹5%"→信号在反弹后最强；叠加 `SHORT_TREND_GATE`（MA20 向上）偏向上行趋势票；全链路**无超买/扩展度否决**（`CHASE_FILTER` 仅挡连板/3日+25%/涨停打开）。结果系统性推荐"回踩后已反弹、处上行趋势"的票，用户 T+1 开盘买在反弹高位。
-- 改进方向（docs/short-reco-anti-chase-methods.md）：A 扩展/超买硬否决 + C T+1 跳空守卫（纯加法，P0）；B 抄底触发重定时为"买回踩不买反弹"（治本，需回测）；D 新鲜度衰减；E 复用市场状态联动；F 用自有 `eval_fusion_mode` 验证。
+## 个股深度 · 深析信号（stock_deep）
+- **历史回补必须传 `as_of`**：`load_history`/`analyze_stock`/`run_full_market_scan` 已支持；
+  不传则取最新行情 = **未来函数**。证据(000651)：最新 38.95 sell / as_of 08-20 41.42 add。
+- **分档 `_classify`**：buy≥5 / add≥2 / hold≥-2 / sell<-2。add 门槛极低 → 每天筛出 1000~1800 只，
+  **其中 buy 仅 40~90 只**（add 是"技术面不差"，**不等于建议买入**）。
+- **并行必须用多进程**：纯 Python 不释放 GIL，8 线程实测**慢 4.2 倍**；
+  ProcessPoolExecutor 8 进程提速 3.3x（65→20ms/只），12 进程饱和（12 核）。
+- **Windows spawn**：不能在 Flask 请求/线程里起进程池（会重复导入主模块重启 app）。
+  解法 `tools/backfill_deep_scan.py`，Flask 用 `subprocess.Popen` 拉起，进度写 JSON 轮询。生产约 45 秒/扫描日。
 
-## 每日推荐数据流（关键事实，2026-08-06 纠正）
-> 以下为寇豆码纠正后确认的真实链路，后续动推荐系统务必以此为准。
+## 个股深度 · 推荐跟踪（deep_track）
+- **回补上限 = `stock_deep_signal` 的 DISTINCT scan_date 数**，不是用户输入天数。
+- 入场：T+1 起 5 日内 low 触及买点才成交，价=min(买点,开盘)；出场：T+1 不判、
+  收盘≤止损 / 已启动且收盘≤最高×(1-3%) / 满 max_hold 收盘平。
+- 接口：`POST/GET /api/investor/deep_track/backfill_scan[/status]`（异步+进度，重复启动 409）；
+  `POST .../refresh` 同步推进。列表返回 `total`，前端首屏 100 + 「加载更多(+100)」。
+- 重建跟踪单无需重扫：`sync_from_scan` 只读 `stock_deep_signal`+`daily_price`，
+  清空 deep_track 后逐日重跑 + `update_open_tracks` 即可（分钟级）。
 
-- **调度主路径不刷新推荐信号**：18:00 定时任务 `scheduler/runner.py` → `daily_sync_by_date(target="all")` → `_recompute_strategy_scores_for_updated`（`core/sync.py`）。该函数**只增量重算 fusion_score（按受影响股），不写 stock_signal 表**。
-- **stock_signal 仅由手动触发**：全量重算 `recalc_all_scores`（`core/sync.py`，逐股×全历史逐交易日写 stock_signal，手动触发约 5 分钟）只在 `routes/sync.py` 的 `/recalc_all_scores` 接口触发；前端 dashboard 在"推荐日期非今日"时自动 POST /recalc 兜底。**今日推荐的时效实际依赖前端/手动兜底，而非调度内保证。**
-- **回测不依赖 stock_signal 表**：backtest engine 的 `stock_signals` 是本地因子计算产物（非读库），qlib_engine 零引用；该表仅前端展示 + `tools/analyze_confirm_gap.py` 读取。→ 改造"只写最新 scan_date 候选"安全，唯一索引 (scan_date, code, horizon) 天然保留历史。
-- **行业字段恒为空**：`stock_info.industry` 列已加但未填充，全项目无填充代码。行业配额类优化需先接行业数据源。
-- **market_regime 单日噪音**：`routes/investor.py` 两处重复，均用 `AVG(pct_change)` 取 `MAX(trade_date)` 单日均值；`is_trading_day`（`core/sync.py`）与 `core/repository/price_repo.py` 各有一处无缓存的 akshare `tool_trade_date_hist_sina()` 调用。
-- **optimizer 是 suggest-only 半自动闭环**：寻优评估消费 `daily_price` 的 OC/CC 重放，非 `recommend_outcome`；outcome 仅用于样本量守护与归因。`PURE_BOTTOM_WEIGHTS` 全压抄底有双窗回测依据（胜率44.35%/PF1.066），**按近期 accuracy 微调易过拟合**。
-- **recommend_outcome 无 status 列**：含 hit_stop/hit_tp/exit_reason/exit_date/exit_return。"已推/已持仓"判定应查 `personal_position(status='holding')` 或 `exit_reason`/`exit_date` 时间窗。
-- **质量过滤**：`strategy/rec_filters.py` 含 ST/退市剔除 + 流动性 min_amt20 + 市值区间 [min_mktcap, max_mktcap]（默认约 [30亿,800亿]）；无波动率上限/换手率下限。
-- **候选池为 limit*3**：多取 3 倍候选供"避免"级剔除后替补，非严格前 8。
+## 短线推荐引擎 / 每日推荐数据流
+- `SHORT_ENGINE="pure_bottom"`：短线推荐 100% 由 `strategy_bottom_fishing` 驱动，融合分=BOTTOM_SCORE×5。
+- **"推荐已涨过的票"根因**：`score_rebound` 奖励"较10日最低反弹5%"→信号在反弹后最强；
+  叠加 MA20 向上趋势门；全链路无超买/扩展度否决。方案见 `docs/short-reco-anti-chase-methods.md`。
+- 18:00 调度只增量重算 fusion_score，**不写 stock_signal**；`stock_signal` 靠手动/前端兜底触发
+  → **今日推荐时效不是调度保证的**。
+- `rec_filters.py`：ST/退市 + 流动性 + 市值[30亿,800亿]；无波动率上限/换手率下限。候选池 = limit×3。
+- `recommend_outcome` 无 status 列；optimizer 是 suggest-only（消费 daily_price 重放）。
 
-## 主树真实 API 端点（2026-08-06 扫描，非 worktree）
-- 页面：`/`、`/dashboard`（dashboard.html，3714 行）、`/reports/<path:filename>`
-- 基础：`GET /api/health`
-- 数据同步(sync)：`/recalc`、`/recalc_all_scores`、`/today`、`/today/dates`、`/latest`、`/latest_date`
-- 评分(scoring)：`/stock/<code>`、`/factor_trend` 等
-- 选股/规则扫描(screen)：`/rules`、`/rule_signals`、`/scan_rules`、`/save_as_rule`、`/conditions`、`/pool`、`/history`、`/apply`、`/rollback`、`/guard-clear`、`/guard-status`、`/alerts`、`/dismiss`、`/explain`、`/explain/<metric>`
-- 回测(backtest)：`/backtest/*`（具体见 routes/backtest.py）
-- 优化(optimizer)：`/optimizer/*`（见 routes/optimizer.py）
-- 个人投研(investor)：`/watchlist`、`/watchlist/<code>`、`/positions`、`/positions/<int:pid>`、`/outcome_list`、`/outcome_summary`、`/exit_advice`、`/market-overview`、`/realtime`、`/kline/<code>`、`/parse_intent`、`/recommendations/history`
-- 任务队列：`/task/<task_id>`、`/status/<task_id>`、`/<task_id>/{cancel,export,result,status,trades}`
-- 调度/系统：`/scheduler`、`/status`、`/auto-status`、`/progress`、`/run`
-> ⚠️ 以下**主树不存在**（仅在 worktree）：`/api/llm/*`、`/api/deployment/*`、`/api/risk/*`、`/api/governance/*`、`/api/data/fetch*`、`/api/ai/*`、`/api/broker/*`、`/ws/market`。
-
-## 关键配置（主树真实路径）
-- 策略参数：`config/strategy_params.py`、`config/strategies/default.yaml`
-- 阈值：`config/thresholds.py`
-- LLM 配置：`config/llm_config.yaml`（文件存在，但 LLM 路由/功能在 worktree）
-- 数据库：`core/quant.db`（SQLite）
-- ⚠️ `config/risk_config.yaml` **主树不存在**（仅在 worktree）
-
-## 常用命令
-```bash
-start.bat          # 前台启动
-install.bat        # 安装依赖
-```
-> 主树无 `start-bg.bat`（该脚本在 worktree）。
-
-## 注意事项
-- WebSocket：主树**未使用** flask-sock（实时行情推送功能在 worktree）。
-- 模拟交易/实盘：主树有 `personal_position` 基础持仓表；统一交易下单、Broker 抽象层在 worktree，未合并。
-- AI 模型(RandomForest 等)：主树**无** sklearn 模型代码（在 worktree）。
-- 风控系统（11条规则+YAML）：主树**无**实现（risk/ 为空，配置在 worktree）。
-- 三省六部架构：主树**无**（governance/ministries 在 worktree）。
+## 前端与注意事项
+- 今日推荐区 `#todayPicks`：三个 `.pick-group[data-hz=short|mid|long]`，默认简略态，点「详情」展开，
+  展开态存 `localStorage['aiq_pick_expanded']`。
+- 无浏览器验证套路：python 正则抽内联 script → node stub 环境 → 灌真实 API 数据 → 断言 HTML。
+  项目未装 playwright。
+- **⚠ 5000 端口常有用户自己的服务常驻**（Windows 可 SO_REUSEADDR 同绑，后起者拿不到流量 →
+  新路由看着像 404）。改完后端**必须让用户重启 `start.bat`**（自带杀旧逻辑）。
+  自测另起 5001，测完清理进程。
+- **⚠ `PRAGMA table_info` 结果用索引 `r[1]`**，不要 `r["name"]` —— 没设 row_factory 的连接会
+  抛异常被 except 吞掉，导致特性列检测静默失败（2026-09-02 已踩）。
 
 ## 待办 / 开放问题
-- 短线推荐"挂高位"问题（见上方「短线推荐引擎关键事实」），改进方案文档：`docs/short-reco-anti-chase-methods.md`。
-- 推荐系统代码改动已交由其他同学处理（用户 2026-08-06 反馈）；本 Agent 角色为策略/方法诊断与方案对齐。
-- 记忆曾把 worktree 状态误当主树，已整体重写；后续写入记忆前须先确认目标文件在主树还是 worktree。
+- **待决策**：`DEEP_TRACK['max_hold_days']` 10→7（数据已备，用户暂不改）。
+- 是否用新排序键**重建历史 610 单**（用户数据未动，仅代码+回填生效于未来建单）。
+- 短线"挂高位"改进（见 `docs/short-reco-anti-chase-methods.md`）。
+- 提选股质量的方向：降动量类权重、加位置类权重（frac20 低分位），需重新回测。
+- `stock_info.industry` 恒空，无填充代码；行业配额类优化需先接行业数据源。
 
 ---
-*最后更新: 2026-08-06（整体重写校准主树/ worktree 偏差）*
+*最后更新: 2026-09-02（压缩重写；新增候选排序键定案与评估结论）*

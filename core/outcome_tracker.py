@@ -98,6 +98,69 @@ def short_order_clause(alias: str = "s") -> str:
             f"COALESCE({alias}.fusion_score, 0) DESC")
 
 
+def _short_weak_dates(conn, start_date: str, end_date: str | None = None) -> set:
+    """计算 [start_date, end_date] 内的「市场走弱日」集合（宽松口径）。
+
+    2026-08-26 v2 放宽（初版过紧：ANY 指数略破 MA20 即判弱，2 年窗口 73% 交易日
+    被标为走弱，回测 2024-07~2026-08 显示其用 ~25% 收益换 2.6pp 回撤，代价过大）。
+    宽松判定（任一命中即算弱，只抓「真走弱」而非震荡/恢复期的假弱）：
+      1) 信号日 regime == cold（composite 多日宽度冰点，广度+斜率双差，历史可复现）；
+      2) 上证指数或沪深300 当日收盘 < 其 MA20 × 0.98（显著跌破中期均线 >2%，趋势破坏）；
+      3) 上证指数或沪深300 近 5 个交易日动量 < -1.5%（短线动能显著转负）。
+    cool 单独不再触发（需叠加指数破位/动量转负），避免把「偏冷但对指数无碍」的日子
+    也一刀切屏蔽；任一指数缺数据时跳过对应项（仅按 regime 判定，不误判为强）。
+    """
+    import pandas as pd
+    from core.market_regime import compute_regime_series
+    series = compute_regime_series(conn, start_date, end_date)
+    weak = {d for d, r in series.items() if r == "cold"}
+    end_filter = " AND trade_date <= ?" if end_date else ""
+    for icode in ("000001", "000300"):
+        rows = conn.execute(f"""
+            SELECT trade_date, close FROM index_daily
+            WHERE code = ? AND trade_date >= date(?, '-40 days'){end_filter}
+            ORDER BY trade_date
+        """, (icode, start_date, end_date) if end_date else (icode, start_date)).fetchall()
+        if not rows:
+            continue
+        df = pd.DataFrame(
+            [{"d": r["trade_date"], "c": float(r["close"])} for r in rows]).set_index("d")
+        c = df["c"]
+        ma20 = c.rolling(20).mean()
+        mom5 = c / c.shift(5) - 1
+        for d in sorted(series):
+            if d not in c.index:
+                continue
+            cl = c.get(d)
+            if cl is None:
+                continue
+            m = ma20.get(d)
+            mo = mom5.get(d)
+            if (m is not None and not pd.isna(m) and cl < m * 0.98) or \
+               (mo is not None and not pd.isna(mo) and mo < -0.015):
+                weak.add(d)
+    return weak
+
+
+def short_market_gate_sql(conn, start_date: str, end_date: str | None = None,
+                          alias: str = "s") -> tuple[str, list]:
+    """短线「大盘走弱闸门」SQL 片段（组合进 short 组 WHERE，三处出口共用）。
+
+    2026-08-26 用户要求：市场下跌/走弱时不要盲推短线建仓。
+    弱市日只保留独立正期望信号线「隔日动量」可占短线名额（抄底/回踩类一律不推），
+    即 SQL = (strategy='隔日动量' OR scan_date NOT IN (弱市日))；强市日不过滤。
+    与 short_t1_filter_sql 同构（返回 (sql_cond, params)），供「今日推荐 / 出场跟踪 /
+    推荐复盘入库」三处共用，保证口径一致。参数里没有开关——弱市判定本身是硬规则，
+    若要整体放量可用 all_dates 逻辑之外，此处默认仅在明确弱市日收缩。
+    """
+    weak = _short_weak_dates(conn, start_date, end_date)
+    if not weak:
+        return "1", []
+    ph = ",".join("?" * len(weak))
+    return (f"(COALESCE({alias}.strategy, '') = '隔日动量' "
+            f"OR {alias}.scan_date NOT IN ({ph}))"), list(weak)
+
+
 # ─────────────────────────────────────────────
 # 1. 从 stock_signal 导入新推荐到 recommend_outcome
 # ─────────────────────────────────────────────
@@ -148,11 +211,14 @@ def insert_new_outcomes(days_back: int = 60):
         # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
         # 隔日动量豁免；参数 >=99 禁用）——复盘窗内各信号日按当天历史 regime 判定
         t1_cond, t1_params = short_t1_filter_sql(conn, start_date)
+        # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量，与今日推荐/出场跟踪同口径
+        mk_cond, mk_params = short_market_gate_sql(conn, start_date)
         horizon_specs = {
             # short：龙虎榜动量信号优先占名额，抄底票按扩展度排序补足
             # （方向由 short_ext_sort_desc 控制，见 short_order_clause；与今日推荐同口径）
             "short": (short_order_clause(),
-                      f" AND s.fusion_score >= ? AND {t1_cond}", [gate, *t1_params]),
+                      f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond}",
+                      [gate, *t1_params, *mk_params]),
             "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
             "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
         }
@@ -197,6 +263,8 @@ def insert_new_outcomes(days_back: int = 60):
                       AND s.name NOT LIKE '%退%'
                       -- 强势突破是首页独立栏目信号线，不计入推荐复盘胜率
                       AND COALESCE(s.strategy, '') != '强势突破'
+                      -- 缩量回踩 2026-08-26 停用（实证负期望），不计入推荐复盘胜率
+                      AND COALESCE(s.strategy, '') != '缩量回踩'
                       AND ({gap_sql}) = 0
                       {board_filter}
                       {gate_sql_cond}

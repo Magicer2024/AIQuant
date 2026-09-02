@@ -73,3 +73,16 @@ def is_any_running(kind=None):
         return any(t["status"] in ("pending", "running")
                    and (kind is None or t.get("kind") == kind)
                    for t in _tasks.values())
+
+
+def get_running_task(kind=None):
+    """取当前正在运行（pending/running）的任务信息，含 progress/message。
+
+    指定 kind 时只匹配该类任务；返回 None 表示无运行中任务。供前端实时显示进度条。
+    """
+    with _lock:
+        for tid, t in _tasks.items():
+            if t["status"] in ("pending", "running") and (kind is None or t.get("kind") == kind):
+                return {"task_id": tid, "progress": t.get("progress", 0),
+                        "message": t.get("message", "")}
+        return None

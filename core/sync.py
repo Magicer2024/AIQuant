@@ -253,6 +253,44 @@ def sync_all_indices(start_date: str = None, end_date: str = None,
     return results
 
 
+def sync_indices_by_date(start_date: str, end_date: str, verbose: bool = True) -> dict:
+    """
+    按日期区间同步主要指数到 index_daily（东财直连优先，失败/无数据回退 baostock）。
+
+    与个股快路径(daily_sync_by_date)同源；东财断连时回退 baostock（与旧 daily_sync 同源），
+    保证「市场速览」指数与个股行情日期一致。单指数失败不阻断主流程，返回 0 行。
+
+    :param start_date / end_date: 'YYYYMMDD' 或 'YYYY-MM-DD'
+    :return: {code: 写入行数}
+    """
+    from core.em_kline import fetch_index_klines
+    results = {}
+    for code, name in MAJOR_INDICES:
+        written = 0
+        # 1) 东财直连（优先，与个股快路径同源，秒级）
+        try:
+            df = fetch_index_klines(code, start_date, end_date)
+            if df is not None and not df.empty:
+                written = upsert_index_daily(code, df)
+                if verbose:
+                    print(f"  指数 {code} {name} 东财写入 {written} 行")
+        except Exception as e:
+            if verbose:
+                print(f"  指数 {code} {name} 东财失败: {e}")
+        # 2) 回退 baostock（东财无数据/失败时）
+        if written == 0:
+            try:
+                written = sync_index_data(code, name,
+                                          start_date=str(start_date).replace("-", ""),
+                                          end_date=str(end_date).replace("-", ""),
+                                          verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    print(f"  指数 {code} {name} baostock 回退失败: {e}")
+        results[code] = written
+    return results
+
+
 # ─────────────────────────────────────────────
 # 股票列表
 # ─────────────────────────────────────────────
@@ -2095,6 +2133,22 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         except Exception as e:
             if verbose:
                 print(f"  [WARN] 龙虎榜同步失败（不阻断同步主流程）: {e}")
+
+    # 同步主要指数（供市场速览 / 大盘择时）—— 与个股快路径同源（东财直连），
+    # 避免 index_daily 滞后于个股行情造成「市场速览」指数与涨跌家数日期不一致；
+    # 失败不阻断主流程。与个股一致，按本次 trade_dates 全区间同步。
+    if total_rows > 0:
+        try:
+            if verbose:
+                print(f"\n>>> 同步主要指数 {min(trade_dates)}~{max(trade_dates)}...")
+            idx_start = min(trade_dates)
+            idx_end = max(trade_dates)
+            index_results = sync_indices_by_date(idx_start, idx_end, verbose=verbose)
+            if verbose:
+                print(f">>> 指数同步完成，共写入 {sum(index_results.values())} 行")
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 指数同步失败（不阻断同步主流程）: {e}")
 
     # 触发策略分数重算（按 target 过滤）
     if total_rows > 0:

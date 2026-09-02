@@ -164,6 +164,50 @@ def run_sync_blocking():
         except Exception:
             import traceback
             traceback.print_exc()
+
+        # 盘后：同步 + 打分重算完成后，再跑一遍全市场深析扫描，结果落库 stock_deep_signal
+        # （供「明日候选」读取；best-effort，失败不阻断）
+        try:
+            from strategy.stock_deep import run_full_market_scan
+            from core.db import get_conn as _gc
+            SYNC_STATUS["last_result"] = "全市场深析扫描中..."
+            ss = time.time()
+            with _gc() as conn:
+                scan_res = run_full_market_scan(conn)
+            print(f"[Scheduler] 全市场深析扫描完成: 扫描 {scan_res['scanned']} 只, "
+                  f"候选 {scan_res['candidates']} 只, {scan_res['elapsed_s']}s, "
+                  f"共 {round(time.time()-ss,1)}s")
+            SYNC_STATUS["last_result"] = (
+                f"全市场深析扫描完成: 候选 {scan_res['candidates']} 只（{scan_res['elapsed_s']}s）"
+            )
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+        # 盘后最后一步：把刚扫描出的候选转成跟踪单，再按买点建仓 / 卖点出场推进全部未了结单
+        # 并结算每笔持仓天数与收益（个股深度板块「跟踪列表」的数据源）。
+        # 必须在扫描之后：先有当日候选，才有东西可跟踪。best-effort，失败不阻断。
+        try:
+            from strategy.deep_tracker import refresh as _track_refresh
+            from core.db import get_conn as _gc2
+            SYNC_STATUS["last_result"] = "个股深度跟踪推进中..."
+            with _gc2() as conn:
+                tr = _track_refresh(conn)
+            if tr.get("enabled") is False:
+                print("[Scheduler] 个股深度跟踪已停用（DEEP_TRACK.enabled=False）")
+            else:
+                s, u = tr.get("sync", {}), tr.get("update", {})
+                print(f"[Scheduler] 个股深度跟踪: 新增候选 {s.get('added', 0)} 只, "
+                      f"建仓 {u.get('filled', 0)} 笔, 出场 {u.get('closed', 0)} 笔, "
+                      f"失效 {u.get('expired', 0)} 笔；当前持仓 {u.get('holding', 0)} / "
+                      f"待回踩 {u.get('watching', 0)}")
+                SYNC_STATUS["last_result"] += (
+                    f" → 跟踪: 建仓 {u.get('filled', 0)} · 出场 {u.get('closed', 0)} · "
+                    f"持仓 {u.get('holding', 0)}"
+                )
+        except Exception:
+            import traceback
+            traceback.print_exc()
     except Exception as e:
         SYNC_STATUS["last_result"] = f"错误: {e}"
         # 指数退避重试

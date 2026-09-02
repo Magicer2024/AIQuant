@@ -47,6 +47,38 @@ def kline_data(code: str):
         return ok({"kline": kline, "marks": marks})
 
 
+@scoring_bp.route("/index-kline/<code>", methods=["GET"])
+def index_kline_data(code: str):
+    """指数 K 线（市场速览卡片点击）读 index_daily。
+
+    GET /api/scoring/index-kline/000001?start=2024-01-01&end=2026-08-24
+    注意：与 /kline/<code>（读 daily_price，个股）区分——指数不在 daily_price 表。
+    """
+    start = request.args.get("start", "2024-01-01")
+    end = request.args.get("end", date.today().strftime("%Y-%m-%d"))
+
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT trade_date, open, high, low, close, volume
+            FROM index_daily WHERE code = ? AND trade_date BETWEEN ? AND ?
+            ORDER BY trade_date
+        """, (code, start, end)).fetchall()
+
+        kline = []
+        for r in rows:
+            d = dict(r)
+            kline.append([
+                d["trade_date"],
+                _sanitize(d.get("open")),
+                _sanitize(d.get("close")),
+                _sanitize(d.get("low")),
+                _sanitize(d.get("high")),
+                _sanitize(d.get("volume")),
+            ])
+
+        return ok({"kline": kline, "marks": []})
+
+
 @scoring_bp.route("/latest_date", methods=["GET"])
 def latest_date():
     """获取最新行情日期 GET /api/scoring/latest_date"""
