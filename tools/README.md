@@ -65,6 +65,8 @@
 | `analyze_confirm_gap.py` | 只读研究：确认缺口（confirmation gap）分析 |
 | `_eval_deep_buypoints.py` | 只读诊断：个股深度买点是否落在局部高点 |
 | `_eval_adj_sort.py` | 只读对比：fusion_score 排序 vs 扩展度调整排序 |
+| `_eval_perstock_threshold.py` | 只读 A/B：`_classify` 阈值改成「本股历史分数分位」（无未来函数 + 全局阈值对照臂）。**结论：等密度下 T+5 胜率 67.9%→66.4%，已被否决**，详见 `docs/stock-deep-perstock-calibration-report.md` |
+| `_eval_deep_exit_reach.py` | 只读测量：个股深度计划价的止盈可达性（生产同口径逐笔模拟）。**结论：84.7% 交易由 10 天到期了结，止盈仅 4.7% 触达**，触达率随本股波幅 1.0%→8.6% 单调 |
 
 ### E. 短线策略评估 / 回测（只读研究）
 | 脚本 | 作用 |
