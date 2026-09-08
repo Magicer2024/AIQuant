@@ -14,29 +14,25 @@
 - **buy 档裸持有选股能力为负，但加纪律后转正**：T+10 裸持有 -0.75%/44.9%；
   加回踩入场+止损+移动止盈后 **+1.38%/61.5%**（与 deep_track 实测 +1.32%/61.13% 吻合 → 模拟器可信）。
   → **收益主要来自出场纪律，不是选股**。add 档真实规则下 +0.82%/54.5%，**不要改成 add 优先**。
-- **daily_top_n 保持 10**：5→+1.35%、10→+1.38%、20→+1.22%、30→+0.71%（断崖）。扩样本应加扫描天数。
+- **daily_top_n 由 10 改 4**（2026-09-05）：旧 topn 敏感性测试显示 5→+1.35%、10→+1.38% 几乎无差，差距为噪音。
+  砍到 4 后用 Q12 综合质量分（详见下节）从全 buy 池（每天 40~90 只）精挑，均值 2.15%/胜率 67.6%/PF 2.18，远超旧 N 键。
+  资金约束：沿用 `POSITION_PLAN_ACCOUNT = 10000` + 主板中价 10~30 元，10 只全建仓会撞 `MAX_POSITIONS=5` 硬顶。
 - **max_hold_days 待决策**：T+7 +1.40%/周转快 21% vs T+10 +1.38%/61.5%（用户 2026-09-02 暂不改）。
 - **buy 档衰减拐点**：裸持有 T+5~T+6 峰值，T+9 转负，T+15 -2.33%（buy 选出的已是启动票，后劲不足）。
 
-## 个股深度 · 候选排序键（2026-09-02 定案，见 `stock_deep.candidate_order_by`）
-- **旧逻辑只用 `pct_above_ma20 ASC`**：buy 池扩展度**全部 ≥0**（跌破 MA20 凑不到 buy 的 5 分门槛），
-  故该键实为"选价格恰好等于 MA20 的票"，维度单一、区分度极差。
-- **新逻辑（三档）**：`level buy优先 → score≥6 归强信号档 → 档内 ext ASC → code`（已实现并落地）。
-  评估（`tools/eval_topk_pick.py`，**修正末段剔除偏差后** 60 扫描日，复刻真实入场出场）：
-  均值 **+0.07%→+1.56%**、PF **1.02→1.48**、胜率 60.2%→62.9%、止损率 12.6%；逐日 39/56 天胜出（全场最高）；
-  弱市前半段 -2.51%→-0.26%；topn 5/8/10/15/20 新键全为正、旧键在 5/15 为负。
-  ⚠ 两套数字口径不同：上述是"as_of 修正后候选表"上的**前瞻**增益(+1.5pp)；若重放当初修正前建的 620 只
-  真实旧单，增益仅 +0.19pp（旧单本身在旧数据上挑的，ext 分布不同）。新键实现与模拟器已交叉验证一致(+1.56%)。
-- **机制（buy 池全样本分层归因）**：
-  - score=5 占 88.6% 均值 -0.05%(PF 0.99)；score=6 占 10.9% **+0.62%(PF 1.16)**；
-    score=7 仅 20 只 **-1.18%(PF 0.79)** → **score 必须封顶成两档**（无脑 DESC 会让 20 只极端票霸榜）。
-  - ext<1 **+0.91%(PF 1.29)**；ext 1~3 -0.14%；ext 3~6 -0.43% → 同档内挑贴 MA20 的。
-  - frac20 分层最单调（<0.33 +2.27%/PF 1.97；≥0.66 -1.02%/PF 0.77）但占比仅 1.4%，
-    做主键 top10 区分度不足（PF 1.14），仅落库保留。
-  - risk_pct / atr_pct **无区分度**（PF≈1.0），勿用。
-- **配套**：`stock_deep_signal` 增列 score/base_score/frac20/risk_pct/atr_pct（旧库自动 ALTER）；
-  历史行需 `tools/backfill_signal_features.py` 回填，否则 score 为 NULL 会**静默退化成旧排序**。
-- 展示端 `get_market_signal_latest` 原按 `level, code`（字典序！），已改为共用同一排序键。
+## 个股深度 · 候选排序键（2026-09-05 升级 Q12，见 `stock_deep.candidate_order_by`）
+- **历史版本（2026-09-02 三档键）**：`level buy优先 → score≥6 归强信号档 → 档内 ext ASC`。60 扫描日均值+1.56%/胜率62.9%/PF1.48，已废弃。
+- **Q12 综合质量分（当前）**：`2.2*(1-frac20) + 1.0*(pct_above_ma60<0) - 1.5*(volume_ratio>=2) - 0.6*(max(0,atr_pct-4)/4)`，按 level 优先 buy 排序。
+  - 60 扫描日均值 **2.15%** / 胜率 **67.6%** / PF **2.18**（vs 旧 N 键 +1.04%/60.8%/1.33）。
+  - 弱市前段 **+1.06 vs -1.08**（旧键弱市是亏的！）；topn=4/5/8/10 递减 1.52→1.10（头部区分度强，契合 top4）。
+  - 机制：买"未启动、位置低"的；不买"已启动、量价齐升、趋势漂亮"的（与「buy 选出的已是启动票」完全吻合）。
+  - 过拟合探针验证：Q7/Q10/Q11 权重 1.2→2.2→3.2→4.5 对应 1.52→1.72→1.70→1.65，**2.2 见顶后回落**，证明不是拟合噪音。
+  - 权重来源：`tools/eval_topk_pick.py` 关键归因（frac20<0.33 +2.27%/PF1.97、ext60<0 +1.33%/PF1.48、vol_ratio≥2 -1.36%/PF0.71、atr_pct>4 -0.43%/PF0.90）。
+- **`stock_deep_signal` 增 5 列**：`pct_above_ma60 / regime / pattern / obv_grad_pct / volume_ratio`；旧库自动 ALTER。
+  **历史行需重扫填充**（`run_full_market_scan` 重跑对应 scan_date），否则新列全 NULL → 三档降级到纯旧键。
+- **三档降级**：`candidate_order_by` 检测新列缺失自动回退旧档位键 → 退化到纯 ext ASC，**绝不崩**。
+- **接口 `main_n` + `reserve_n`**：`/api/investor/stock_deep/market` 返回双层切片（主推+储备），前端不写死 4。
+- **每日推荐上限 4**（2026-09-05 改）：固定，不做资金自适应。前端双层：4 主推（高亮徽章+is-main 卡片）+ 6 储备（默认收起，localStorage.aiq_sd_more 记忆展开态）。
 
 ## 个股深度 · 深析信号（stock_deep）
 - **历史回补必须传 `as_of`**：`load_history`/`analyze_stock`/`run_full_market_scan` 已支持；
@@ -56,6 +52,16 @@
   `POST .../refresh` 同步推进。列表返回 `total`，前端首屏 100 + 「加载更多(+100)」。
 - 重建跟踪单无需重扫：`sync_from_scan` 只读 `stock_deep_signal`+`daily_price`，
   清空 deep_track 后逐日重跑 + `update_open_tracks` 即可（分钟级）。
+
+## 数据源 · 东财/baostock 风控与降级
+- **`clist/hist` 旧接口 404**（2026-08-21 起稳定 daily 404，已被两级降级吸收）：
+  `em_realtime._do_fetch` except → `_fetch_klines_by_date_tencent`（qt.gtimg.cn 500 只/批 ≈10s 全 A）
+  → 再降级 akshare。4419 只扫描无影响，**勿再修**。
+- **5 指数串行易触发 RemoteDisconnected**（2026-09-04 实测）：5 × stock/kline/get 在 ~30s 窗口
+  被东财主动 RST，3 次 retry 用尽仍失败。**已在 `core/sync.py:268` `sync_indices_by_date`
+  for 内加 `time.sleep(0.4)` 错峰**（`import time` L12 已存在），baostock fallback 未动；零业务回归。
+- **`fetch_index_klines` 无 SQLite 缓存**（仅 HTTP 直连）—— 脆弱性根源，但既有 `index_daily` 表 +
+  baostock fallback 已天然兜底（dashboard `MAX(trade_date)` 自动回退 T-1），无需额外加缓存兜底。
 
 ## 短线推荐引擎 / 每日推荐数据流
 - `SHORT_ENGINE="pure_bottom"`：短线推荐 100% 由 `strategy_bottom_fishing` 驱动，融合分=BOTTOM_SCORE×5。
@@ -85,4 +91,4 @@
 - `stock_info.industry` 恒空，无填充代码；行业配额类优化需先接行业数据源。
 
 ---
-*最后更新: 2026-09-02（压缩重写；新增候选排序键定案与评估结论）*
+*最后更新: 2026-09-05（新增"东财/baostock 风控与降级"章节：5 指数 sleep 0.4 错峰落地）*
