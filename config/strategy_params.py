@@ -192,7 +192,14 @@ EXTENSION_FILTER = {
 #       short_trailing_pct / short_max_hold_days），填值则本模块独立生效。
 DEEP_TRACK = {
     "enabled": True,
-    "daily_top_n": 10,          # 每日最多跟踪几只候选（全市场每天筛出 1000+ 只，必须收敛）
+    # 每日「主推」只数：这些才会真正建跟踪单（等价于"今天真金白银该买哪几只"）。
+    # ⚠ 2026-09-05 由 10 → 4，用户拍板：账户约 1 万（personal_config.POSITION_PLAN_ACCOUNT），
+    #   按主板 1 手 100 股算，10 只中价股即满仓、无加仓余地且撞 MAX_POSITIONS=5 硬顶。
+    # 注意：本值**不是**"从 10 个候选里切前 4"——sync_from_scan 与
+    #   stock_deep.candidate_order_by 都是对**整个 buy 池**（每天 40~90 只）排序后取前 N，
+    #   前端展示的 10 只是 /stock_deep/market?limit=10 的独立查询，与本值无关。
+    #   故前端呈「4 主推 + 6 信息储备」两层：主推建单，储备只看不建。
+    "daily_top_n": 4,
     "entry_window_days": 5,     # 信号后最多等几个交易日回踩买点，超时判失效
     "max_hold_days": None,      # None → 跟随 short_max_hold_days（当前 10 个交易日）
     "stop_loss_pct": None,      # 仅当推荐自带止损缺失时回退；None → 跟随 short_stop_loss
@@ -516,6 +523,36 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         # 1=降序(趋势确认优先) / 0=升序(默认)。
         "default": 0, "type": int,
         "min": 0, "max": 1, "label": "短线候选排序方向(1=扩展度降序/0=升序)",
+    },
+    "short_pullback_entry": {
+        # 抄底类短线（strategy != '隔日动量'）启用「回踩确认入场」（2026-09-05 落地）：
+        # 出场跟踪窗（7-20~9-04）52 笔短线复盘显示融合线 47 笔均值 -1.32%、T+1 上涨仅 47%、
+        # 止损单中仅 4/21 曾浮盈≥5%——次日开盘无条件建仓 = 追反弹高点，负期望根源。
+        # 改为 deep_track 已实证的入场纪律（+1.32%/胜率61.5%）：T+1 起 entry_window_days
+        # 个交易日内 low 触及买点（信号日收盘价）才成交，成交价 = min(买点, 当日开盘)；
+        # 窗口内未回踩则放弃（no_fill，不计入收益统计）。隔日动量豁免（动量 alpha 依赖
+        # 次日开盘建仓，等回踩会错过行情）。0=关闭回退次日开盘口径。
+        "default": 1, "type": int,
+        "min": 0, "max": 1, "label": "抄底短线回踩确认入场(1=开/0=关)",
+    },
+    "short_entry_window_days": {
+        # 回踩确认入场窗口（2026-09-05 落地）：信号日 T 之后最多等 N 个交易日，
+        # 期间任一日 low <= 买点（信号日收盘）即按 min(买点, 当日开盘) 成交；
+        # 超期未触发判 no_fill 放弃。与 DEEP_TRACK.entry_window_days=5 同源
+        # （个股深度跟踪回测 +1.32%/胜率61.5% 的入场口径）。
+        "default": 5, "type": int,
+        "min": 1, "max": 10, "label": "短线回踩入场窗口(交易日)",
+    },
+    "short_observe_bottom": {
+        # 抄底线「短线融合」降为观察线（2026-09-06 用户决策）：不占短线名额、
+        # 不入推荐复盘/出场跟踪统计（stock_signal 中信号保留，仍可单独评估）。
+        # 依据：出场跟踪窗（7-20~9-04）48 笔融合线累计 -49.0%（均值 -1.02%/笔），
+        # 回踩确认入场改造（short_pullback_entry）仅改善约 11pp，仍负期望——
+        # score_rebound 奖励反弹后的票，信号池本身无隔日优势（T+1 上涨仅 47%）；
+        # 唯一正期望线「隔日动量」5 笔 +2.27%/笔（+11.3% 累计）。与「缩量回踩」
+        # 停用（2026-08-26）同一处理模式：SQL 三处出口排除，置 0 可恢复占名额。
+        "default": 1, "type": int,
+        "min": 0, "max": 1, "label": "抄底融合线降观察(1=不占名额/0=恢复)",
     },
     "mid_partial_tp": {
         # 中线移动止盈启动线（2026-08 落地：中/长线同短线改为移动止盈，让利润奔跑）：

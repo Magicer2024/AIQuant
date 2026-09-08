@@ -245,34 +245,124 @@ def _exit_trailing_params(horizon: str) -> tuple:
     return get_param("long_trailing_pct"), get_param("long_partial_tp"), None
 
 
-def _split_continuous_segments(seg: list, df, horizon: str) -> list:
+def _short_pullback_enabled() -> bool:
+    """抄底类短线「回踩确认入场」开关（2026-09-05 落地，deep_track 实证口径）。"""
+    try:
+        return bool(int(get_param("short_pullback_entry")))
+    except Exception:
+        return False
+
+
+def _is_pullback_line(horizon: str, strategy) -> bool:
+    """该信号是否走回踩确认入场：仅抄底类短线（strategy != '隔日动量'）。
+
+    隔日动量豁免——动量 alpha 依赖次日开盘建仓，等回踩会直接错过行情；
+    参数 short_pullback_entry=0 时整体回退次日开盘口径。
+    """
+    return (horizon == "short" and _short_pullback_enabled()
+            and (strategy or "") != "隔日动量")
+
+
+def _short_pullback_fill(df, scan_date, buy_price, window: int):
+    """回踩成交模拟：信号日后 window 个交易日内 low 触及买点才成交。
+
+    买点 = 信号日收盘价（stock_signal.buy_price）；成交价 = min(买点, 当日开盘)。
+    口径与 strategy/deep_tracker._try_fill 一致（个股深度跟踪已实证
+    +1.32%/胜率61.5% 的入场纪律）。
+    返回 (fill_ts, fill_price, pending)：
+      - 成交           → (ts, price, False)
+      - 未成交+窗口走完 → (None, None, False)  → 放弃（expired，不计入收益统计）
+      - 未成交+窗口未走完 → (None, None, True) → 等待（watching）
+    """
+    import pandas as pd
+    if df is None or df.empty or not buy_price or float(buy_price) <= 0:
+        return None, None, False
+    if hasattr(df.index, "strftime"):
+        after = df[df.index > pd.Timestamp(str(scan_date)[:10])]
+    else:
+        after = df[df.index > str(scan_date)[:10]]
+    if after.empty:
+        return None, None, True
+    for ts, row in after.head(window).iterrows():
+        low = row.get("low")
+        if low is None or pd.isna(low):
+            continue
+        if float(low) <= float(buy_price):
+            open_ = row.get("open")
+            if open_ is None or pd.isna(open_):
+                open_ = buy_price
+            return ts, round(min(float(buy_price), float(open_)), 2), False
+    return None, None, len(after) < window
+
+
+def _df_prev_day(df, ts):
+    """df 中 ts 的前一个交易日（str）。用于 evaluate_exit_by_prices 的
+    entry_date 传参：传 fill 日的前一交易日 → 其 after 首行恰为 fill 日，
+    与 deep_tracker「j=1 = 建仓日，T+1 不判出场」语义完全对齐。"""
+    try:
+        pos = df.index.get_loc(ts)
+    except Exception:
+        return None
+    if isinstance(pos, int) and pos > 0:
+        return str(df.index[pos - 1])[:10]
+    return None
+
+
+def _split_continuous_segments(seg: list, df, horizon: str, entry_mode: str = "open") -> list:
     """将一段连续推荐按卖出断点拆分。
 
     段内持仓若已在某交易日卖出（触发止损/止盈/到期），卖出日（含）之后的新推荐
     属于新一轮交易，不能与卖出前的推荐合并展示（如：07-31 推荐、08-03 更新止损、
     08-04 触发止损卖出，则 08-04 的新推荐应独立成段）。递归拆分直至无断点。
+
+    entry_mode="pullback"（抄底类短线回踩确认入场，2026-09-05）：
+      - 段首推荐起 window 个交易日内未回踩买点 → 整段未成交（expired/watching），
+        标记记在 seg[0]["_pullback_state"]，不做卖出拆分；
+      - 成交 → 以回踩成交价为建仓价、建仓日为持仓起点评估出场（entry_date 传
+        建仓日前一交易日，使 evaluate_exit_by_prices 的 j=1 恰为建仓日），
+        卖出日（含）后的新推荐拆为新一轮（新一轮重新等回踩）。
     """
     if len(seg) <= 1 or df is None or df.empty:
         return [seg]
     import pandas as pd
     from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
 
+    # 复制为 dict（元素可能是只读 sqlite3.Row；回踩状态标记需可写）
+    seg = [dict(s) for s in seg]
     first, last = seg[0], seg[-1]
-    if hasattr(df.index, 'strftime'):
-        after = df[df.index > pd.Timestamp(first["scan_date"])]
-    else:
-        after = df[df.index > first["scan_date"]]
-    if after.empty:
-        return [seg]
-    _f = after.iloc[0]
-    entry_price = float(_f["open"]) if _f["open"] else (
-        float(_f["close"]) or first["buy_price"])
+
+    entry_date_arg = first["scan_date"]
+    if entry_mode == "pullback":
+        from config.strategy_params import get_param as _gp
+        window = max(1, int(_gp("short_entry_window_days")))
+        fill_ts, fill_price, pending = _short_pullback_fill(
+            df, first["scan_date"], first["buy_price"], window)
+        if fill_ts is None:
+            seg[0]["_pullback_state"] = "watching" if pending else "expired"
+            return [seg]
+        prev_day = _df_prev_day(df, fill_ts)
+        if prev_day is None:
+            entry_mode = "open"   # 极端情形（df 首行即成交日）回退开盘口径
+        else:
+            entry_price = fill_price
+            entry_date_arg = prev_day
+
+    if entry_mode == "open":
+        if hasattr(df.index, 'strftime'):
+            after = df[df.index > pd.Timestamp(first["scan_date"])]
+        else:
+            after = df[df.index > first["scan_date"]]
+        if after.empty:
+            return [seg]
+        _f = after.iloc[0]
+        entry_price = float(_f["open"]) if _f["open"] else (
+            float(_f["close"]) or first["buy_price"])
 
     # 用段内最新止损/止盈评估整段持仓（三周期均开启移动止盈，与出场跟踪同口径）
     _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
     adv = evaluate_exit_by_prices(
         entry_price=entry_price,
-        entry_date=first["scan_date"],
+        entry_date=entry_date_arg,
         df=df,
         stop_loss=last["stop_loss"],
         take_profit=last["take_profit"],
@@ -294,7 +384,7 @@ def _split_continuous_segments(seg: list, df, horizon: str) -> list:
     if split_at is None or split_at == 0:
         return [seg]
     # 注意：返回的是「段列表」——前半段包成单元素列表再与递归结果拼接
-    return [seg[:split_at]] + _split_continuous_segments(seg[split_at:], df, horizon)
+    return [seg[:split_at]] + _split_continuous_segments(seg[split_at:], df, horizon, entry_mode)
 
 
 def _get_exit_advice(d: dict) -> Optional[dict]:
@@ -343,6 +433,36 @@ def _get_exit_advice(d: dict) -> Optional[dict]:
         if not entry_price or entry_price <= 0:
             return None
         hz = d.get("horizon") or "short"
+        # 抄底类短线：回踩确认入场（2026-09-05，与出场跟踪/复盘同口径）
+        if _is_pullback_line(hz, d.get("strategy")):
+            from config.strategy_params import get_param as _gp
+            window = max(1, int(_gp("short_entry_window_days")))
+            fill_ts, fill_price, pending = _short_pullback_fill(
+                df, scan_date, d.get("buy_price"), window)
+            if fill_ts is None:
+                if pending:
+                    return {"status": "watching",
+                            "reason": (f"等待回踩买点 {d.get('buy_price')}"
+                                       f"（{window} 个交易日内触及才建仓）"),
+                            "detail": {}}
+                return {"status": "expired",
+                        "reason": "回踩窗口内未触及买点，未成交（放弃）",
+                        "detail": {}}
+            prev_day = _df_prev_day(df, fill_ts)
+            if prev_day is not None:
+                _trail, _partial, _stop_cap = _exit_trailing_params(hz)
+                return evaluate_exit_by_prices(
+                    entry_price=fill_price,
+                    entry_date=prev_day,
+                    df=df,
+                    stop_loss=d.get("stop_loss"),
+                    take_profit=d.get("take_profit"),
+                    max_hold_days=get_max_hold(hz),
+                    trailing_pct=_trail,
+                    partial_tp=_partial,
+                    stop_cap_pct=_stop_cap,
+                )
+            # 极端情形（df 首行即成交日）→ 落到下方开盘口径
         _trail, _partial, _stop_cap = _exit_trailing_params(hz)
         advice = evaluate_exit_by_prices(
             entry_price=entry_price,
@@ -416,11 +536,14 @@ def today_recommendations():
         # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按当日 regime 自动切换，
         # 隔日动量豁免；参数 >=99 禁用）
         from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
-                                          short_market_gate_sql)
+                                          short_market_gate_sql,
+                                          short_observe_bottom_sql)
         t1_cond, t1_params = short_t1_filter_sql(conn, scan_date, scan_date)
         # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量（正期望 alpha 线），
         # 抄底/回踩类一律不推；与出场跟踪/复盘入库同口径。
         mk_cond, mk_params = short_market_gate_sql(conn, scan_date, scan_date)
+        # 抄底融合线降观察（2026-09-06）：不占短线名额（三处出口同口径）
+        ob_cond, ob_params = short_observe_bottom_sql()
         for hz in horizons:
             pe_filter = ""
             if hz == "long" and has_pe_ttm:
@@ -429,8 +552,8 @@ def today_recommendations():
             gate_sql = ""
             gate_params: list = []
             if hz == "short":
-                gate_sql = f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond}"
-                gate_params = [gate, *t1_params, *mk_params]
+                gate_sql = f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond} AND {ob_cond}"
+                gate_params = [gate, *t1_params, *mk_params, *ob_params]
             # short 组选择标准（S4 口径 + 龙虎榜动量优先）：
             #   1) 隔日动量信号（独立正期望 alpha 线，fusion≥30 天然过门控）优先占名额；
             #   2) 抄底票按扩展度排序补足剩余名额（方向由 short_ext_sort_desc 控制，
@@ -911,6 +1034,10 @@ def exit_advice():
          持仓天数从最早一次累计（买入价=最早推荐日次日开盘价）、止损/止盈按最新一次判定；
          开始持有 = 推荐日，买入价 = 推荐日之后首个交易日的开盘价；
          卖出条件 = 推荐自带止损/止盈价 + 按周期持仓上限（短线10/中线60/长线不限）。
+         抄底类短线（strategy != '隔日动量'，short_pullback_entry=1）为回踩确认入场：
+         T+1 起 short_entry_window_days 个交易日内 low 触及买点（信号日收盘价）才成交，
+         成交价 = min(买点, 当日开盘)；未回踩 → watching/expired，不计入收益统计
+         （2026-09-05 落地，根因：次日开盘追反弹高点为负期望，见推荐复盘诊断）。
     返回 {items(平铺), groups:{short,mid,long}, summary, start_date}，状态 hold/clear。
     """
     try:
@@ -946,17 +1073,20 @@ def exit_advice():
             # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
             # 隔日动量豁免；参数 >=99 禁用）——各信号日按当天历史 regime 判定
             from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
-                                              short_market_gate_sql)
+                                              short_market_gate_sql,
+                                              short_observe_bottom_sql)
             t1_cond, t1_params = short_t1_filter_sql(conn, EXIT_TRACK_START_DATE)
             # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量，与今日推荐同口径
             mk_cond, mk_params = short_market_gate_sql(conn, EXIT_TRACK_START_DATE)
+            # 抄底融合线降观察（2026-09-06）：不占短线名额（三处出口同口径）
+            ob_cond, ob_params = short_observe_bottom_sql()
             horizon_specs = {
                 # short：龙虎榜动量信号优先占名额，抄底票按扩展度排序补足
                 # （方向由 short_ext_sort_desc 控制，见 short_order_clause；
                 # 与今日推荐/推荐复盘同口径）
                 "short": (short_order_clause(),
-                          f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond}",
-                          [gate, *t1_params, *mk_params]),
+                          f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond} AND {ob_cond}",
+                          [gate, *t1_params, *mk_params, *ob_params]),
                 "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
                 "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
             }
@@ -1059,7 +1189,11 @@ def exit_advice():
                         pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
                         if rows else None
                     )
-                segments.extend(_split_continuous_segments(seg, _df_cache.get(code), seg[0]["horizon"]))
+                hz0 = seg[0]["horizon"]
+                st0 = seg[0]["strategy"]
+                mode = "pullback" if _is_pullback_line(hz0, st0) else "open"
+                segments.extend(_split_continuous_segments(
+                    seg, _df_cache.get(code), hz0, mode))
 
             results = []
             for seg in segments:
@@ -1071,6 +1205,64 @@ def exit_advice():
                 df = _df_cache.get(code)
                 if df is None or df.empty:
                     continue
+
+                # ── 抄底类短线：回踩确认入场（2026-09-05，与复盘/今日推荐同口径）──
+                if _is_pullback_line(horizon, last["strategy"]):
+                    from config.strategy_params import get_param as _gp
+                    window = max(1, int(_gp("short_entry_window_days")))
+                    fill_ts, fill_price, pending = _short_pullback_fill(
+                        df, first["scan_date"], first["buy_price"], window)
+                    if fill_ts is None:
+                        st = "watching" if pending else "expired"
+                        results.append({
+                            "code": code,
+                            "name": last["name"],
+                            "scan_date": last["scan_date"],
+                            "horizon": horizon,
+                            "strategy": last["strategy"],
+                            "entry_price": round(float(first["buy_price"] or 0), 2),
+                            "fusion_score": round(last["fusion_score"] or 0, 1),
+                            "status": st,
+                            "reason": (
+                                f"等待回踩：{window} 个交易日内触及买点 "
+                                f"{first['buy_price']} 才建仓"
+                                if pending else
+                                f"{window} 个交易日内未回踩买点，未成交（放弃）"),
+                            "detail": {"entry_date": None, "hold_days": 0,
+                                       "current_pnl_pct": None},
+                        })
+                        continue
+                    prev_day = _df_prev_day(df, fill_ts)
+                    if prev_day is not None:
+                        _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
+                        advice = evaluate_exit_by_prices(
+                            entry_price=fill_price,
+                            entry_date=prev_day,
+                            df=df,
+                            stop_loss=last["stop_loss"],
+                            take_profit=last["take_profit"],
+                            max_hold_days=get_max_hold(horizon),
+                            trailing_pct=_trail,
+                            partial_tp=_partial,
+                            stop_cap_pct=_stop_cap,
+                        )
+                        detail = dict(advice.get("detail") or {})
+                        if len(seg) > 1:
+                            detail["first_scan_date"] = first["scan_date"]
+                        results.append({
+                            "code": code,
+                            "name": last["name"],
+                            "scan_date": last["scan_date"],
+                            "horizon": horizon,
+                            "strategy": last["strategy"],
+                            "entry_price": round(fill_price, 2),
+                            "fusion_score": round(last["fusion_score"] or 0, 1),
+                            "status": advice["status"],
+                            "reason": advice["reason"],
+                            "detail": detail,
+                        })
+                        continue
+                    # 极端情形（df 首行即成交日）→ 落到下方开盘口径
 
                 # 买入价 = 最早推荐日的下一个交易日开盘价（真实建仓成本）
                 if hasattr(df.index, 'strftime'):
@@ -1136,6 +1328,8 @@ def exit_advice():
             segs = [r for r in results if r["horizon"] == hz]
             clears = [r for r in segs if r["status"] == "clear"]
             holds = [r for r in segs if r["status"] == "hold"]
+            watches = [r for r in segs if r["status"] == "watching"]
+            expireds = [r for r in segs if r["status"] == "expired"]
             cp = [v for v in (_seg_pnl(r) for r in clears) if v is not None]
             hp = [v for v in (_seg_pnl(r) for r in holds) if v is not None]
             allp = cp + hp
@@ -1143,6 +1337,10 @@ def exit_advice():
                 "segments": len(segs),
                 "hold": len(holds),
                 "clear": len(clears),
+                # 回踩确认入场（2026-09-05）：待回踩/未成交未建仓，
+                # 不计入收益与胜率统计，仅计数展示
+                "watching": len(watches),
+                "expired": len(expireds),
                 # 已清仓：平均出场收益与胜率（相对建仓价，含止损/止盈/到期出场）
                 "clear_mean_pct": round(sum(cp) / len(cp), 2) if cp else None,
                 "clear_win_rate": round(sum(1 for v in cp if v > 0) / len(cp) * 100, 1) if cp else None,
@@ -2338,11 +2536,23 @@ def stock_deep_market():
                 pool = list(codes.keys())[:60]
                 items = scan_market_buy(conn, pool, limit)
                 source = "pool"
+        # main_n = 当日真正建跟踪单（要花钱买）的只数，取自 DEEP_TRACK.daily_top_n。
+        # 前端据此把列表切成「主推(main_n) + 信息储备」两层 —— 配置单一来源，
+        # 避免前端再写死一个 4 导致改了配置两边不一致。
+        try:
+            from config.strategy_params import DEEP_TRACK as _DT
+            main_n = int(_DT.get("daily_top_n", 4) or 4)
+        except Exception:
+            main_n = 4
+        reserve_n = max(0, len(items) - main_n)
         return ok(_sanitize({
             "items": items,
             "source": source,
             "scan_date": scan_date,
-            "note": "source=full 为全市场深析扫描落库结果；source=pool 为已关注池(今日推荐+自选+持仓)结果",
+            "main_n": max(1, min(main_n, len(items) or main_n)),
+            "reserve_n": reserve_n,
+            "note": "source=full 为全市场深析扫描落库结果；source=pool 为已关注池(今日推荐+自选+持仓)结果；"
+                    "main_n 为当日主推（实际建跟踪单）只数，其后 reserve_n 只为信息储备候选",
         }))
     except Exception as e:
         return fail(f"明日候选计算失败: {e}", 500)
