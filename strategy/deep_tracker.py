@@ -220,8 +220,11 @@ def sync_from_scan(conn: sqlite3.Connection, scan_date: Optional[str] = None) ->
         return {"scan_date": None, "added": 0, "skipped": 0, "candidates": 0}
 
     # 排序取头部：见 _rank_order_by 的评估依据（级别 → 强信号档 → 贴 MA20 → 代码稳定序）
+    # 板块过滤与面板 1 的 get_market_signal_latest 同一条件 —— 两边必须一致，
+    # 否则「明日买入候选」看到的和「推荐跟踪」建单的是两批票。
     top_n = _daily_top_n()
-    sql = f"""SELECT * FROM stock_deep_signal WHERE scan_date = ?
+    from strategy.stock_deep import candidate_board_filter
+    sql = f"""SELECT * FROM stock_deep_signal WHERE scan_date = ? {candidate_board_filter()}
               ORDER BY {_rank_order_by(conn)}"""
     if top_n:
         sql += f" LIMIT {int(top_n)}"

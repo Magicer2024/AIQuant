@@ -39,6 +39,17 @@
         .sd-market-reasons{display:flex;gap:4px;flex-wrap:wrap;margin-top:auto}
         .sd-market-reasons .reason-chip{font-size:10px;padding:1px 6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .sd-market-empty-col{grid-column:1/-1;text-align:center;padding:30px 14px;color:var(--text-muted);font-size:12px}
+        /* 双层候选：主推（实际建仓，资金有限只做这批） / 信息储备（展开看，可不建仓） */
+        .sd-market-card.is-main{border-color:rgba(var(--accent-rgb),.42);background:linear-gradient(180deg,rgba(var(--accent-rgb),.055),transparent 62%)}
+        .sd-market-card.is-main:hover{box-shadow:0 0 0 1px rgba(var(--accent-rgb),.32)}
+        .sd-badge-main{font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(var(--accent-rgb),.15);color:var(--accent);font-weight:700;letter-spacing:.4px;flex:none}
+        .sd-market-card.is-reserve{opacity:.8}
+        .sd-market-card.is-reserve:hover{opacity:1}
+        .sd-sec-label{font-size:11px;color:var(--text-muted);margin:2px 0 6px;display:flex;align-items:center;gap:5px}
+        .sd-sec-label b{color:var(--text-secondary);font-weight:600}
+        .sd-more-wrap{margin-top:9px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+        .sd-more-toggle{font-size:11px;color:var(--text-muted);background:transparent;border:1px dashed var(--border);border-radius:6px;padding:4px 11px;cursor:pointer;transition:color .15s,border-color .15s;font-family:inherit}
+        .sd-more-toggle:hover{color:var(--accent);border-color:var(--accent)}
         .sd-scan-progress{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px}
         .sd-scan-progress .row{display:flex;justify-content:space-between;font-size:12px;color:var(--text-secondary);margin-bottom:5px}
         .sd-scan-progress .bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
@@ -97,7 +108,11 @@
         /* 个股深度 · 推荐跟踪（买点建仓 → 卖点出场 → 每笔持仓与收益） */
         .sd-track-head{display:flex;align-items:center;gap:8px;margin:14px 0 8px;flex-wrap:wrap}
         .sd-track-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-        .sd-track-stat{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:6px 10px;min-width:84px}
+        .sd-track-stat{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:6px 10px;min-width:84px;transition:border-color .15s,background .15s}
+        .sd-track-stat.clickable{cursor:pointer}
+        .sd-track-stat.clickable:hover{border-color:var(--accent)}
+        .sd-track-stat.active{border-color:var(--accent);background:rgba(var(--accent-rgb),.10)}
+        .sd-track-stat.active .lbl{color:var(--accent)}
         .sd-track-stat .lbl{font-size:10px;color:var(--text-muted);letter-spacing:.03em}
         .sd-track-stat .val{font-size:14px;font-weight:600;color:var(--text-primary);font-family:var(--font-mono);margin-top:1px}
         .sd-track-stat .val.pos{color:var(--positive)}
@@ -915,7 +930,9 @@ function renderPickExitEmbed(hz, d) {
 // 紧凑版出场跟踪（嵌入到推荐小板块底部）
 function renderPickExitMini(hz, list, perf) {
     var held = list.filter(function (it) { return it.status === 'hold'; }).length;
-    var cleared = list.length - held;
+    var cleared = list.filter(function (it) { return it.status === 'clear'; }).length;
+    var watching = list.filter(function (it) { return it.status === 'watching'; }).length;
+    var expired = list.filter(function (it) { return it.status === 'expired'; }).length;
     var expanded = !!EXIT_EXPANDED[hz];
     var meta = EXIT_HORIZON_META[hz] || { icon: '📊', label: hz };
     return '<div class="pick-exit-mini">' +
@@ -925,6 +942,8 @@ function renderPickExitMini(hz, list, perf) {
             '<span class="pick-exit-chips">' + exitStatChip(hz, perf) +
                 '<span class="exit-group-stat">持有 ' + held + '</span>' +
                 '<span class="exit-group-stat">已卖出 ' + cleared + '</span>' +
+                (watching > 0 ? '<span class="exit-group-stat">待回踩 ' + watching + '</span>' : '') +
+                (expired > 0 ? '<span class="exit-group-stat" style="color:var(--text-muted)">未成交 ' + expired + '</span>' : '') +
             '</span>' +
             '<button class="pick-detail-btn pick-exit-toggle' + (expanded ? ' active' : '') + '"' +
                     ' onclick="togglePickExit(\'' + hz + '\')"' +
@@ -958,7 +977,7 @@ function savePickExpandState(st) {
 let PICK_EXPANDED = loadPickExpandState();
 
 // 简略行：一行一只，只保留 名称/代码 + 综合分 + 买入/止盈/止损 + 盈亏比
-function renderPickMiniRow(it) {
+function renderPickMiniRow(it, hz) {
     const ap = it.action_plan || {};
     const sg = it.signal || {};
     const num = v => (v != null ? Number(v).toFixed(2) : '--');
@@ -971,13 +990,17 @@ function renderPickMiniRow(it) {
         ? `<span class="rr-tag ${rrCls}">${rr.toFixed(2)}</span>`
         : '<span style="color:var(--text-muted);font-size:11px">--</span>';
     const label = (sg.label || '').replace(/"/g, '');
+    // 抄底类短线 = 回踩确认入场：买入价语义是「回踩买点」，非次日直接买
+    const pullback = hz === 'short' && it.strategy && it.strategy !== '隔日动量';
+    const pullbackHtml = pullback
+        ? '<span class="strategy-badge" style="background:rgba(255,170,60,.15);color:#ffaa3c" title="回踩确认入场：5个交易日内价格回踩至买点才建仓，未回踩则放弃">回踩买</span>' : '';
     return `<div class="pick-mini-row" onclick="openKline('${it.code}')" title="点击查看 K 线">
         <div class="pm-stock">
-            <div class="pm-name">${sg.emoji ? `<span class="pm-sig" title="${label}">${sg.emoji}</span>` : ''}${it.name || it.code}${it.strategy ? `<span class="strategy-badge">${it.strategy}</span>` : ''}</div>
+            <div class="pm-name">${sg.emoji ? `<span class="pm-sig" title="${label}">${sg.emoji}</span>` : ''}${it.name || it.code}${it.strategy ? `<span class="strategy-badge">${it.strategy}</span>` : ''}${pullbackHtml}</div>
             <div class="pm-code">${it.code}${pctHtml}</div>
         </div>
         <div class="pm-score">${it.fusion_score != null ? it.fusion_score : '--'}</div>
-        <div class="pm-price pm-buy" title="建议买入">${num(ap.entry_price)}</div>
+        <div class="pm-price pm-buy" title="${pullback ? '回踩买点（5个交易日内触及才建仓）' : '建议买入'}">${num(ap.entry_price)}</div>
         <div class="pm-price pm-tp" title="止盈目标">${num(ap.take_profit)}</div>
         <div class="pm-price pm-stop" title="止损">${num(ap.stop_loss)}</div>
         <div class="pm-rr" title="盈亏比">${rrHtml}</div>
@@ -994,7 +1017,7 @@ function renderPickGroupBody(g, list) {
     }
     return `<div class="pick-mini-list">
         <div class="pick-mini-head"><span>股票</span><span>综合分</span><span>买入</span><span>止盈</span><span>止损</span><span>盈亏比</span></div>
-        ${list.map(it => renderPickMiniRow(it)).join('')}
+        ${list.map(it => renderPickMiniRow(it, g.key)).join('')}
     </div>`;
 }
 
@@ -1386,6 +1409,9 @@ async function refreshStockDeep(code, opts) {
         var resp = await RequestManager.fetch('sd-deep-' + code, API + '/investor/stock_deep/' + code);
         var data = (resp && resp.data) || {};
         _sd.data = data; _sd.code = code;
+        // 换股必须清掉锁定日与待触发的回今日定时器，两只票可能有同名交易日
+        if (_sdPinTimer) { clearTimeout(_sdPinTimer); _sdPinTimer = null; }
+        _sdPinnedDate = null; _sdPinMode = null; _sdPress = null;
         var name = data.name || code;
         // 入历史：reorder=true 置顶（新搜索）；false 保持原位置（点历史）
         if (opts.reorder) {
@@ -1413,6 +1439,12 @@ async function refreshStockDeep(code, opts) {
 }
 
 // 明日买入候选：在今日推荐+自选+持仓候选池上跑深析信号
+// 双层：前 main_n 只 = 今日主推（实际建跟踪单、真金白银买），其后 = 信息储备（展开看，资金有限可不建仓）
+// main_n 由后端按 DEEP_TRACK.daily_top_n 下发，前端不写死，避免改了配置两边不一致。
+var _sdMarketData = null;
+var _sdMoreExpanded = false;
+try { _sdMoreExpanded = localStorage.getItem('aiq_sd_more') === '1'; } catch (e) {}
+
 async function loadSdMarket() {
     var box = document.getElementById('sdMarketBox');
     if (!box) return;
@@ -1420,44 +1452,80 @@ async function loadSdMarket() {
     try {
         var resp = await RequestManager.fetch('sd-market', API + '/investor/stock_deep/market?limit=10');
         var data = (resp && resp.data) || {};
-        var items = data.items || [];
-        var src = data.source || 'pool';
-        var scanDate = data.scan_date || '';
-        var headBtn = `<button class="btn btn-sm" style="margin-left:auto" onclick="triggerSdScan()" title="每日盘后自动运行；也可手动触发一次全市场深析扫描">🔄 全市场深析</button>`;
-        var srcNote = '<span class="sd-chip-src" style="margin-left:8px">' +
-            (src === 'full'
-                ? (scanDate ? '全市场深析 · ' + scanDate : '全市场深析')
-                : '已关注池（今日推荐+自选+持仓）') + '</span>';
-        if (!items.length) {
-            box.innerHTML = `<div class="sd-market-title">⭐ 明日买入候选${srcNote}</div>` +
-                '<div class="sd-market-grid"><div class="sd-market-empty-col">暂无明日候选<br><span style="color:var(--text-muted)">可点右上「🔄 全市场深析」运行一次，或候选池为空</span></div></div>';
-            return;
-        }
-        var fmt = function(v) { return (v != null && !isNaN(v)) ? Number(v).toFixed(2) : '--'; };
-        box.innerHTML = `<div class="sd-market-title">⭐ 明日买入候选（深析信号=买入/加仓，且不追高；点击查看详情）${srcNote}${headBtn}</div>` +
-            '<div class="sd-market-grid">' +
-            items.map(function(it) {
-                var ap = it.action_plan || {};
-                var ext = it.pct_above_ma20 != null ? it.pct_above_ma20.toFixed(1) + '%' : '--';
-                var reasons = (it.reasons || []).slice(0, 2);
-                return `<div class="sd-market-card" onclick="pickSdCandidate('${it.code}')" title="${it.name} (${it.code})">
-                    <div class="sd-market-head">
-                        <span class="sd-market-name">${it.name}</span>
-                        <span class="sd-lvl-chip ${it.level==='buy'?'sd-lvl-buy':'sd-lvl-add'}">${it.label || (it.level==='buy'?'建议买入':'可加仓')}</span>
-                    </div>
-                    <div class="sd-market-meta">${it.code} · 偏离MA20 ${ext}</div>
-                    <div class="sd-market-prices">
-                        <span><b>入场</b><span class="sd-price-entry">${fmt(ap.entry_price)}</span></span>
-                        <span><b>止损</b>${fmt(ap.stop_loss)}</span>
-                        <span><b>止盈</b>${fmt(ap.take_profit)}</span>
-                    </div>
-                    <div class="sd-market-reasons">${reasons.map(function(r){return '<span class="reason-chip">'+r+'</span>';}).join('')}</div>
-                </div>`;
-            }).join('') +
-            '</div>';
+        _sdMarketData = {
+            items: data.items || [],
+            mainN: Math.max(1, parseInt(data.main_n, 10) || 4),
+            src: data.source || 'pool',
+            scanDate: data.scan_date || ''
+        };
+        _renderSdMarket();
     } catch(e) {
         box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">扫描失败：' + (e.message || e) + '</div>';
     }
+}
+
+function _sdCardHtml(it, isMain) {
+    var ap = it.action_plan || {};
+    var ext = it.pct_above_ma20 != null ? it.pct_above_ma20.toFixed(1) + '%' : '--';
+    var reasons = (it.reasons || []).slice(0, 2);
+    var fmt = function(v) { return (v != null && !isNaN(v)) ? Number(v).toFixed(2) : '--'; };
+    return `<div class="sd-market-card ${isMain ? 'is-main' : 'is-reserve'}" onclick="pickSdCandidate('${it.code}')" title="${it.name} (${it.code})">
+        <div class="sd-market-head">
+            <span class="sd-market-name">${it.name}</span>
+            ${isMain ? '<span class="sd-badge-main">主推</span>' : ''}
+            <span class="sd-lvl-chip ${it.level==='buy'?'sd-lvl-buy':'sd-lvl-add'}">${it.label || (it.level==='buy'?'建议买入':'可加仓')}</span>
+        </div>
+        <div class="sd-market-meta">${it.code} · 偏离MA20 ${ext}</div>
+        <div class="sd-market-prices">
+            <span><b>入场</b><span class="sd-price-entry">${fmt(ap.entry_price)}</span></span>
+            <span><b>止损</b>${fmt(ap.stop_loss)}</span>
+            <span><b>止盈</b>${fmt(ap.take_profit)}</span>
+        </div>
+        <div class="sd-market-reasons">${reasons.map(function(r){return '<span class="reason-chip">'+r+'</span>';}).join('')}</div>
+    </div>`;
+}
+
+function _renderSdMarket() {
+    var box = document.getElementById('sdMarketBox');
+    if (!box || !_sdMarketData) return;
+    var items = _sdMarketData.items, mainN = _sdMarketData.mainN;
+    var src = _sdMarketData.src, scanDate = _sdMarketData.scanDate;
+    var headBtn = `<button class="btn btn-sm" style="margin-left:auto" onclick="triggerSdScan()" title="每日盘后自动运行；也可手动触发一次全市场深析扫描">🔄 全市场深析</button>`;
+    var srcNote = '<span class="sd-chip-src" style="margin-left:8px">' +
+        (src === 'full'
+            ? (scanDate ? '全市场深析 · ' + scanDate : '全市场深析')
+            : '已关注池（今日推荐+自选+持仓）') +
+        ' · 仅主板（创业/科创无权限）</span>';
+    if (!items.length) {
+        box.innerHTML = `<div class="sd-market-title">⭐ 明日买入候选${srcNote}</div>` +
+            '<div class="sd-market-grid"><div class="sd-market-empty-col">暂无明日候选<br><span style="color:var(--text-muted)">可点右上「🔄 全市场深析」运行一次，或候选池为空</span></div></div>';
+        return;
+    }
+    var main = items.slice(0, mainN);
+    var rest = items.slice(mainN);
+    var html = `<div class="sd-market-title">⭐ 明日买入候选（深析信号=买入/加仓，且不追高；点击查看详情）${srcNote}${headBtn}</div>`;
+    if (main.length) {
+        html += `<div class="sd-sec-label">🎯 <b>今日主推 ${main.length} 只</b> · 资金有限建议只做这批（会自动建跟踪单）</div>` +
+            '<div class="sd-market-grid">' +
+            main.map(function(it) { return _sdCardHtml(it, true); }).join('') + '</div>';
+    }
+    if (rest.length) {
+        html += '<div class="sd-more-wrap">' +
+            `<button class="sd-more-toggle" onclick="toggleSdMore()">${_sdMoreExpanded ? '▾ 收起' : '▸ 展开'}信息储备（${rest.length} 只）</button>` +
+            '<span style="font-size:10px;color:var(--text-muted)">备选观察，资金有限时可不建仓</span>' +
+            '</div>';
+        if (_sdMoreExpanded) {
+            html += '<div class="sd-market-grid" style="margin-top:8px">' +
+                rest.map(function(it) { return _sdCardHtml(it, false); }).join('') + '</div>';
+        }
+    }
+    box.innerHTML = html;
+}
+
+function toggleSdMore() {
+    _sdMoreExpanded = !_sdMoreExpanded;
+    try { localStorage.setItem('aiq_sd_more', _sdMoreExpanded ? '1' : '0'); } catch (e) {}
+    _renderSdMarket();   // 用缓存数据重渲染，不重新请求（避免 loading 闪烁）
 }
 
 function pickSdCandidate(code) {
@@ -1487,9 +1555,27 @@ function _sdPx(v) {
     return (v === null || v === undefined || isNaN(v)) ? '--' : Number(v).toFixed(2);
 }
 
-// 只展示「持仓中」与「已清仓」：待回踩（还没买）和已失效（没回踩就过期）只是候选噪音，
-// 不占列表。这两类仍计入顶部统计条，方便知道还有多少在等买点。
+// 默认展示「持仓中」与「已出场」；点击统计卡可切换为单一状态。
 var _SD_TRACK_STATUS = 'holding,closed';
+var _SD_TRACK_STATUS_LABELS = {
+    holding: '持仓中',
+    closed: '已出场',
+    watching: '待回踩',
+    expired: '已失效'
+};
+
+var _SD_TRACK_STATUS_ALL = 'holding,closed,watching,expired';
+function setSdTrackFilter(status) {
+    // 「全部」= 四个状态合一；再次点击恢复默认
+    var target = (status === 'all') ? _SD_TRACK_STATUS_ALL : status;
+    if (_SD_TRACK_STATUS === target) {
+        _SD_TRACK_STATUS = 'holding,closed';
+    } else {
+        _SD_TRACK_STATUS = target;
+    }
+    _sdTrackLimit = _SD_TRACK_PAGE;
+    loadSdTrack();
+}
 
 async function loadSdTrack(opts) {
     opts = opts || {};
@@ -1528,8 +1614,15 @@ function renderSdTrack(items, st, updatedAt) {
     var box = document.getElementById('sdTrackBox');
     if (!box) return;
     var p = st.params || {};
-    var stat = function(lbl, val, cls) {
-        return '<div class="sd-track-stat"><div class="lbl">' + lbl + '</div>' +
+    var stat = function(lbl, val, cls, key) {
+        var isActive = key && (
+            (key === 'all' && _SD_TRACK_STATUS === _SD_TRACK_STATUS_ALL) ||
+            (key !== 'all' && _SD_TRACK_STATUS === key)
+        );
+        var active = isActive ? ' active' : '';
+        var click = key ? ' onclick="setSdTrackFilter(\'' + key + '\')"' : '';
+        return '<div class="sd-track-stat' + (key ? ' clickable' : '') + active + '"' + click + '>' +
+               '<div class="lbl">' + lbl + '</div>' +
                '<div class="val ' + (cls || '') + '">' + val + '</div></div>';
     };
     var head =
@@ -1542,26 +1635,33 @@ function renderSdTrack(items, st, updatedAt) {
           (updatedAt ? '<span class="text-muted" style="font-size:11px;margin-left:auto">更新 ' + updatedAt + '</span>' : '') +
         '</div>';
 
+    var totalAll = (st.holding || 0) + (st.closed || 0) + (st.watching || 0) + (st.expired || 0);
     var stats =
         '<div class="sd-track-stats">' +
-          stat('已平仓', (st.total_closed || 0) + ' 笔') +
+          stat('全部', totalAll + ' 笔', '', 'all') +
+          stat('已平仓', (st.total_closed || 0) + ' 笔', '', 'closed') +
           stat('胜率', st.win_rate == null ? '--' : st.win_rate + '%',
                st.win_rate == null ? '' : (st.win_rate >= 50 ? 'pos' : 'neg')) +
           stat('平均持仓', st.avg_hold_tdays == null ? '--' : st.avg_hold_tdays + ' 日') +
           stat('平均收益', _sdPct(st.avg_return), _sdPctCls(st.avg_return)) +
           stat('盈亏比', st.profit_factor == null ? '--' : st.profit_factor) +
           stat('累计收益', _sdPct(st.cum_return), _sdPctCls(st.cum_return)) +
-          stat('持仓中', (st.holding || 0) + ' 笔') +
-          stat('待回踩', (st.watching || 0) + ' 笔') +
-          stat('已失效', (st.expired || 0) + ' 笔') +
+          stat('持仓中', (st.holding || 0) + ' 笔', '', 'holding') +
+          stat('待回踩', (st.watching || 0) + ' 笔', '', 'watching') +
+          stat('已失效', (st.expired || 0) + ' 笔', '', 'expired') +
         '</div>';
 
     if (!items.length) {
+        var statusText = (_SD_TRACK_STATUS === _SD_TRACK_STATUS_ALL)
+            ? '全部'
+            : (_SD_TRACK_STATUS || 'holding,closed').split(',').map(function(s) {
+                return _SD_TRACK_STATUS_LABELS[s] || s;
+            }).join(' / ');
         var waiting = st.watching || 0;
         box.innerHTML = head + stats +
-            '<div class="empty-state" style="padding:14px;font-size:12px">暂无「持仓中 / 已清仓」的跟踪记录<br>' +
+            '<div class="empty-state" style="padding:14px;font-size:12px">暂无「' + statusText + '」的跟踪记录<br>' +
             '<span style="color:var(--text-muted)">' +
-            (waiting > 0
+            (waiting > 0 && _SD_TRACK_STATUS.indexOf('holding') >= 0
                 ? '当前 ' + waiting + ' 笔候选还在等回踩买点，成交后自动进入本列表'
                 : '每日盘后同步后自动建单；也可输入天数后点「⏪ 回补」补建历史样本') +
             '</span></div>';
@@ -1575,7 +1675,9 @@ function renderSdTrack(items, st, updatedAt) {
         var ret = isClosed ? it.return_pct : it.float_return;
         var retTxt = isClosed ? _sdPct(ret) : (ret == null ? '--' : _sdPct(ret) + '<span style="opacity:.6"> 浮</span>');
         var holdTxt = it.hold_tdays != null ? it.hold_tdays + ' 日' : '--';
-        var entryTxt = it.entry_date ? it.entry_date.slice(5) + ' @' + _sdPx(it.entry_price) : '<span style="opacity:.6">待回踩</span>';
+        var entryTxt = it.entry_date
+            ? it.entry_date.slice(5) + ' @' + _sdPx(it.entry_price)
+            : '<span style="opacity:.65" title="等待回踩到买点才成交；窗口期 ' + (p.entry_window_days || 5) + ' 个交易日">待回踩 @' + _sdPx(it.sig_entry) + '</span>';
         var exitTxt = it.exit_date ? it.exit_date.slice(5) + ' @' + _sdPx(it.exit_price) : '--';
         var stTxt = it.status_label + (it.exit_reason_label ? ' · ' + it.exit_reason_label : '');
         var ops = (it.status === 'holding' || it.status === 'watching'
@@ -2047,8 +2149,8 @@ function _sdBuildKlineInputs(data) {
         var inSell = a.level === 'sell';
         var k = dateK[a.date];
         if (!k) continue;
-        if (inBuy && !prevInBuy) marks.push({ date: a.date, price: k.low, type: 'buy' });
-        if (inSell && (!pA || pA.level !== 'sell')) marks.push({ date: a.date, price: k.high, type: 'sell' });
+        if (inBuy && !prevInBuy) marks.push({ date: a.date, price: k.low, type: 'buy', adv: a });
+        if (inSell && (!pA || pA.level !== 'sell')) marks.push({ date: a.date, price: k.high, type: 'sell', adv: a });
     }
     return { kdata: kdata, dates: dates, ohlc: ohlc, volData: volData, marks: marks };
 }
@@ -2068,6 +2170,154 @@ function sdUpdateIndicatorButtons() {
     });
 }
 
+// 点/按 K 线任意一根蜡烛 → 三条虚线切到该日计划。
+// 短按（点击）= 预览，5 秒后自动回到今日；长按 = 持续锁定，点图外空白才回今日。
+var _sdPinnedDate = null;
+var _sdPinMode = null;          // 'temp' 预览 | 'hold' 长按锁定
+var _sdPinTimer = null;
+var _sdPress = null;
+var SD_PRESS_LONG_MS = 400;
+var SD_PLAN_PREVIEW_MS = 5000;
+var _SD_LEVEL_NAME = { buy: '建议买入', add: '可加仓', hold: '观望持有', sell: '偏空·减仓' };
+
+// chart.plan 与 chart.dates 同长同序（后端逐根 force_plan 推演），所以任意一天都取得到
+function _sdPlanAt(data, date) {
+    var c = (data && data.chart) || {};
+    var plan = c.plan, dates = c.dates || [];
+    if (!plan || !plan.entry) return null;
+    var i = dates.indexOf(date);
+    if (i < 0) return null;
+    return {
+        entry_price: plan.entry[i], stop_loss: plan.stop[i], take_profit: plan.take[i],
+        level: (plan.level || [])[i]
+    };
+}
+
+// 价格轴当前覆盖的区间（y 轴按全部蜡烛自动取值，不随缩放窗口变化）
+function _sdPriceExtent(data) {
+    var c = (data && data.chart) || {};
+    var lo = Infinity, hi = -Infinity, i;
+    for (i = 0; i < (c.low || []).length; i++) if (c.low[i] != null && c.low[i] < lo) lo = c.low[i];
+    for (i = 0; i < (c.high || []).length; i++) if (c.high[i] != null && c.high[i] > hi) hi = c.high[i];
+    return { min: lo, max: hi };
+}
+
+function _sdPlanLines(data, marks) {
+    var src = null;
+    if (_sdPinnedDate) {
+        src = _sdPlanAt(data, _sdPinnedDate);
+        if (!src) { _sdPinnedDate = null; _sdPinMode = null; }   // 换股 / 该日不在图表窗口内
+    }
+    var pinned = !!_sdPinnedDate;
+    if (!pinned) src = ((data && data.signal && data.signal.action_plan) || {});
+    var tag = pinned ? _sdPinnedDate.slice(5) + ' ' : '';
+    var muted = cssVar('--text-muted', '#8A94A6');
+    var noPlan = pinned && src.stop_loss == null;
+    var ml = [];
+    var line = function(px, name, color) {
+        if (px == null) return;
+        ml.push({ yAxis: px, lineStyle: { color: color, type: 'dashed' }, label: { formatter: tag + name, color: color } });
+    };
+    // 选中的那一列用竖线标出来：非建仓日没有价位可画，至少让用户看见自己点的是哪天
+    if (pinned) ml.push({ xAxis: _sdPinnedDate, lineStyle: { color: muted, width: 1 }, label: { show: false } });
+    if (!noPlan) {
+        line(src.entry_price, '参考入场', '#f39c12');
+        line(src.stop_loss, '止损', '#e74c3c');
+        line(src.take_profit, '止盈', '#2ecc71');
+    }
+    // 止损/止盈落在价格轴外会被裁掉看不见，只在这时撑开轴；否则保持自动取值不动画跳
+    var ext = _sdPriceExtent(data), yMin = null, yMax = null;
+    if (src.stop_loss != null && src.stop_loss < ext.min) yMin = src.stop_loss;
+    if (src.take_profit != null && src.take_profit > ext.max) yMax = src.take_profit;
+    var fmtPx = function(v) { return (v == null) ? '--' : Number(v).toFixed(2); };
+    var modeTxt = _sdPinMode === 'hold' ? '长按已锁定，点图外空白回到今日'
+                                        : (SD_PLAN_PREVIEW_MS / 1000) + ' 秒后回到今日';
+    var hint;
+    if (noPlan) {
+        // 不写任何价位数字：观望/减仓日没有建仓动作，画出来的止损/止盈会被当成真实计划读
+        hint = _sdPinnedDate + ' 未给出止损/止盈（该日信号：' + (_SD_LEVEL_NAME[src.level] || '未覆盖')
+             + '，非建仓日）· ' + modeTxt;
+    } else if (pinned) {
+        hint = '虚线 = ' + _sdPinnedDate + ' 当日计划 入场 ' + fmtPx(src.entry_price)
+             + ' / 止损 ' + fmtPx(src.stop_loss) + ' / 止盈 ' + fmtPx(src.take_profit) + ' · ' + modeTxt;
+    } else {
+        hint = '虚线 = 今日计划 · 点蜡烛看当天，长按锁定';
+    }
+    return {
+        markLine: { silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1 }, label: { position: 'insideEndTop', fontSize: 10 }, data: ml },
+        yMin: yMin, yMax: yMax, hint: hint
+    };
+}
+
+function _sdApplyPlanLines(chart, opt) {
+    var pl = _sdPlanLines(_sd.data, chart.__sdMarks);
+    if (opt.title) {
+        opt.title.subtext = pl.hint;
+        opt.title.subtextStyle = { color: cssVar('--text-muted', '#8A94A6'), fontSize: 10 };
+    }
+    if (opt.series[0]) opt.series[0].markLine = pl.markLine;
+    if (opt.yAxis && opt.yAxis[0]) { opt.yAxis[0].min = pl.yMin; opt.yAxis[0].max = pl.yMax; }
+}
+
+function _sdRefreshPlanLines(chart) {
+    var pl = _sdPlanLines(_sd.data, chart.__sdMarks);
+    // 只改虚线、价格轴与副标题，不整图重画 —— 保留用户当前的缩放区间与副图展开状态
+    chart.setOption({
+        title: { subtext: pl.hint },
+        yAxis: [{ id: 'price', min: pl.yMin, max: pl.yMax }],
+        series: [{ id: 'kline', markLine: pl.markLine }]
+    });
+}
+
+// 像素 → 该列对应的交易日；点在所有副图之外（坐标轴、标题、缩放条）返回 null
+function _sdDateAtPixel(chart, xy) {
+    var dates = chart.__sdDates || [];
+    for (var g = 0; g < (chart.__sdGridCount || 1); g++) {
+        if (!chart.containPixel({ gridIndex: g }, xy)) continue;
+        var px = chart.convertFromPixel({ gridIndex: g }, xy);
+        if (!px) continue;
+        var i = Math.round(px[0]);
+        return (i >= 0 && i < dates.length) ? dates[i] : null;
+    }
+    return null;
+}
+
+function _sdSetPin(chart, date, mode) {
+    if (_sdPinTimer) { clearTimeout(_sdPinTimer); _sdPinTimer = null; }
+    if (!date && !_sdPinnedDate) return;
+    _sdPinnedDate = date;
+    _sdPinMode = date ? mode : null;
+    _sdRefreshPlanLines(chart);
+    if (date && mode === 'temp') {
+        _sdPinTimer = setTimeout(function () { _sdPinTimer = null; _sdSetPin(chart, null, null); }, SD_PLAN_PREVIEW_MS);
+    }
+}
+
+function _sdBindMarkFocus(chart) {
+    if (chart.__sdFocusBound) return;
+    chart.__sdFocusBound = true;
+    var zr = chart.getZr();
+    zr.on('mousedown', function (e) {
+        var d = _sdDateAtPixel(chart, [e.offsetX, e.offsetY]);
+        _sdPress = { date: d, long: false, timer: null };
+        if (d) _sdSetPin(chart, d, 'temp');   // 按下即出线，长按再升级为锁定
+        _sdPress.timer = setTimeout(function () {
+            if (!_sdPress || !_sdPress.date) return;
+            _sdPress.long = true;
+            _sdSetPin(chart, _sdPress.date, 'hold');
+        }, SD_PRESS_LONG_MS);
+    });
+    zr.on('mouseup', function () {
+        var press = _sdPress;
+        _sdPress = null;
+        if (press && press.timer) clearTimeout(press.timer);
+        if (!press) return;
+        if (!press.date) { _sdSetPin(chart, null, null); return; }   // 点图外空白 = 回到今日
+        if (press.long) return;                                       // 长按锁定，保持显示
+        _sdSetPin(chart, press.date, 'temp');                         // 短按：重新计满 5 秒
+    });
+}
+
 function renderStockDeepChart(data) {
     var dom = _sdGetChart();
     if (!dom) return;
@@ -2081,15 +2331,11 @@ function renderStockDeepChart(data) {
     var chart = ChartManager.get('stockdeep', dom);
     var opt = buildKlineOption(inx.kdata, inx.dates, inx.ohlc, inx.volData, inx.marks, _sdIndicators);
     opt.title.text = (data.code ? (data.code + ' · ' + (data.name || '')) : '') + '  K线';
-    // 在弹窗同构结构上叠加当前建议参考价位（体现深度，不影响结构一致）
-    var ap = (data.signal && data.signal.action_plan) || {};
-    var ml = [];
-    if (ap.entry_price != null) ml.push({ yAxis: ap.entry_price, lineStyle: { color: '#f39c12', type: 'dashed' }, label: { formatter: '参考入场', color: '#f39c12' } });
-    if (ap.stop_loss != null) ml.push({ yAxis: ap.stop_loss, lineStyle: { color: '#e74c3c', type: 'dashed' }, label: { formatter: '止损', color: '#e74c3c' } });
-    if (ap.take_profit != null) ml.push({ yAxis: ap.take_profit, lineStyle: { color: '#2ecc71', type: 'dashed' }, label: { formatter: '止盈', color: '#2ecc71' } });
-    if (ml.length && opt.series[0]) {
-        opt.series[0].markLine = { silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1 }, label: { position: 'insideEndTop', fontSize: 10 }, data: ml };
-    }
+    chart.__sdMarks = inx.marks;
+    chart.__sdDates = inx.dates;
+    chart.__sdGridCount = opt.grid.length;
+    _sdBindMarkFocus(chart);
+    _sdApplyPlanLines(chart, opt);
     chart.clear();
     chart.setOption(opt);
     chart.resize();
@@ -2143,10 +2389,17 @@ function renderExitRows(list) {
         const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
         const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
         const sold = it.status === 'clear';
-        const statusHtml = sold
-            ? '<span style="color:var(--danger);font-weight:600">🔴 已卖出</span>'
-            : '<span style="color:var(--green, #10b981);font-weight:600">🟢 持有</span>';
-        const holdDays = detail.hold_days != null ? detail.hold_days + '天' : '--';
+        const ST_MAP = {
+            clear:  ['🔴', '已卖出', 'var(--danger)', 600],
+            hold:   ['🟢', '持有', 'var(--green, #10b981)', 600],
+            watching: ['🕐', '待回踩', '#ffaa3c', 600],
+            expired:  ['⚪', '未成交', 'var(--text-muted)', 400],
+        };
+        const _st = ST_MAP[it.status] || ST_MAP.hold;
+        const statusHtml = `<span style="color:${_st[2]};font-weight:${_st[3]}">${_st[0]} ${_st[1]}</span>`;
+        const holdDays = (it.status === 'watching' || it.status === 'expired')
+            ? '--'
+            : (detail.hold_days != null ? detail.hold_days + '天' : '--');
         // 卖出价：仅已卖出（止盈/止损/到期）显示，持有中为空
         const exitPriceHtml = (sold && detail.exit_price != null)
             ? `<span title="${detail.exit_date || ''} 卖出">${Number(detail.exit_price).toFixed(2)}</span>`
@@ -2312,9 +2565,15 @@ function renderPickCard(it) {
             const ea = it.exit_advice;
             let exitHtml = '';
             if (ea && ea.status) {
-                const eaCls = ea.status === 'clear' ? 'exit-clear' : (ea.status === 'reduce' ? 'exit-reduce' : 'exit-hold');
-                const eaIcon = ea.status === 'clear' ? '🔴' : (ea.status === 'reduce' ? '🟠' : '🟢');
-                const eaLabel = ea.status === 'clear' ? '清仓' : (ea.status === 'reduce' ? '减仓' : '持有');
+                const EA_MAP = {
+                    clear:    ['exit-clear', '🔴', '清仓'],
+                    reduce:   ['exit-reduce', '🟠', '减仓'],
+                    hold:     ['exit-hold', '🟢', '持有'],
+                    watching: ['exit-hold', '🕐', '待回踩'],
+                    expired:  ['exit-hold', '⚪', '未成交'],
+                };
+                const _ea = EA_MAP[ea.status] || EA_MAP.hold;
+                const eaCls = _ea[0], eaIcon = _ea[1], eaLabel = _ea[2];
                 exitHtml = `
                     <div class="exit-advice-badge ${eaCls}" title="${ea.reason||''}">
                         <span>${eaIcon} ${eaLabel}</span>
@@ -3696,9 +3955,9 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
     var grids = [{ left: '10%', right: '10%', top: 50, height: mainHeight }];
     // 日期标签只显示 MM-DD、不旋转，压缩主图与副图之间的空白带
     var xAxisArr = [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { color: C.axis, fontSize: 10, formatter: function(v) { return String(v).slice(5); } }, axisLine: { lineStyle: { color: C.grid } } }];
-    var yAxisArr = [{ scale: true, gridIndex: 0, axisLabel: { color: C.axis }, splitLine: { lineStyle: { color: C.split } } }];
+    var yAxisArr = [{ id: 'price', scale: true, gridIndex: 0, axisLabel: { color: C.axis }, splitLine: { lineStyle: { color: C.split } } }];
     var seriesArr = [
-        { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barWidth: '75%', barMaxWidth: 26 }
+        { id: 'kline', type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barWidth: '75%', barMaxWidth: 26 }
     ];
 
     // 动态计算每个副图的 top 位置
@@ -3743,6 +4002,12 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
     var allXAxisIndexes = [];
     for (var x = 0; x <= subCount; x++) allXAxisIndexes.push(x);
 
+    // 买卖点按日期索引，供下方 tooltip 使用。axis 触发时悬停绘图区任意位置都会出
+    // 当日 OHLC，把标记信息并进去即可；若改用 series 级 item 触发，会和 axis 抢显示。
+    var markByDate = {};
+    (marks || []).forEach(function(m) { if (m && m.date) markByDate[m.date] = m; });
+    var _mkPx = function(v) { return (v == null || isNaN(v)) ? '--' : Number(v).toFixed(2); };
+
     var opt = {
         title: { text: '', left: 'center', textStyle: { color: C.title, fontSize: 14, fontFamily: "'JetBrains Mono', monospace" } },
         tooltip: {
@@ -3772,6 +4037,25 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
                     if (sn === 'D') html += '<br/>D: ' + (p.value != null ? p.value.toFixed(2) : '-');
                     if (sn === 'J') html += '<br/>J: ' + (p.value != null ? p.value.toFixed(2) : '-');
                 });
+                // 该日若有 B/S 标记，补出判因与**当时那份**计划价。
+                // 图上三条虚线是「今天」的计划、标记是「历史」信号切换日，
+                // 不分开标注就会被读成「S 点 = 某个止盈位」。
+                var mk = markByDate[d.date];
+                if (mk) {
+                    var a = mk.adv || {};
+                    var mkColor = mk.type === 'buy' ? C.up : C.down;
+                    var mkName = a.label || (mk.type === 'buy' ? '可建仓' : '谨慎减仓');
+                    html += '<br/><span style="color:' + mkColor + ';font-weight:bold">' +
+                            (mk.type === 'buy' ? 'B' : 'S') + ' ' + mkName + '</span>';
+                    if (a.stop_loss != null) {
+                        html += '<br/>当日计划 入场 ' + _mkPx(a.entry_price) +
+                                ' / 止损 ' + _mkPx(a.stop_loss) +
+                                ' / 止盈 ' + _mkPx(a.take_profit);
+                    } else {
+                        html += '<br/><span style="color:' + C.muted + '">该日不建仓，无止损/止盈价</span>';
+                    }
+                    if (a.brief) html += '<br/><span style="color:' + C.muted + '">' + a.brief + '</span>';
+                }
                 return html;
             }
         },

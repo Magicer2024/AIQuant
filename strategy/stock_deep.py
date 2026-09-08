@@ -22,6 +22,7 @@ import pandas as pd
 
 from strategy.indicators import calc_all_indicators
 from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
+from config.personal_config import is_main_board, main_board_filter
 from config.strategy_params import DEEP_EMA20_AUX as _EMA20_AUX_CFG
 from config.strategy_params import DEEP_TRACK
 
@@ -657,6 +658,8 @@ def _signal_plan_at(df: pd.DataFrame, rhythm: dict, i: int,
 
     供 recent_advice（时间线）与 compute_position_stats（持仓回测）复用，
     保证两处对同一交易日的信号判断与止损/止盈价完全一致。
+    止损/止盈只在 level ∈ {buy, add} 给出：观望/减仓日没有建仓动作，
+    凭空推演一个止损位会被当成真实计划读（2026-09-08 用户反馈），故不给。
     """
     score, reasons, risks = _signal_at(df, i)
     score = _rhythm_adjust(score, _rhythm_at(rhythm, i), _range_pos(df, i))
@@ -1033,6 +1036,16 @@ def analyze_stock(conn, code: str, lookback: int = 260, recent_days: int = 45,
     base["recent_advice"] = advice
     base["rhythm"] = {k: v for k, v in rhythm.items() if k != "_pivots"}
     base["chart"] = chart
+    # 逐根蜡烛的计划价：与 chart.dates 同长同序的并行数组，供前端点任意一根取当天虚线。
+    # 档位判定与 recent_advice 完全一致 —— 观望/减仓日的 stop/take 就是 None，
+    # 前端只标出「你选中的是哪一天」，不会画出不存在的止损/止盈位。
+    plan_rows = [_signal_plan_at(df, rhythm, i) for i in range(len(df) - n_chart, len(df))]
+    chart["plan"] = {
+        "entry": [r["entry_price"] for r in plan_rows],
+        "stop": [r["stop_loss"] for r in plan_rows],
+        "take": [r["take_profit"] for r in plan_rows],
+        "level": [r["level"] for r in plan_rows],
+    }
     return base
 
 
@@ -1044,12 +1057,15 @@ def scan_market_buy(conn, codes, limit: int = 10) -> list:
       1) 深析信号 level ∈ {buy, add}（追高/扩展度守卫已在 _signal_at 内生效）；
       2) 价相对 MA20 偏离 ≤ 15%（不买过度扩展的高位票）；
       3) 排除 ST/退市。
+      4) 排除创业板/科创板（无交易权限，见 candidate_board_filter）。
     排序：仅按信号级别（建议买入 > 可加仓），不做多指标加权求和，避免把个别强值平均掉。
     返回 [{ code, name, industry, level, label, emoji, rhythm_leg, rhythm_hint,
             reasons, pct_above_ma20, action_plan }]。
     """
     results = []
     for code in codes:
+        if not is_main_board(code):
+            continue
         try:
             res = analyze_stock(conn, code, lookback=260, recent_days=0, light=True)
             if res.get("insufficient"):
@@ -1079,13 +1095,59 @@ def scan_market_buy(conn, codes, limit: int = 10) -> list:
                 "rhythm_hint": hint,
                 "reasons": (sig.get("reasons") or [])[:2],
                 "pct_above_ma20": ext,
+                "score": sig.get("score"),
+                "base_score": sig.get("base_score"),
+                "frac20": sig.get("frac20"),
+                "risk_pct": sig.get("risk_pct"),
+                "atr_pct": sig.get("atr_pct"),
+                # top4 精排正向指标（与 _scan_one 保持一致，归因见 _MIGRATE_COLS）
+                "pct_above_ma60": tr.get("pct_above_ma60"),
+                "regime": tr.get("regime"),
+                "pattern": rhythm.get("pattern"),
+                "obv_grad_pct": (res.get("volume_price") or {}).get("obv_grad_pct"),
+                "volume_ratio": (res.get("volume_price") or {}).get("volume_ratio"),
                 "action_plan": sig.get("action_plan"),
             })
         except Exception:
             continue
-    # 排序：只按信号级别（建议买入 > 可加仓），不做多指标加权求和，避免把个别强值平均掉
-    results.sort(key=lambda x: 0 if x["level"] == "buy" else 1)
+    # 排序：与 candidate_order_by 用同一套 Q12 精排键（buy 优先 → 低吸档 → 质量分 → code），
+    # 保证「已关注池回退路径」与「全市场扫描落库路径」的顺序口径一致。
+    results.sort(key=_quality_sort_key)
     return results[:limit]
+
+
+def _quality_sort_key(r: dict) -> tuple:
+    """Q12 精排键的 **Python 版**（与 candidate_order_by 的 SQL 表达式一一对应）。
+
+    ⚠ 两处必须同步：SQL 版给落库数据排序（deep_tracker.sync_from_scan /
+      get_market_signal_latest），Python 版给 scan_market_buy 的内存结果排序。
+      改任一侧都要同步另一侧，否则"面板看到的"和"实际建单的"顺序会不一致。
+
+    依据 tools/eval_topk_pick.py（62 扫描日 / buy 池 4432 只 / 复刻真实入场出场，topn=4）：
+      Q12 均值 +2.15% / 胜率 67.6% / PF 2.18  vs  旧键(N) +1.04% / 60.8% / 1.33
+      前段(弱市) +1.06 vs 旧键 -1.08；逐日配对 28/57 天胜出、t=1.36（全部候选键最高）
+    """
+    frac = r.get("frac20")
+    tier = 0 if (frac is not None and frac < 0.33) else 1          # 低吸档：<0.33 优先
+    s = 0.0
+    s += 2.2 * (1.0 - min(1.0, max(0.0, frac if frac is not None else 0.5)))
+    e60 = r.get("pct_above_ma60")
+    if e60 is not None and e60 < 0:
+        s += 1.0
+    if r.get("regime") == "震荡偏多":
+        s += 0.8
+    if r.get("pattern") == "下行阴跌":
+        s += 0.6
+    obv = r.get("obv_grad_pct")
+    if obv is not None and -2.0 <= obv <= 2.0:
+        s += 0.5
+    vr = r.get("volume_ratio")
+    if vr is not None and vr >= 2.0:
+        s -= 1.5
+    atr = r.get("atr_pct")
+    if atr is not None and atr > 4.0:
+        s -= 0.4 * (atr - 4.0)
+    return (0 if r.get("level") == "buy" else 1, tier, -s, r.get("code") or "")
 
 
 # ─────────────────────────────────────────────
@@ -1114,6 +1176,13 @@ def _ensure_market_signal_table(conn):
         frac20        REAL,      -- 近20日收盘区间位置 0~1（越低=回调越充分）
         risk_pct      REAL,      -- ATR 止损宽度占价比 %
         atr_pct       REAL,      -- ATR 占价比 %（波动率）
+        -- ↓ 2026-09-05 新增：top4 精排的正向指标（tools/eval_topk_pick.py Q12 方案）。
+        --   归因均为 buy 池全样本 4432 只、62 扫描日、复刻真实入场出场后的实测：
+        pct_above_ma60 REAL,     -- 价相对 MA60 %：<0 组 +1.33%/胜率61.0%/PF1.48；>=15% 组 -1.14%
+        regime        TEXT,      -- 趋势状态：震荡偏多 +1.11%/PF1.38 vs 多头上升 -0.61%/PF0.86
+        pattern       TEXT,      -- 节奏模式：下行阴跌 +1.56%/胜率62.6%/PF1.83（跌够了反弹）
+        obv_grad_pct  REAL,      -- OBV 近20日斜率 %：走平(-2~2) +1.11%/PF1.36 优于上行 +0.06%
+        volume_ratio  REAL,      -- 最新量比：>=2 爆量 -1.36%/PF0.71（强否决）；0.8~1.2 为 +0.77%
         PRIMARY KEY (scan_date, code)
     );
     CREATE INDEX IF NOT EXISTS idx_sds_scan ON stock_deep_signal(scan_date);
@@ -1128,12 +1197,21 @@ _MIGRATE_COLS = {
     "frac20": "REAL",
     "risk_pct": "REAL",
     "atr_pct": "REAL",
+    # 2026-09-05 新增：top4 精排正向指标（同上 CREATE TABLE 注释）
+    "pct_above_ma60": "REAL",
+    "regime": "TEXT",
+    "pattern": "TEXT",
+    "obv_grad_pct": "REAL",
+    "volume_ratio": "REAL",
 }
 
 
 def _migrate_signal_table(conn) -> None:
     try:
-        have = {r["name"] for r in conn.execute(
+        # ⚠ 必须用索引 r[1]，不能用 r["name"]：PRAGMA 结果只有设了 row_factory=Row 的
+        #   连接才支持按名取值，否则抛 TypeError → 被下面的 except 吞掉 → **补列静默失败**，
+        #   随后 INSERT 新列就会报 "table has no column"，故障点离根因很远，极难排查。
+        have = {r[1] for r in conn.execute(
             "PRAGMA table_info(stock_deep_signal)")}
     except Exception:
         return
@@ -1148,6 +1226,18 @@ def _migrate_signal_table(conn) -> None:
         conn.commit()
     except Exception:
         pass
+
+
+def candidate_board_filter() -> str:
+    """stock_deep_signal 候选的板块过滤条件（WHERE 片段，与 candidate_order_by 并列）。
+
+    排名键决定"挑哪几只"，本条件决定"能挑哪些" —— 用户未开通创业板/科创板权限，
+    不可交易的票既不该出现在「明日买入候选」，也不该建跟踪单污染胜率统计。
+
+    放在**读取侧**而非扫描写入侧：历史已落库的 stock_deep_signal 无需重扫即可生效，
+    且研究脚本仍能在完整 buy 池上做对照评估。
+    """
+    return main_board_filter("code")
 
 
 def candidate_order_by(conn) -> str:
@@ -1183,7 +1273,41 @@ def candidate_order_by(conn) -> str:
         因为那些旧单本身是在未修正的候选数据上挑的，两套数据的 ext 分布不同。
         两个数字测的是不同东西，新键实现与模拟器已在两套口径下交叉验证一致（+1.56%）。
 
-    ⚠ score 列缺失时（旧库 / 测试内存表）自动回退到旧的 ext 单键排序，保证不报错。
+    ── 当前方案：Q12「低吸档 + 多维质量分」（2026-09-05 定案）────────────────
+    优先级：
+      1) buy 优先于 add（信号级别；buy 不足时才补 add）
+      2) **低吸档**：frac20 < 0.33（近 20 日收盘区间低位）单独成档优先
+      3) 档内按**多维质量分**降序（越低吸 / 越低位 / 越未启动，分越高）：
+           + 2.2 × (1 − clamp(frac20,0,1))      连续低吸，主力权重
+           + 1.0  if pct_above_ma60 < 0          长周期低位（价在 MA60 下方）
+           + 0.8  if regime = 震荡偏多            震荡市优于已确立的多头趋势
+           + 0.6  if pattern = 下行阴跌           跌够了反弹
+           + 0.5  if obv_grad_pct ∈ [−2, 2]      OBV 走平优于上行
+           − 1.5  if volume_ratio ≥ 2            爆量追高，强否决
+           − 0.4 × max(0, atr_pct − 4)           高波动惩罚
+      4) code 升序：保证同分结果稳定可复现
+
+    依据（tools/eval_topk_pick.py：62 扫描日 / buy 池 4432 只 / 复刻 deep_tracker
+    真实入场出场，topn=4 —— 与本次 daily_top_n 10→4 的目标一致）：
+      Q12  均值 +2.15% / 胜率 67.6% / PF 2.18 / 止损率 8.7%
+      旧键  均值 +1.04% / 胜率 60.8% / PF 1.33 / 止损率 13.2%
+      · 时间稳定性：前段(弱市) +1.06 vs 旧键 −1.08；后段 +3.53 vs +3.81
+        → 旧键在弱市是**亏钱**的，Q12 在弱市也能赚，这是决定性差异
+      · 逐日配对：28/57 天胜出、日均差 +0.99%、t=1.36（全部 21 个候选键中最高）
+      · topn 敏感性：4/5/8/10/20 = 2.15/2.25/1.85/1.54/0.97，越小越好 → 契合 top4
+      · 过拟合探针：frac20 权重 1.2→2.2→3.2→4.5 得 1.52→1.72→1.70→1.65，
+        在 2.2 附近见顶后回落 → 存在真实最优点，不是单调拟合噪音
+      · 机制：全部正向指标指向同一件事 —— **买「还没启动、位置低、无人问津」的，
+        不买「已启动、量价齐升、趋势漂亮」的**（与既有「buy 选出的已是启动票，
+        后劲不足」的结论同向；这也是 regime=多头上升 −0.61%、obv 上行 +0.06%
+        这类"看起来该加分"的项反而为负的原因）
+
+    ⚠ 本排序键有**两处实现**，必须同步维护：
+        · 这里的 SQL 版（供落库数据排序：sync_from_scan / get_market_signal_latest）
+        · _quality_sort_key 的 Python 版（供 scan_market_buy 的内存结果排序）
+      改任一处都要同步另一处，否则「面板看到的」和「实际建单的」顺序会不一致。
+
+    ⚠ 降级：新列缺失时依次回退到「score 封顶档 + ext」→「ext 单键」，保证不报错。
     """
     try:
         # ⚠ 用索引 r[1] 而不是 r["name"]：PRAGMA 结果只有设了 row_factory=Row 的连接
@@ -1192,36 +1316,68 @@ def candidate_order_by(conn) -> str:
             "PRAGMA table_info(stock_deep_signal)")}
     except Exception:
         cols = set()
-    if "score" not in cols:
-        return ("CASE level WHEN 'buy' THEN 0 ELSE 1 END, "
-                "COALESCE(pct_above_ma20, 999) ASC, code ASC")
-    cap = int(DEEP_TRACK.get("top_rank_min_score", 6) or 6)
-    return (f"CASE level WHEN 'buy' THEN 0 ELSE 1 END, "
-            f"CASE WHEN COALESCE(score, 0) >= {cap} THEN 0 ELSE 1 END, "
-            f"COALESCE(pct_above_ma20, 999) ASC, code ASC")
+
+    lvl = "CASE level WHEN 'buy' THEN 0 ELSE 1 END"
+    if "frac20" not in cols:
+        return f"{lvl}, COALESCE(pct_above_ma20, 999) ASC, code ASC"
+
+    _NEW = ("pct_above_ma60", "regime", "pattern", "obv_grad_pct", "volume_ratio")
+    if not all(c in cols for c in _NEW):
+        # 精排新列不全（旧库未迁移）→ 回退 2026-09-02 的 score 封顶档键
+        cap = int(DEEP_TRACK.get("top_rank_min_score", 6) or 6)
+        return (f"{lvl}, CASE WHEN COALESCE(score, 0) >= {cap} THEN 0 ELSE 1 END, "
+                f"COALESCE(pct_above_ma20, 999) ASC, code ASC")
+
+    # Q12：低吸档 → 质量分降序 → code
+    # 所有 COALESCE 默认值取"不加分也不扣分"的中性值，缺字段的行不会白拿加分。
+    q = (
+        "2.2 * (1.0 - MAX(0.0, MIN(1.0, COALESCE(frac20, 0.5))))"
+        " + CASE WHEN COALESCE(pct_above_ma60, 0.0) < 0 THEN 1.0 ELSE 0.0 END"
+        " + CASE WHEN regime = '震荡偏多' THEN 0.8 ELSE 0.0 END"
+        " + CASE WHEN pattern = '下行阴跌' THEN 0.6 ELSE 0.0 END"
+        " + CASE WHEN obv_grad_pct IS NOT NULL"
+        "        AND obv_grad_pct BETWEEN -2.0 AND 2.0 THEN 0.5 ELSE 0.0 END"
+        " - CASE WHEN COALESCE(volume_ratio, 1.0) >= 2.0 THEN 1.5 ELSE 0.0 END"
+        " - 0.4 * MAX(0.0, COALESCE(atr_pct, 3.0) - 4.0)"
+    )
+    return (f"{lvl}, "
+            f"CASE WHEN frac20 IS NOT NULL AND frac20 < 0.33 THEN 0 ELSE 1 END, "
+            f"({q}) DESC, code ASC")
 
 
 def _insert_market_signals(conn, scan_date: str, rows: list):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 精排新列在极旧库/补列失败时可能缺失（见 _migrate_signal_table 的 PRAGMA 说明）。
+    # 它们只提升排序质量、不影响信号本身，所以缺失时**降级为不含新列的写入** ——
+    # 不能让"排序列没补上"把整个每日扫描打断（历史上 score 列就踩过静默退化的坑）。
+    try:
+        have = {r[1] for r in conn.execute(
+            "PRAGMA table_info(stock_deep_signal)")}
+    except Exception:
+        have = set()
+    _NEW = ("pct_above_ma60", "regime", "pattern", "obv_grad_pct", "volume_ratio")
+    full = all(c in have for c in _NEW)
+    base_cols = ("scan_date, code, name, industry, level, label, emoji,"
+                 "rhythm_leg, rhythm_hint, pct_above_ma20,"
+                 "entry_price, stop_loss, take_profit, reasons, created_at,"
+                 "score, base_score, frac20, risk_pct, atr_pct")
+    n = 20 + (len(_NEW) if full else 0)
+    sql = (f"INSERT OR REPLACE INTO stock_deep_signal ({base_cols}"
+           + (", " + ", ".join(_NEW) if full else "")
+           + f") VALUES ({','.join(['?'] * n)})")
     for r in rows:
         ap = r.get("action_plan") or {}
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO stock_deep_signal
-            (scan_date, code, name, industry, level, label, emoji,
-             rhythm_leg, rhythm_hint, pct_above_ma20,
-             entry_price, stop_loss, take_profit, reasons, created_at,
-             score, base_score, frac20, risk_pct, atr_pct)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (scan_date, r["code"], r["name"], r.get("industry"), r["level"],
-             r.get("label"), r.get("emoji"),
-             r.get("rhythm_leg"), r.get("rhythm_hint"), r.get("pct_above_ma20"),
-             ap.get("entry_price"), ap.get("stop_loss"), ap.get("take_profit"),
-             json.dumps(r.get("reasons") or [], ensure_ascii=False), now,
-             r.get("score"), r.get("base_score"), r.get("frac20"),
-             r.get("risk_pct"), r.get("atr_pct")),
-        )
+        args = [scan_date, r["code"], r["name"], r.get("industry"), r["level"],
+                r.get("label"), r.get("emoji"),
+                r.get("rhythm_leg"), r.get("rhythm_hint"), r.get("pct_above_ma20"),
+                ap.get("entry_price"), ap.get("stop_loss"), ap.get("take_profit"),
+                json.dumps(r.get("reasons") or [], ensure_ascii=False), now,
+                r.get("score"), r.get("base_score"), r.get("frac20"),
+                r.get("risk_pct"), r.get("atr_pct")]
+        if full:
+            args += [r.get("pct_above_ma60"), r.get("regime"), r.get("pattern"),
+                     r.get("obv_grad_pct"), r.get("volume_ratio")]
+        conn.execute(sql, args)
 
 
 import threading
@@ -1260,6 +1416,9 @@ def _scan_one(code: str, lookback: int, as_of: Optional[str]) -> Optional[dict]:
         if "ST" in name or "退" in name:
             return None
         tr = res.get("trend") or {}
+        # ⚠ volume_price 在行情不足 20 日时返回 {"insufficient": True}，这里 or {} + .get()
+        #   兜底，缺字段的候选在排序里按中性值处理（见 candidate_order_by 的 COALESCE）。
+        vp = res.get("volume_price") or {}
         rhythm = res.get("rhythm") or {}
         ext = tr.get("pct_above_ma20")
         if ext is not None and ext > 15:
@@ -1279,6 +1438,12 @@ def _scan_one(code: str, lookback: int, as_of: Optional[str]) -> Optional[dict]:
             "frac20": sig.get("frac20"),
             "risk_pct": sig.get("risk_pct"),
             "atr_pct": sig.get("atr_pct"),
+            # ── top4 精排正向指标（2026-09-05 新增，归因依据见 _MIGRATE_COLS）──
+            "pct_above_ma60": tr.get("pct_above_ma60"),
+            "regime": tr.get("regime"),
+            "pattern": rhythm.get("pattern"),
+            "obv_grad_pct": vp.get("obv_grad_pct"),
+            "volume_ratio": vp.get("volume_ratio"),
             "action_plan": sig.get("action_plan"),
             "reasons": (sig.get("reasons") or [])[:2],
         }
@@ -1408,7 +1573,7 @@ def get_market_signal_latest(conn, limit: int = 20) -> list:
     rows = conn.execute(
         f"""
         SELECT * FROM stock_deep_signal
-        WHERE scan_date = ?
+        WHERE scan_date = ? {candidate_board_filter()}
         ORDER BY {candidate_order_by(conn)}
         LIMIT ?
         """,

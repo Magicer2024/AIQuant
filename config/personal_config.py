@@ -47,7 +47,27 @@ POSITION_PLAN_MAX_PCT = 0.20     # 单股最大仓位占比（max_amount = 账�
 
 # ── 板块限制（小资金，未开通科创/创业板权限）──────
 MAIN_BOARD_ONLY = True           # 每日推荐仅保留主板（沪 60x / 深 00x）
-EXCLUDED_BOARD_PREFIXES = ("300", "301", "688", "689")  # 创业板 + 科创板
+# 创业板 300/301/302… 与科创板 688/689… 各自占满 30x / 68x 整段，
+# 按整段排除而不是枚举已启用的号段，否则新号段（如 302132）会漏进推荐池。
+EXCLUDED_BOARD_PREFIXES = ("30", "68")
+
+
+def is_main_board(code) -> bool:
+    """代码是否属于可交易主板（MAIN_BOARD_ONLY=False 时恒为 True）。"""
+    if not MAIN_BOARD_ONLY:
+        return True
+    c = str(code or "")
+    return not c.startswith(EXCLUDED_BOARD_PREFIXES)
+
+
+def main_board_filter(column: str = "code") -> str:
+    """SQL 片段：追加到 WHERE 后用于排除不可交易板块。
+
+    前缀来自上面的常量、非用户输入，可直接拼接。
+    """
+    if not MAIN_BOARD_ONLY:
+        return ""
+    return "".join(f" AND {column} NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
 
 
 def get_personal_config() -> dict:

@@ -81,7 +81,14 @@ def _conn():
 
 
 def _feat_one(args):
-    """重算单只股票在 as_of 日的深析特征（无未来函数）。"""
+    """重算单只股票在 as_of 日的深析特征（无未来函数）。
+
+    ⚠ 特征提取是**零额外计算成本**的：analyze_stock(light=True) 内部已经跑完了
+      trend_state / analyze_volume_price / detect_rhythm 三个子模块，这里只是把
+      它们的返回值全部取出来。早期版本只取了 score/frac20/risk_pct/atr_pct/ext，
+      量价（OBV、背离、量比）与趋势（MACD、RSI、regime）等白白丢弃了 —— 这些正是
+      「top4 精排」需要的正向指标弹药。
+    """
     code, as_of = args
     try:
         from strategy.stock_deep import analyze_stock
@@ -93,6 +100,7 @@ def _feat_one(args):
         ap = sig.get("action_plan") or {}
         tr = r.get("trend") or {}
         rh = r.get("rhythm") or {}
+        vp = r.get("volume_price") or {}
         entry = ap.get("entry_price")
         if not entry:
             return None
@@ -100,13 +108,39 @@ def _feat_one(args):
             "code": code,
             "as_of": as_of,
             "level": sig.get("level"),
+            # ── 规则分（既有维度）──
             "score": sig.get("score"),
             "base_score": sig.get("base_score"),
             "frac20": sig.get("frac20"),
             "risk_pct": sig.get("risk_pct"),
             "atr_pct": sig.get("atr_pct"),
+            "rr": ap.get("risk_reward_ratio"),
+            # ── 趋势 / 位置 ──
             "ext": tr.get("pct_above_ma20"),
+            "ext60": tr.get("pct_above_ma60"),
+            "ext_ema": tr.get("pct_above_ema20"),
+            "macd": tr.get("macd"),
+            "rsi14": tr.get("rsi14"),
+            "rsi_zone": tr.get("rsi_zone"),
+            "regime": tr.get("regime"),
+            "alignment": tr.get("alignment"),
+            "volatility": tr.get("volatility"),
+            # ── 量价（原脚本完全未使用）──
+            "divergence": vp.get("divergence"),
+            "obv_trend": vp.get("obv_trend"),
+            "obv_grad_pct": vp.get("obv_grad_pct"),
+            "updown_vol": vp.get("updown_volume_ratio"),
+            "volume_ratio": vp.get("volume_ratio"),
+            "health": vp.get("health"),
+            # ── 节奏 ──
             "rhythm_hint": rh.get("position_hint") or "",
+            "pattern": rh.get("pattern"),
+            "current_leg": rh.get("current_leg"),
+            "position_pct": rh.get("position_pct"),
+            "up_amp_avg": rh.get("up_amp_avg"),
+            "down_amp_avg": rh.get("down_amp_avg"),
+            "cycle_avg_days": rh.get("cycle_avg_days"),
+            # ── 交易执行 ──
             "entry": entry,
             "stop": ap.get("stop_loss"),
             "tp": ap.get("take_profit"),
@@ -324,6 +358,157 @@ def key_pos_guard(f):
             _g(f, "frac20", 1.0), _g(f, "ext", 999), f["code"])
 
 
+# ─────────────────────────────────────────────
+# 3'. top4 精排候选：多维正向指标打分器（Q 系列）
+# ─────────────────────────────────────────────
+# 设计依据 = 全样本分层归因（诊断 6/7，buy 池 4432 只，62 扫描日，topn=4）：
+#   ext60<0         : +1.33% / 胜率 61.0% / PF 1.48   （价处 MA60 下方 = 长周期低位）
+#   ext60>=15%      : -1.14% / 胜率 53.7% / PF 0.82
+#   regime 震荡偏多  : +1.11% / 胜率 60.1% / PF 1.38
+#   regime 多头上升  : -0.61% / 胜率 52.6% / PF 0.86   ← 追涨是负贡献
+#   pattern 下行阴跌 : +1.56% / 胜率 62.6% / PF 1.83
+#   pattern 慢牛上行 : -0.06% / PF 0.99
+#   volume_ratio>=2 : -1.36% / 胜率 50.6% / PF 0.71   ← 爆量追高，强否决
+#   volume_ratio .8~1.2 : +0.77% / 胜率 59.4% / PF 1.23
+#   obv_grad -2~2%  : +1.11% / 胜率 58.8% / PF 1.36   ← OBV 走平优于上行(+0.06%/PF1.01)
+#   frac20 越低越好  : <0.33 最强；>=0.66 为 -0.50% / PF 0.88
+# 统一机制（与既有「buy 选出的已是启动票，后劲不足」结论同向）：
+#   **买「还没启动、位置低、无人问津」的，不买「已启动、量价齐升、趋势漂亮」的。**
+def _q_raw(f, w_frac=1.2):
+    """综合质量分（越大越优先）。分量权重取自上述归因均值，非拍脑袋。
+
+    w_frac 可调是为了做**权重扫描**：frac20 是最强的连续信号，但权重过大就退化成
+    纯 frac20 单键（I 键实测仅 +0.84%），必然存在最优点。扫描 + 诊断联合判断，
+    避免一路加到拟合噪音上。
+    """
+    s = 0.0
+    frac = f.get("frac20")
+    if frac is not None:
+        s += w_frac * (1.0 - min(1.0, max(0.0, frac)))   # 连续低吸，主力权重
+    ext60 = f.get("ext60")
+    if ext60 is not None and ext60 < 0:
+        s += 1.0
+    if f.get("regime") == "震荡偏多":
+        s += 0.8
+    if f.get("pattern") == "下行阴跌":
+        s += 0.6
+    obv = f.get("obv_grad_pct")
+    if obv is not None and -2.0 <= obv <= 2.0:
+        s += 0.5
+    vr = f.get("volume_ratio")
+    if vr is not None and vr >= 2.0:
+        s -= 1.5
+    atr = f.get("atr_pct")
+    if atr is not None and atr > 4.0:
+        s -= 0.4 * (atr - 4.0)
+    return s
+
+
+def key_q1_lowpos(f):
+    """Q1 位置优先：长周期低位(ext60<0) → 20 日区间低分位 → 贴 MA20。"""
+    e60 = f.get("ext60")
+    return (0 if (e60 is not None and e60 < 0) else 1,
+            _g(f, "frac20", 1.0), _g(f, "ext", 999), f["code"])
+
+
+def key_q2_combo(f):
+    """Q2 综合质量分（全指标加权，见 _q_raw）。"""
+    return (-_q_raw(f), f["code"])
+
+
+def key_q3_contrarian(f):
+    """Q3 逆向精选：MA60 下方 + 区间低分位 + 量比贴近 1（既不爆量也不死水）。"""
+    e60 = f.get("ext60")
+    vr = f.get("volume_ratio")
+    return (0 if (e60 is not None and e60 < 0) else 1,
+            _g(f, "frac20", 1.0),
+            abs((vr if vr is not None else 1.0) - 1.0),   # 越接近 1 越靠前
+            f["code"])
+
+
+def key_q4_guard(f):
+    """Q4 硬否决 + 排序：先剔除爆量(权重2)/区间顶部(权重1)，档内再按质量分排。"""
+    vr = f.get("volume_ratio")
+    ban = 0
+    if vr is not None and vr >= 2.0:
+        ban += 2
+    if _g(f, "frac20", 0.5) >= 0.66:
+        ban += 1
+    return (ban, -_q_raw(f), f["code"])
+
+
+def key_q5_pure(f):
+    """Q5 纯连续质量分：只留连续型分量（位置 + 波动惩罚），不依赖类别字段。
+
+    用于检验「类别加分是否只是过拟合」—— 若 Q5 与 Q2 接近，说明机制稳健。
+    """
+    frac = _g(f, "frac20", 0.5)
+    e60 = _g(f, "ext60", 999)
+    atr = _g(f, "atr_pct", 3.0)
+    s = (1.2 * (1.0 - min(1.0, max(0.0, frac)))
+         + 1.0 * (1.0 if e60 < 0 else 0.0)
+         - 0.4 * max(0.0, atr - 4.0))
+    return (-s, f["code"])
+
+
+def key_q6_score_tier(f):
+    """Q6 = Q2 + 高分档优先。
+
+    Q2 完全没用 score 字段，而 score 是已验证维度（诊断 1/5）：
+      score=5 -0.05%/PF0.99（占 89.3%）｜score=6 +0.62%/PF1.16｜score=7 -1.18%（仅 21 只）
+    → 必须**封顶成两档**（>=6 vs 其余），不能 score DESC，否则 21 只极端票霸榜。
+    """
+    return (0 if _g(f, "score", 0) >= 6 else 1, -_q_raw(f), f["code"])
+
+
+def key_q7_strong_low(f):
+    """Q7 = Q2 强低吸：frac20 权重 1.2 → 2.2。
+
+    frac20 是归因里最强且最单调的连续信号（<0.33 最强；>=0.66 为 -0.50%/PF0.88），
+    加大权重检验"低吸"还能不能再榨出收益。实测：+1.52% → +1.72%，PF 1.79 → 1.91。
+    """
+    return (-_q_raw(f, 2.2), f["code"])
+
+
+def key_q10(f):
+    """Q10 权重扫描：frac20 权重 → 3.2。"""
+    return (-_q_raw(f, 3.2), f["code"])
+
+
+def key_q11(f):
+    """Q11 权重扫描：frac20 权重 → 4.5。
+
+    这是**过拟合探针**：权重过大就退化成纯 frac20 单键（I 键实测仅 +0.84%），
+    所以 Q11 应当比 Q7 差。若 Q11 反而更好，说明是拟合噪音而非真实机制。
+    """
+    return (-_q_raw(f, 4.5), f["code"])
+
+
+def key_q12(f):
+    """Q12 分档版低吸：frac20<0.33 单独成档（归因最强组），档内再按质量分排。"""
+    frac = f.get("frac20")
+    tier = 0 if (frac is not None and frac < 0.33) else 1
+    return (tier, -_q_raw(f, 2.2), f["code"])
+
+
+def key_q8_ext60_ban(f):
+    """Q8 = Q2 + ext60 高位硬否决。
+
+    归因：ext60<0 → +1.33%/61.0%/PF1.48；0~5% → -0.49%；5~15% → -0.71%；>=15% → -1.14%。
+    → 不只在 ext60<0 时加分，还把 ext60>=5% 的直接沉底。
+    """
+    e60 = f.get("ext60")
+    ban = 1 if (e60 is not None and e60 >= 5.0) else 0
+    return (ban, -_q_raw(f), f["code"])
+
+
+def key_q9_full(f):
+    """Q9 = Q6 + Q8 合并：ext60 高位否决 → 高分档 → 质量分。"""
+    e60 = f.get("ext60")
+    ban = 1 if (e60 is not None and e60 >= 5.0) else 0
+    return (ban, 0 if _g(f, "score", 0) >= 6 else 1, -_q_raw(f), f["code"])
+
+
 KEYS: list[tuple[str, Callable]] = [
     ("A 现状: ext ASC", key_ext_asc),
     ("B score DESC", key_score_desc),
@@ -341,6 +526,21 @@ KEYS: list[tuple[str, Callable]] = [
     ("N 高分档 + ext ASC", key_hi_ext),
     ("O frac20 ASC + score6↓", key_frac20_score6),
     ("P 顶部否决 + 低吸", key_pos_guard),
+    # ── top4 精排候选：多维正向指标（量价/趋势/节奏），见 _q_raw 的归因依据 ──
+    ("Q1 位置优先 ext60+frac20", key_q1_lowpos),
+    ("Q2 综合质量分", key_q2_combo),
+    ("Q3 逆向精选 缩量低吸", key_q3_contrarian),
+    ("Q4 硬否决+质量分", key_q4_guard),
+    ("Q5 纯连续质量分", key_q5_pure),
+    # ── 第二轮：围绕 Q2 做增量（补上 Q2 漏掉的 score，以及更严的低位否决）──
+    ("Q6 Q2+高分档", key_q6_score_tier),
+    ("Q7 Q2+强低吸", key_q7_strong_low),
+    ("Q8 Q2+ext60否决", key_q8_ext60_ban),
+    ("Q9 高分档+ext60否决+Q2", key_q9_full),
+    # ── 第三轮：frac20 权重扫描（1.2 / 2.2 / 3.2 / 4.5）+ 分档版 ──
+    ("Q10 低吸w3.2", key_q10),
+    ("Q11 低吸w4.5(过拟合探针)", key_q11),
+    ("Q12 低吸分档+质量分", key_q12),
 ]
 
 
@@ -490,6 +690,39 @@ def _band_diag(feats, sim, field: str, bands: list, names: list):
               f"中位={st.median(v):>7.2f}%  胜率={len(wins) / len(v) * 100:>5.1f}%  PF={pf:>5.2f}")
 
 
+def _cat_diag(feats, sim, field: str, min_n: int = 10):
+    """按**类别型**特征分组，buy 池全样本跑模拟，看各组收益差异。
+
+    与 _band_diag（数值分桶）互补：量价与趋势的产出大多是类别（底背离/上行/金叉），
+    不能用数值分桶。这一步用于筛出「哪些指标真的有正向区分度」，避免凭直觉定权重。
+    """
+    buckets: dict = {}
+    for d in feats:
+        for f in feats[d].values():
+            v = f.get(field)
+            if v is None or v == "":
+                continue
+            r = sim(d, f)
+            if r["status"] == "closed":
+                buckets.setdefault(str(v), []).append(r["ret"])
+    rows = []
+    for k, v in buckets.items():
+        if len(v) < min_n:
+            continue
+        wins = [x for x in v if x > 0]
+        pf = (sum(wins) or 0.0) / (abs(sum(x for x in v if x <= 0)) or 1e-9)
+        rows.append((k, len(v), st.mean(v), st.median(v),
+                     len(wins) / len(v) * 100, pf))
+    if not rows:
+        print(f"    · {field}: 样本不足")
+        return
+    rows.sort(key=lambda x: -x[2])
+    print(f"    · {field}")
+    for k, n, mean, med, win, pf in rows:
+        print(f"        {k:<20} n={n:>5}  均值={mean:>7.2f}%  "
+              f"中位={med:>7.2f}%  胜率={win:>5.1f}%  PF={pf:>5.2f}")
+
+
 def _diag(feats, per_day, sim, args):
     """过拟合排查：特征区分度 + 逐日配对 + 时间稳定性 + topn 敏感性。"""
     # 1) buy 池内 score 分布（score 没有区分度的话，排序键 B~H 都无从谈起）
@@ -511,9 +744,11 @@ def _diag(feats, per_day, sim, args):
                   f"min={min(exts):.1f} p25={st.quantiles(exts, n=4)[0]:.1f} "
                   f"med={st.median(exts):.1f} max={max(exts):.1f}")
 
-    # 2) 逐日配对：最优键 vs 基线，看是不是靠少数几天撑起来的
-    base = "A 现状: ext ASC"
-    print("\n【诊断 2】逐日配对（候选键日均值 − 基线日均值，46 天）")
+    # 2) 逐日配对：候选键 vs 基线，看是不是靠少数几天撑起来的
+    #    ⚠ 基线取 **N 高分档 + ext ASC**（当前真正落地在 deep_tracker 的排序键），
+    #    而不是 A（历史基线，早已不用）。这样才能直接读出「新方案相对现状」的改进。
+    base = "N 高分档 + ext ASC"
+    print("\n【诊断 2】逐日配对（候选键日均值 − 基线日均值，基线 = N 当前落地键）")
     print(f"    {'排序键':<28}{'胜出天数':>9}{'日均差%':>10}{'t值':>8}")
     for name, _ in KEYS:
         if name == base:
@@ -558,6 +793,28 @@ def _diag(feats, per_day, sim, args):
                ["risk<4%", "risk 4~7%", "risk>=7%"])
     _band_diag(feats, sim, "atr_pct", [(None, 2.5), (2.5, 4.0), (4.0, 99)],
                ["atr<2.5%", "atr 2.5~4%", "atr>=4%"])
+
+    # 6) 量价 / 趋势 / 节奏的**类别**归因。
+    #    这些特征原脚本根本没提取（见 _feat_one），是 top4 精排的正向指标候选池。
+    #    全部走 sim 缓存，同一 (date, code) 只模拟一次，额外开销仅是分组统计。
+    print("\n【诊断 6】量价·趋势·节奏 类别归因（buy 池全样本，筛正向指标）")
+    for fld in ("divergence", "obv_trend", "health", "macd", "regime",
+                "rsi_zone", "pattern", "current_leg", "volatility"):
+        _cat_diag(feats, sim, fld)
+
+    print("\n【诊断 7】量价·位置·盈亏比 数值归因（buy 池全样本）")
+    _band_diag(feats, sim, "updown_vol", [(None, 0.8), (0.8, 1.0), (1.0, 1.2), (1.2, 99)],
+               ["涨跌量比<0.8", "0.8~1.0", "1.0~1.2", ">=1.2"])
+    _band_diag(feats, sim, "volume_ratio", [(None, 0.8), (0.8, 1.2), (1.2, 2.0), (2.0, 99)],
+               ["量比<0.8", "0.8~1.2", "1.2~2", ">=2"])
+    _band_diag(feats, sim, "obv_grad_pct", [(None, -2.0), (-2.0, 2.0), (2.0, 10.0), (10.0, 99)],
+               ["obv斜率<-2%", "-2~2%", "2~10%", ">=10%"])
+    _band_diag(feats, sim, "ext60", [(None, 0), (0, 5.0), (5.0, 15.0), (15.0, 99)],
+               ["ext60<0", "0~5%", "5~15%", ">=15%"])
+    _band_diag(feats, sim, "rsi14", [(None, 40), (40, 55), (55, 70), (70, 99)],
+               ["rsi<40", "40~55", "55~70", ">=70"])
+    _band_diag(feats, sim, "rr", [(None, 1.5), (1.5, 2.0), (2.0, 2.5), (2.5, 99)],
+               ["盈亏比<1.5", "1.5~2", "2~2.5", ">=2.5"])
 
     # 4) topn 敏感性
     print("\n【诊断 4】topn 敏感性（均值%）")
