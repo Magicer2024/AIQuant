@@ -265,7 +265,10 @@ def sync_indices_by_date(start_date: str, end_date: str, verbose: bool = True) -
     """
     from core.em_kline import fetch_index_klines
     results = {}
+    # 2026-09-05：东财 push2his 5 指数串行同窗口易触发 RemoteDisconnected（9-04 19:00 实测全部 3 次 retry 仍 RST），
+    # 每只 sleep 错开同子域风控窗口；baostock 仍保留作为 written==0 兜底，无业务回归。
     for code, name in MAJOR_INDICES:
+        time.sleep(0.4)
         written = 0
         # 1) 东财直连（优先，与个股快路径同源，秒级）
         try:
