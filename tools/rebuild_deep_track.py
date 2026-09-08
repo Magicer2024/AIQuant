@@ -54,6 +54,7 @@ def _stats(conn, table: str) -> dict:
         "pf": pf,
         "avg_hold": st.mean([r[2] or 0 for r in rows]),
         "stop_loss": reasons.count("stop_loss") / len(reasons) * 100,
+        "take": reasons.count("take_profit") / len(reasons) * 100,
         "trailing": reasons.count("trailing_stop") / len(reasons) * 100,
         "max_hold": reasons.count("max_hold_days") / len(reasons) * 100,
     }
@@ -65,7 +66,7 @@ def _print(tag: str, s: dict):
         return
     print(f"  {tag:<10} n={s['n']:>4}  均值={s['mean']:>7.2f}%  中位={s['median']:>7.2f}%  "
           f"胜率={s['win']:>5.1f}%  PF={s['pf']:>5.2f}  均持={s['avg_hold']:>4.1f}天  "
-          f"止损{s['stop_loss']:>4.1f}% / 移动止盈{s['trailing']:>4.1f}% / 到期{s['max_hold']:>4.1f}%")
+          f"止损{s['stop_loss']:>4.1f}% / 止盈{s['take']:>4.1f}% / 移动止盈{s['trailing']:>4.1f}% / 到期{s['max_hold']:>4.1f}%")
 
 
 def _rebuild(conn, table: str, dates: list) -> dict:

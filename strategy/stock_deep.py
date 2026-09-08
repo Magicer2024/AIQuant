@@ -24,7 +24,7 @@ from strategy.indicators import calc_all_indicators
 from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
 from config.personal_config import is_main_board, main_board_filter
 from config.strategy_params import DEEP_EMA20_AUX as _EMA20_AUX_CFG
-from config.strategy_params import DEEP_TRACK
+from config.strategy_params import DEEP_TRACK, DEEP_TP_AMP_RATIO
 
 # 环境变量支持 A/B 验证（tools/_eval_deep_buypoints.py）：DEEP_EMA20_AUX=1 强制开启、
 # 0 强制关闭，否则用配置默认（enabled=False = 基线）。模块加载时读取一次即可。
@@ -652,6 +652,22 @@ def _rhythm_adjust(score: int, ctx, rng=None) -> int:
         return score               # 回调末段，关注企稳反转
 
 
+def _reachable_take(close: float, stop_l: float, rhythm: dict, rr_target: float) -> Optional[float]:
+    """止盈档位 = 本股可达位：close × (1 + DEEP_TP_AMP_RATIO × 平均上涨波幅%)。
+
+    2026-09-08 出场多臂实验定案（tools/_eval_deep_exit_arms.py，依据见
+    config.strategy_params.DEEP_TP_AMP_RATIO 的注释）：旧固定 2.5rr 止盈中位需涨
+    +21%，84.7% 的笔只能到期离场；按本股波幅标定后触达率 4.3%→45%，两套口径
+    逐笔配对均显著为正。节奏统计不足（摆动腿太少，up_amp_avg=None）时回退旧
+    固定盈亏比口径，保证任何 buy/add 计划都有止盈价。
+    """
+    up_amp = (rhythm or {}).get("up_amp_avg")
+    if up_amp is not None and np.isfinite(up_amp) and up_amp > 0:
+        return round(close * (1 + DEEP_TP_AMP_RATIO * float(up_amp) / 100.0), 2)
+    risk = (close - stop_l) / close if close > 0 else 0
+    return round(close + risk * rr_target * close, 2) if risk > 0 else None
+
+
 def _signal_plan_at(df: pd.DataFrame, rhythm: dict, i: int,
                     stop_mult: float = 2.5, rr_target: float = 2.5) -> dict:
     """在第 i 行评估规则信号 + 节奏修正 + 分档，返回该日的完整建议计划。
@@ -671,10 +687,7 @@ def _signal_plan_at(df: pd.DataFrame, rhythm: dict, i: int,
     atr = float(row["ATR"]) if not np.isnan(row["ATR"]) else np.nan
     entry = round(close, 2)
     stop_l = round(close - stop_mult * atr, 2) if (level in ("buy", "add") and atr and np.isfinite(atr) and atr > 0) else None
-    tp_l = None
-    if stop_l:
-        risk = (close - stop_l) / close
-        tp_l = round(close + risk * rr_target * close, 2)
+    tp_l = _reachable_take(close, stop_l, rhythm, rr_target) if stop_l else None
     return {
         "date": df.index[i],
         "close": entry,
@@ -694,7 +707,7 @@ def recent_advice(df: pd.DataFrame, rhythm: dict, days: int = 30,
     """逐日规则信号（含节奏修正），返回最近 days 个交易日的建议时间线。
 
     对 buy/add 日额外给出当日的参考建仓计划（入场价=当日收盘 / 止损=收盘-2.5×ATR /
-    止盈=入场+盈亏比×风险），供前端在 K 线上标注买点并复盘"推荐是否正确"。
+    止盈=本股可达位，见 _reachable_take），供前端在 K 线上标注买点并复盘"推荐是否正确"。
     """
     if len(df) < 2:
         return []
@@ -899,7 +912,7 @@ def _current_signal(df: pd.DataFrame, trend: dict, volprice: dict, rhythm: dict,
             else:
                 risks.append("处于回调波段，等待止跌信号")
 
-    # 止盈止损：ATR 止损（含摆动低点兜底）+ 固定盈亏比止盈
+    # 止盈止损：ATR 止损（含摆动低点兜底）+ 本股可达位止盈（见 _reachable_take）
     if atr and np.isfinite(atr) and atr > 0:
         stop = close - stop_mult * atr
     else:
@@ -908,8 +921,8 @@ def _current_signal(df: pd.DataFrame, trend: dict, volprice: dict, rhythm: dict,
         stop = max(stop, swing_low)   # 止损不深于近期摆动低点
     stop = round(stop, 2)
     risk = (close - stop) / close if close > 0 else 0
-    tp = round(close + risk * rr_target * close, 2)
-    reward = (tp - close) / close if close > 0 else 0
+    tp = _reachable_take(close, stop, rhythm, rr_target)
+    reward = (tp - close) / close if (tp and close > 0) else 0
     rr = round(reward / risk, 2) if risk > 0 else None
 
     # 排序特征（供候选排名用，见 deep_tracker.sync_from_scan）

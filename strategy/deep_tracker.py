@@ -20,13 +20,15 @@
         T+1 起 entry_window_days 个交易日内，只要某日 **最低价触及买点** 才算成交，
         成交价 = min(sig_entry, 当日开盘)（开盘已低于买点则按开盘价，否则按买点成交）。
         → 不追高：涨上去不追，只在回踩时买。窗口内一直没回踩则判 expired，不计入统计。
-· 卖点：与 core/outcome_tracker._evaluate_short（方案A）同口径 ——
+· 卖点：止损 / 固定止盈 / 到期（2026-09-08 出场多臂实验定案，tools/_eval_deep_exit_arms.py，
+        依据见 config.strategy_params.DEEP_TP_AMP_RATIO 注释；原移动止盈在主板大样本
+        逐笔配对 t=+1.09 不显著，已下线）——
         exec_entry = 实际建仓价
-        止损价   = 推荐自带 stop_loss，缺失回退 exec_entry × (1 + short_stop_loss)
-        启动线   = exec_entry × (1 + short_take_profit)，回退推荐自带 take_profit
-        移动止盈 = 持仓最高价 × (1 - short_trailing_pct)，只上移不下移
+        止损价 = 推荐自带 stop_loss，缺失回退 exec_entry × (1 + short_stop_loss)
+        止盈价 = 推荐自带 take_profit（= 按本股平均上涨波幅标定的可达位，
+                 见 stock_deep._reachable_take；缺失则只按止损+到期出场）
         T+1 规则：建仓当日只累计持仓，不判出场（A股当日买不能卖）
-        收盘价 ≤ 止损 → stop_loss；已启动且收盘 ≤ 移动止盈线 → trailing_stop
+        收盘 ≤ 止损 → stop_loss；收盘 ≥ 止盈 → take_profit
         持满 max_hold_days 个交易日 → max_hold_days（按当日收盘了结）
 · 收益：return_pct 基于实际建仓价与实际出场价；max_return/min_return 用持仓期盘中最高低点。
 · 持仓时间：hold_tdays = 建仓日到出场日之间的**交易日数**（不含建仓日）；hold_days 为自然日。
@@ -41,7 +43,7 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 
-from config.strategy_params import DEEP_TRACK, get_param
+from config.strategy_params import DEEP_TRACK, DEEP_TP_AMP_RATIO, get_param
 
 _TABLE = "deep_track"
 
@@ -55,7 +57,8 @@ STATUS_EXPIRED = "expired"
 # 出场原因 → 中文（前端直接展示）
 EXIT_LABEL = {
     "stop_loss": "止损",
-    "trailing_stop": "移动止盈",
+    "take_profit": "止盈",
+    "trailing_stop": "移动止盈",   # 2026-09-08 前的历史平仓单仍用此原因
     "max_hold_days": "到期了结",
     "manual": "手动平仓",
     "delisted": "数据缺失",
@@ -168,16 +171,6 @@ def _stop_pct() -> float:
     v = _p("stop_loss_pct", "short_stop_loss", -0.06)
     v = float(v)
     return v if v < 0 else -abs(v)
-
-
-def _tp_pct() -> float:
-    """移动止盈启动线比例，如 0.08"""
-    return float(_p("take_profit_pct", "short_take_profit", 0.08) or 0.08)
-
-
-def _trailing_pct() -> float:
-    """移动止盈回撤比例，如 0.03"""
-    return float(_p("trailing_pct", "short_trailing_pct", 0.03) or 0.03)
 
 
 def _rank_order_by(conn) -> str:
@@ -348,7 +341,7 @@ def _try_fill(conn, t: dict) -> Optional[str]:
 
 
 def _run_exit(conn, t: dict) -> Optional[dict]:
-    """holding → closed：按止损 / 移动止盈 / 持仓上限出场并结算。
+    """holding → closed：按止损 / 固定止盈 / 持仓上限出场并结算。
 
     返回出场结果 dict，未出场返回 None（已更新浮盈）。
     """
@@ -377,18 +370,10 @@ def _run_exit(conn, t: dict) -> Optional[dict]:
     stop = t["sig_stop"]
     if not stop or stop <= 0:
         stop = exec_entry * (1 + _stop_pct())
-    # 启动线：参数比例优先（基于实际建仓价），回退推荐自带止盈
-    tp_ratio = _tp_pct()
-    launch = exec_entry * (1 + tp_ratio) if 0 < tp_ratio < 1.0 else None
-    if not launch and t["sig_tp"] and t["sig_tp"] > 0:
-        launch = float(t["sig_tp"])
-    trail = _trailing_pct()
-    trail_ok = trail is not None and 0.01 <= trail < 1.0
+    # 止盈价：推荐自带的本股可达位（2026-09-08 定案，见模块头注释）；
+    # 缺失则只按止损+到期出场（多臂实验 A4 显示止盈缺位≈基线，不致命）
+    take = float(t["sig_tp"]) if t["sig_tp"] and t["sig_tp"] > 0 else None
     max_hold = _max_hold()
-
-    highest = None
-    tline = None
-    launched = False
     now = _now()
 
     for j, p in enumerate(prices[:max_hold], start=1):
@@ -397,14 +382,6 @@ def _run_exit(conn, t: dict) -> Optional[dict]:
             break
         high = p["high"] if p["high"] else close
         low = p["low"] if p["low"] else close
-        if highest is None or high > highest:
-            highest = high
-        if not launched and launch and highest >= launch:
-            launched = True
-        if launched and trail_ok:
-            line = highest * (1 - trail)
-            if tline is None or line > tline:
-                tline = line
 
         # 持仓期浮盈/浮亏（每笔都要记，无论最终如何出场）
         mr = (high - exec_entry) / exec_entry * 100
@@ -419,8 +396,8 @@ def _run_exit(conn, t: dict) -> Optional[dict]:
         exit_reason = None
         if close <= stop:
             exit_reason = "stop_loss"
-        elif launched and tline is not None and close <= tline:
-            exit_reason = "trailing_stop"
+        elif take and close >= take:
+            exit_reason = "take_profit"
         elif j >= max_hold:
             exit_reason = "max_hold_days"
 
@@ -644,8 +621,7 @@ def get_stats(conn: sqlite3.Connection, days: Optional[int] = None) -> dict:
             "entry_window_days": _entry_window(),
             "max_hold_days": _max_hold(),
             "stop_loss_pct": round(_stop_pct(), 4),
-            "take_profit_pct": round(_tp_pct(), 4),
-            "trailing_pct": round(_trailing_pct(), 4),
+            "tp_amp_ratio": DEEP_TP_AMP_RATIO,
         },
     }
 

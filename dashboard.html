@@ -1631,7 +1631,7 @@ function renderSdTrack(items, st, updatedAt) {
           '<button class="btn btn-sm" onclick="refreshSdTrack(0)" title="立即按最新行情推进一次：检查是否触发建仓/出场，并结算收益">🔄 推进</button>' +
           '<input id="sdBackfillDays" type="number" class="bt-mini-input" value="30" min="1" max="90" style="width:54px;text-align:center;padding:3px 6px" title="回补交易日的天数（每个交易日都要全市场扫描一次，约 45 秒）" onkeydown="if(event.key===\'Enter\')refreshSdTrackFromInput()">' +
           '<button class="btn btn-sm" onclick="refreshSdTrackFromInput()" title="先补跑这些交易日的全市场深析扫描（用当天及之前的行情，无未来函数），再建跟踪单并推进出场。后台执行，约 45 秒/天">⏪ 回补</button>' +
-          '<span class="text-muted" style="font-size:11px">每日 19:00 盘后自动跑 · 买点回踩才成交 · 卖点=止损/移动止盈/到期</span>' +
+          '<span class="text-muted" style="font-size:11px">每日 19:00 盘后自动跑 · 买点回踩才成交 · 卖点=止损/止盈/到期</span>' +
           (updatedAt ? '<span class="text-muted" style="font-size:11px;margin-left:auto">更新 ' + updatedAt + '</span>' : '') +
         '</div>';
 
@@ -1700,8 +1700,9 @@ function renderSdTrack(items, st, updatedAt) {
 
     var note = '<div class="sd-track-note">口径：买点=推荐日收盘，其后 ' + (p.entry_window_days || 5) +
         ' 个交易日内<b>回踩</b>才成交（涨上去不追，未回踩判失效且不计胜率）；' +
-        '出场用推荐自带止损，浮盈达 ' + ((p.take_profit_pct || 0) * 100).toFixed(0) + '% 启动移动止盈（回撤 ' +
-        ((p.trailing_pct || 0) * 100).toFixed(0) + '% 清仓），持满 ' + (p.max_hold_days || 10) +
+        '出场用推荐自带止损/止盈（止盈=本股平均上涨波幅×' +
+        Math.round((p.tp_amp_ratio || 0.33) * 100) + '% 标定的可达位，收盘达价即卖），持满 ' +
+        (p.max_hold_days || 10) +
         ' 个交易日按收盘了结。持仓时间按<b>交易日</b>计。</div>';
 
     // 回补后会有几百笔，一次全渲染既卡又难找，这里分批 + 「加载更多」

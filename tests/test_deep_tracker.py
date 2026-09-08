@@ -6,7 +6,7 @@
  3. 窗口内未回踩 → expired（不计入胜率统计）
  4. T+1 规则：建仓当日大跌也不触发止损
  5. 止损出场 + 持仓交易日/收益结算
- 6. 移动止盈：盘中 high 达启动线才启用，收盘跌破移动线出场
+ 6. 固定止盈：收盘达推荐止盈价（本股可达位）即离场；盘中冲高不算
  7. 到期了结：持满 max_hold_days 按收盘平掉
  8. 建仓后长期无数据（全市场已前进）→ delisted，不计盈亏
  9. 建仓日即全市场最新交易日 → 保持 holding，不误判
@@ -28,8 +28,6 @@ SP.DEEP_TRACK.update({
     "entry_window_days": 5,
     "max_hold_days": 10,
     "stop_loss_pct": -0.06,     # 止损 -6%
-    "take_profit_pct": 0.08,    # 启动线 +8%
-    "trailing_pct": 0.03,       # 移动止盈回撤 3%
 })
 
 # 交易日序列（2026-01-05 起连续 20 个自然日，全部视作交易日，便于算 hold_days）
@@ -166,40 +164,39 @@ def test_stop_loss_and_settlement():
     print(f"✓ 止损出场：{r['return_pct']}% · 持仓 {r['hold_tdays']} 个交易日")
 
 
-# ── 6. 移动止盈 ───────────────────────────────────────────────────
-def test_trailing_stop():
-    """移动止盈：high 达 +8% 启动线才启用，收盘跌破移动线（最高价×0.97）出场"""
+# ── 6. 固定止盈（本股可达位）──────────────────────────────────────
+def test_take_profit():
+    """收盘达到推荐止盈价 sig_tp 即离场；T+1 建仓日不判"""
     c = _conn()
     _bars(c, "000006", [(10.0, 10.1, 9.9, 10.0)])
     _bars(c, "000006", [(10.0, 10.2, 9.95, 10.1)], start=1)   # 建仓 @10.00，T+1 不判
-    _bars(c, "000006", [(10.2, 11.0, 10.2, 10.9)], start=2)   # high 11.0 ≥ 10.8 启动；线 10.67，收 10.9 持有
-    _bars(c, "000006", [(10.9, 11.5, 10.8, 11.0)], start=3)   # 新高 11.5 → 线 11.155，收 11.0 ≤ 线 → 出场
-    _signal(c, "000006", DATES[0], entry=10.0, stop=9.4)
+    _bars(c, "000006", [(10.2, 11.8, 10.2, 11.60)], start=2)  # 收 11.60 ≥ 止盈 11.5 → 出场
+    _signal(c, "000006", DATES[0], entry=10.0, stop=9.4, tp=11.5)
     dt.sync_from_scan(c, DATES[0])
     dt.update_open_tracks(c)
     r = _one(c, "000006")
     assert r["status"] == "closed"
-    assert r["exit_reason"] == "trailing_stop", r["exit_reason"]
-    assert abs(r["exit_price"] - 11.0) < 1e-6
-    assert abs(r["return_pct"] - 10.0) < 0.01, r["return_pct"]
-    assert r["hold_tdays"] == 2, r["hold_tdays"]
-    assert abs(r["max_return"] - 15.0) < 0.01, r["max_return"]   # 盘中最高 11.5 → +15%
-    print(f"✓ 移动止盈：+{r['return_pct']}% · 持仓 {r['hold_tdays']} 日 · 最大浮盈 {r['max_return']}%")
+    assert r["exit_reason"] == "take_profit", r["exit_reason"]
+    assert abs(r["exit_price"] - 11.60) < 1e-6
+    assert abs(r["return_pct"] - 16.0) < 0.01, r["return_pct"]
+    assert r["hold_tdays"] == 1, r["hold_tdays"]
+    assert abs(r["max_return"] - 18.0) < 0.01, r["max_return"]   # 盘中最高 11.8 → +18%
+    print(f"✓ 固定止盈：+{r['return_pct']}% · 持仓 {r['hold_tdays']} 日 · 最大浮盈 {r['max_return']}%")
 
 
-def test_no_trailing_before_launch():
-    """未达启动线前的正常回撤不应被移动止盈扫出去"""
+def test_no_take_on_intraday_spike():
+    """盘中 high 冲过止盈价但收盘没站上 → 不出场（收盘价口径，不做插针触发）"""
     c = _conn()
     _bars(c, "000007", [(10.0, 10.1, 9.9, 10.0)])
     _bars(c, "000007", [(10.0, 10.3, 9.95, 10.2)], start=1)
-    _bars(c, "000007", [(10.2, 10.25, 9.9, 9.95)], start=2)   # 回撤但没破止损 9.4，也没启动
-    _bars(c, "000007", [(9.9, 10.0, 9.8, 9.95)], start=3)
-    _signal(c, "000007", DATES[0], entry=10.0, stop=9.4)
+    _bars(c, "000007", [(10.2, 11.7, 10.1, 11.0)], start=2)   # high 11.7 > 11.5 但收 11.0
+    _bars(c, "000007", [(11.0, 11.2, 10.8, 11.1)], start=3)
+    _signal(c, "000007", DATES[0], entry=10.0, stop=9.4, tp=11.5)
     dt.sync_from_scan(c, DATES[0])
     dt.update_open_tracks(c)
     r = _one(c, "000007")
     assert r["status"] == "holding", (r["status"], r["exit_reason"])
-    print("✓ 未达启动线的回撤 → 继续持有")
+    print("✓ 盘中冲高未收盘确认 → 继续持有")
 
 
 # ── 7. 到期了结 ───────────────────────────────────────────────────
@@ -255,15 +252,13 @@ def test_hold_when_entry_is_last_bar():
 def test_stats():
     """胜率 / 平均持仓 / 盈亏比 / 出场原因分布"""
     c = _conn()
-    # 两笔：A 止盈 +10%（3 日），B 止损 -7%（1 日）
-    for code, bars in (
-        ("100001", [(10.0, 10.1, 9.9, 10.0), (10.0, 10.2, 9.95, 10.1),
-                    (10.2, 11.0, 10.2, 10.9), (10.9, 11.5, 10.8, 11.0)]),
-        ("100002", [(10.0, 10.1, 9.9, 10.0), (10.1, 10.2, 10.0, 10.1),
-                    (10.0, 10.0, 9.30, 9.30)]),
-    ):
-        _bars(c, code, bars)
-        _signal(c, code, DATES[0], entry=10.0, stop=9.4)
+    # 两笔：A 止盈 +10%（收盘 11.0 达止盈价 11.0，持 2 交易日），B 止损 -7%（1 日）
+    _bars(c, "100001", [(10.0, 10.1, 9.9, 10.0), (10.0, 10.2, 9.95, 10.1),
+                        (10.2, 11.0, 10.2, 10.9), (10.9, 11.5, 10.8, 11.0)])
+    _signal(c, "100001", DATES[0], entry=10.0, stop=9.4, tp=11.0)
+    _bars(c, "100002", [(10.0, 10.1, 9.9, 10.0), (10.1, 10.2, 10.0, 10.1),
+                        (10.0, 10.0, 9.30, 9.30)])
+    _signal(c, "100002", DATES[0], entry=10.0, stop=9.4)
     dt.sync_from_scan(c, DATES[0])
     dt.update_open_tracks(c)
     st = dt.get_stats(c)
@@ -272,7 +267,7 @@ def test_stats():
     assert abs(st["avg_return"] - 1.5) < 0.01, st["avg_return"]      # (10 - 7) / 2
     assert st["avg_hold_tdays"] == 1.5, st["avg_hold_tdays"]         # (2 + 1) / 2
     assert abs(st["profit_factor"] - 10 / 7) < 0.01, st["profit_factor"]
-    assert st["by_reason"] == {"移动止盈": 1, "止损": 1}, st["by_reason"]
+    assert st["by_reason"] == {"止盈": 1, "止损": 1}, st["by_reason"]
     print(f"✓ 统计：胜率 {st['win_rate']}% · 平均持仓 {st['avg_hold_tdays']} 日 · "
           f"盈亏比 {st['profit_factor']}")
 
@@ -354,8 +349,8 @@ def test_close_manual():
 if __name__ == "__main__":
     for fn in (
         test_fill_on_pullback, test_fill_on_gap_down, test_expire_when_no_pullback,
-        test_t1_no_exit, test_stop_loss_and_settlement, test_trailing_stop,
-        test_no_trailing_before_launch, test_max_hold_exit, test_delisted,
+        test_t1_no_exit, test_stop_loss_and_settlement, test_take_profit,
+        test_no_take_on_intraday_spike, test_max_hold_exit, test_delisted,
         test_hold_when_entry_is_last_bar, test_stats, test_tracks_filter_and_order,
         test_sync_idempotent, test_close_manual,
     ):

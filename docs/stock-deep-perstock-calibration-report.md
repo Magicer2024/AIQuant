@@ -203,3 +203,43 @@ PYTHONIOENCODING=utf-8 SAMPLE=200 python tools/_eval_deep_exit_reach.py
 3. 两个实验都是"每个信号独立成笔"，笔与笔在时间上重叠，**不等于可同时在场的资金组合**；1 万元本金实际只能同时持有 2~3 票。
 4. **未计交易成本**（印花税 + 佣金单边约 0.1~0.15%），持有期越短影响越大 —— 方向 A1 必须把成本加进去再下结论。
 5. 样本窗口 250 个交易日、截止 2026-09-08，未覆盖完整牛熊周期。
+
+---
+
+## 8. 出场侧多臂验证结果与定案（2026-09-08 补充）
+
+方向 A 的多臂并测已完成（`tools/_eval_deep_exit_arms.py`，12 臂同批交易逐笔配对，
+往返成本 0.4%，比较域=信号后 ≥21 个交易日保证所有臂走完）：
+
+| 臂 | 部署队列 199 票 / 8648 笔 | 主板 300 票 / 12209 笔 |
+|---|---|---|
+| A0 基线（固定止盈 2.5rr 持10） | 胜率 68.5% 均值 +2.80% 日均 +0.249% | 69.8% +3.89% 日均 +0.361% |
+| **A2a 止盈=0.33×up_amp 持10** | **73.7% +3.19% 日均+0.364%，配对 +0.388pp t=+8.49** | **74.3% +4.16% 日均+0.487%，配对 +0.270pp t=+5.87** |
+| A2b 止盈=0.5×up_amp | 配对 +0.377pp t=+10.39，胜率 70.5% | 配对 +0.366pp t=+10.35，胜率 71.4% |
+| T1 移动止盈 8%/3%（deep_track 原口径） | 72.3%，配对 +0.137pp t=+3.17 | 75.3%，配对 +0.055pp **t=+1.09 不显著** |
+| A1a 持5 | 配对 −0.587pp t=−10.11 | −0.917pp t=−15.06 |
+| A1b/c 持15/20 | 均值升但胜率/P5 尾部/日均全面变差 | 同 |
+| A3 止损 cap10% | 配对 +0.024pp t=+3.42 | +0.008pp **t=+0.82 不显著**（救 171 / 误伤 113） |
+| A4 无止盈 | ≈基线（2.5rr 止盈形同虚设的直接证据） | 同 |
+
+**定案：A2a 落地，A1/A3 不落地，deep_track 移动止盈统一切换为 A2a。**
+- A2a 是唯一两套口径配对差都显著为正、且胜率/中位/日均资金效率同时领先的臂；
+  止盈触达率 4.3%→45%，平均持仓 9.7→7.7 天。
+- A2b 均值更高但靠少数大赢单，胜率/触达率/中位全面低于 A2a，k=0.33 是平衡点。
+- 已同步到生产（本次改动）：
+  - `config/strategy_params.py`：新增 `DEEP_TP_AMP_RATIO=0.33`，DEEP_TRACK 删除
+    take_profit_pct/trailing_pct；
+  - `strategy/stock_deep.py`：`_reachable_take` 统一供 `_signal_plan_at`（时间线/持仓统计/
+    K 线计划虚线）与 `_current_signal`（扫描落库 → deep_track.sig_tp）；节奏统计缺失回退旧 2.5rr；
+  - `strategy/deep_tracker.py`：`_run_exit` 移动止盈下线，改为收盘 ≥ sig_tp 固定止盈
+    （新增出场原因 `take_profit`，历史 `trailing_stop` 平仓单保留原样展示）；
+  - `dashboard.html`：跟踪面板口径说明同步；`tests/test_deep_tracker.py` 全绿。
+- 过渡说明：切换前已建仓的 holding 单 sig_tp 仍是旧 2.5rr 价（远到基本触不到），
+  等效按 A4（止损+到期）走完，A4≈基线，不构成风险；无需重建 deep_track
+  （本次没有改候选排序/过滤口径）。
+
+复现：
+```bash
+PYTHONIOENCODING=utf-8 SAMPLE=300 python tools/_eval_deep_exit_arms.py      # 主板口径
+PYTHONIOENCODING=utf-8 DEEP_TRACK=1 python tools/_eval_deep_exit_arms.py    # 部署队列口径
+```
