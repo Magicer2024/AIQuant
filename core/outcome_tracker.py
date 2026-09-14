@@ -162,16 +162,28 @@ def short_market_gate_sql(conn, start_date: str, end_date: str | None = None,
 
 
 def short_observe_bottom_sql(alias: str = "s") -> tuple[str, list]:
-    """抄底线「短线融合」降观察线的 SQL 片段（2026-09-06，三处出口共用）。
+    """抄底线「短线融合」的短线名额占用条件（2026-09-06 落地，三处出口共用）。
 
     short_observe_bottom=1 时不占短线名额：今日推荐 / 出场跟踪 / 复盘入库
     三处 short 组 WHERE 统一排除该策略（与「缩量回踩」停用同模式，但保留
     开关便于随时恢复观察）。返回 (sql_cond, params)。
+
+    2026-09-10 收窄：原实现是「排除全部短线融合」，而短线信号 100% 是
+    strategy='短线融合'，直接导致短线链路零产出（/api/investor/today short=0）。
+    现按 `short_observe_bottom_min_ext`（pct_above_ma20 下限）只排除
+    「扩展度不足的抄底票」，保留已站上 MA20 的启动票：
+      - min_ext = 0  → 等价旧行为（排除全部），向后兼容
+      - min_ext > 0  → (非短线融合) OR (扩展度达标)
+    参数依据见 config/strategy_params.py 中该参数注释（3 年同口径回测）。
     """
     from config.strategy_params import get_param
-    if int(get_param("short_observe_bottom") or 0):
+    if not int(get_param("short_observe_bottom") or 0):
+        return "1", []
+    thr = float(get_param("short_observe_bottom_min_ext") or 0)
+    if thr <= 0:
         return (f"COALESCE({alias}.strategy, '') != '短线融合'", [])
-    return "1", []
+    return (f"(COALESCE({alias}.strategy, '') != '短线融合' "
+            f"OR COALESCE({alias}.pct_above_ma20, 0) >= ?)", [thr])
 
 
 # ─────────────────────────────────────────────
