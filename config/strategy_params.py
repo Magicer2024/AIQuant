@@ -205,6 +205,16 @@ EXTENSION_FILTER = {
 #   在主板大样本配对 t=+1.09 不显著，故统一切换为本口径。
 DEEP_TP_AMP_RATIO = 0.33
 
+# 深析链统一回看窗口（K 线根数）。⚠ 必须被三处共用，不要再各写一份常量：
+#   1) strategy/stock_deep.analyze_stock      —— 个股深度面板 / K 线虚线
+#   2) strategy/stock_deep.run_full_market_scan —— 每日盘后全市场扫描落库
+#   3) tools/backfill_deep_scan.py            —— 历史回补（独立进程）
+# 此前 2/3 硬编码 180、1 用 260，导致同一个交易日在「明日买入候选」和 K 线上
+# 给出不同档位（实测 001298：2026-09-07 扫描=buy/5 vs 面板=add/4；09-08 add/2 vs hold/1），
+# 用户读成"卡片说买入、点蜡烛却是观望"。取 260 与止盈标定口径一致
+# （tools/_eval_deep_exit_arms.py 的 LOOKBACK=250）。
+DEEP_LOOKBACK = 260
+
 DEEP_TRACK = {
     "enabled": True,
     # 每日「主推」只数：这些才会真正建跟踪单（等价于"今天真金白银该买哪几只"）。

@@ -2612,11 +2612,13 @@ def stock_deep(code: str):
 
     GET /api/investor/stock_deep/600519?lookback=260&recent_days=45
     返回 { code, name, industry, as_of, latest, trend, volume_price, rhythm,
-           signal, recent_advice, chart }。
+           signal, recent_advice, chart, track_events }。
+    track_events = 该股跟踪单的实际建仓/卖出成交点（K 线叠加用，与 B/S 档位标记不同源）。
     数据不足返回 { insufficient: true, reason }。
     """
     try:
-        lookback = request.args.get("lookback", 260, type=int)
+        from config.strategy_params import DEEP_LOOKBACK
+        lookback = request.args.get("lookback", DEEP_LOOKBACK, type=int)
         recent_days = request.args.get("recent_days", 45, type=int)
         lookback = max(120, min(lookback, 600))
         recent_days = max(10, min(recent_days, 90))
@@ -2624,6 +2626,8 @@ def stock_deep(code: str):
         from strategy.stock_deep import analyze_stock
         with get_conn() as conn:
             result = analyze_stock(conn, code, lookback=lookback, recent_days=recent_days)
+            from strategy.deep_tracker import get_track_events
+            result["track_events"] = get_track_events(conn, code)
         return ok(_sanitize(result))
     except Exception as e:
         return fail(f"个股深度分析失败: {e}", 500)

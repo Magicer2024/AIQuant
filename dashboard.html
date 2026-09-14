@@ -1680,6 +1680,12 @@ function renderSdTrack(items, st, updatedAt) {
             : '<span style="opacity:.65" title="等待回踩到买点才成交；窗口期 ' + (p.entry_window_days || 5) + ' 个交易日">待回踩 @' + _sdPx(it.sig_entry) + '</span>';
         var exitTxt = it.exit_date ? it.exit_date.slice(5) + ' @' + _sdPx(it.exit_price) : '--';
         var stTxt = it.status_label + (it.exit_reason_label ? ' · ' + it.exit_reason_label : '');
+        // 持有期内被再次推荐：合并进本单不另建，推荐日列标 +N，悬停看合并日期
+        var rerec = (it.rerec_dates && it.rerec_dates.length)
+            ? ' <span style="color:var(--accent, #e0b34d);cursor:help" title="持有期内又推荐：' +
+              it.rerec_dates.map(function(x){return String(x).slice(5);}).join('、') +
+              '（已并入本单，不重复建仓）">+' + it.rerec_dates.length + '</span>'
+            : '';
         var ops = (it.status === 'holding' || it.status === 'watching'
                      ? '<button class="sd-op" onclick="closeSdTrack(' + it.id + ',\'' + (it.name || it.code) + '\')">平仓</button>' : '') +
                   '<button class="sd-op danger" onclick="delSdTrack(' + it.id + ',\'' + (it.name || it.code) + '\')">删</button>';
@@ -1687,7 +1693,7 @@ function renderSdTrack(items, st, updatedAt) {
             '<td class="name-td"><span style="cursor:pointer;color:var(--text-primary)" onclick="pickSdCandidate(\'' + it.code + '\')">' +
                 (it.name || it.code) + '</span>' +
                 '<span class="text-muted" style="margin-left:6px">' + it.code + '</span></td>' +
-            '<td class="num">' + (it.scan_date || '--').slice(5) + '</td>' +
+            '<td class="num">' + (it.scan_date || '--').slice(5) + rerec + '</td>' +
             '<td class="num">' + _sdPx(it.sig_entry) + '</td>' +
             '<td class="num">' + entryTxt + '</td>' +
             '<td class="num">' + exitTxt + '</td>' +
@@ -1700,6 +1706,7 @@ function renderSdTrack(items, st, updatedAt) {
 
     var note = '<div class="sd-track-note">口径：买点=推荐日收盘，其后 ' + (p.entry_window_days || 5) +
         ' 个交易日内<b>回踩</b>才成交（涨上去不追，未回踩判失效且不计胜率）；' +
+        '同一股票在持有期内再次推荐<b>并入原单不重复建仓</b>（推荐日后标 +N）；' +
         '出场用推荐自带止损/止盈（止盈=本股平均上涨波幅×' +
         Math.round((p.tp_amp_ratio || 0.33) * 100) + '% 标定的可达位，收盘达价即卖），持满 ' +
         (p.max_hold_days || 10) +
@@ -2153,7 +2160,14 @@ function _sdBuildKlineInputs(data) {
         if (inBuy && !prevInBuy) marks.push({ date: a.date, price: k.low, type: 'buy', adv: a });
         if (inSell && (!pA || pA.level !== 'sell')) marks.push({ date: a.date, price: k.high, type: 'sell', adv: a });
     }
-    return { kdata: kdata, dates: dates, ohlc: ohlc, volData: volData, marks: marks };
+    // 跟踪单的**实际成交点**：与上面的 B/S 不同源 —— B/S 是每日规则档位（y 无价格含义），
+    // 这里的 y 是真金白银的成交价。两套同屏必须分色分形，否则用户会把档位读成成交。
+    var trackMarks = [];
+    (data.track_events || []).forEach(function(e) {
+        if (!e || !e.date || e.price == null || !dateK[e.date]) return;   // 事件在绘图窗口外
+        trackMarks.push(e);
+    });
+    return { kdata: kdata, dates: dates, ohlc: ohlc, volData: volData, marks: marks, trackMarks: trackMarks };
 }
 
 function sdToggleIndicator(name) {
@@ -2242,7 +2256,7 @@ function _sdPlanLines(data, marks) {
         hint = '虚线 = ' + _sdPinnedDate + ' 当日计划 入场 ' + fmtPx(src.entry_price)
              + ' / 止损 ' + fmtPx(src.stop_loss) + ' / 止盈 ' + fmtPx(src.take_profit) + ' · ' + modeTxt;
     } else {
-        hint = '虚线 = 今日计划 · 点蜡烛看当天，长按锁定';
+        hint = '虚线 = 今日计划 · 点蜡烛看当天，长按锁定 · ▲建/◆卖 = 跟踪单实际成交价（B/S 只是档位信号，非成交）';
     }
     return {
         markLine: { silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1 }, label: { position: 'insideEndTop', fontSize: 10 }, data: ml },
@@ -2330,7 +2344,7 @@ function renderStockDeepChart(data) {
     var h = Math.min(baseH + (activeCount - 1) * 90, window.innerWidth < 768 ? 520 : 800);
     dom.style.height = h + 'px';
     var chart = ChartManager.get('stockdeep', dom);
-    var opt = buildKlineOption(inx.kdata, inx.dates, inx.ohlc, inx.volData, inx.marks, _sdIndicators);
+    var opt = buildKlineOption(inx.kdata, inx.dates, inx.ohlc, inx.volData, inx.marks, _sdIndicators, inx.trackMarks);
     opt.title.text = (data.code ? (data.code + ' · ' + (data.name || '')) : '') + '  K线';
     chart.__sdMarks = inx.marks;
     chart.__sdDates = inx.dates;
@@ -3919,7 +3933,7 @@ var klineIndicators = { vol: true, macd: false, kdj: false };
 /**
  * 根据当前激活的指标，动态构建 ECharts 配置
  */
-function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
+function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, trackMarks) {
     var C = {
         // fallback 为纯回退值（CSS 变量缺失时才生效）
         axis: cssVar('--chart-axis', '#6B7A9A'),
@@ -4007,6 +4021,11 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
     // 当日 OHLC，把标记信息并进去即可；若改用 series 级 item 触发，会和 axis 抢显示。
     var markByDate = {};
     (marks || []).forEach(function(m) { if (m && m.date) markByDate[m.date] = m; });
+    var trackByDate = {};
+    (trackMarks || []).forEach(function(e) {
+        if (!e || !e.date) return;
+        (trackByDate[e.date] = trackByDate[e.date] || []).push(e);
+    });
     var _mkPx = function(v) { return (v == null || isNaN(v)) ? '--' : Number(v).toFixed(2); };
 
     var opt = {
@@ -4057,6 +4076,24 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
                     }
                     if (a.brief) html += '<br/><span style="color:' + C.muted + '">' + a.brief + '</span>';
                 }
+                // 跟踪单实际成交点（价是真成交价，与上面档位标记分开标注来源）
+                var tev = trackByDate[d.date];
+                if (tev && tev.length) {
+                    tev.forEach(function(e) {
+                        if (e.kind === 'entry') {
+                            html += '<br/><span style="color:' + C.l1 + ';font-weight:bold">建 跟踪单建仓 ' +
+                                    _mkPx(e.price) + '</span><span style="color:' + C.muted +
+                                    '">（' + (e.scan_date || '') + ' 推荐）</span>';
+                        } else {
+                            var rt = (e.return_pct == null || isNaN(e.return_pct)) ? '' :
+                                ' <span style="color:' + (e.return_pct >= 0 ? C.up : C.down) + ';font-weight:bold">' +
+                                (e.return_pct >= 0 ? '+' : '') + Number(e.return_pct).toFixed(2) + '%</span>';
+                            html += '<br/><span style="color:' + C.l3 + ';font-weight:bold">卖 跟踪单卖出 ' +
+                                    _mkPx(e.price) + '</span><span style="color:' + C.muted + '">（' +
+                                    (e.reason || '平仓') + '）</span>' + rt;
+                        }
+                    });
+                }
                 return html;
             }
         },
@@ -4080,6 +4117,28 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState) {
             symbolSize: 14, symbol: 'pin',
             itemStyle: { color: function(p) { return marks[p.dataIndex]?.type === 'buy' ? C.up : C.down; } },
             label: { show: true, formatter: function(p) { return marks[p.dataIndex]?.type === 'buy' ? 'B' : 'S'; }, color: '#fff', fontSize: 10, fontWeight: 'bold', position: 'top' }
+        });
+    }
+
+    // 跟踪单实际成交点：建仓=正三角(青)在下方，卖出=菱形(紫)在上方，y 用真实成交价。
+    // 刻意与 B/S 的 pin+红绿分形分色：同屏两套口径不能靠颜色区分。
+    if (trackMarks && trackMarks.length > 0) {
+        opt.series.push({
+            type: 'scatter', name: '跟踪单成交', xAxisIndex: 0, yAxisIndex: 0, z: 6,
+            data: trackMarks.map(function(e) {
+                var isEntry = e.kind === 'entry';
+                return {
+                    value: [e.date, e.price],
+                    symbol: isEntry ? 'triangle' : 'diamond',
+                    symbolSize: 13,
+                    itemStyle: { color: isEntry ? C.l1 : C.l3, borderColor: C.panel, borderWidth: 1 },
+                    label: {
+                        show: true, formatter: isEntry ? '建' : '卖',
+                        position: isEntry ? 'bottom' : 'top',
+                        color: isEntry ? C.l1 : C.l3, fontSize: 10, fontWeight: 'bold'
+                    }
+                };
+            })
         });
     }
 

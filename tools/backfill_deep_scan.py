@@ -35,8 +35,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.db import DB_PATH  # noqa: E402
 from strategy.stock_deep import _scan_one, _ensure_market_signal_table, _insert_market_signals  # noqa: E402
+from config.strategy_params import DEEP_LOOKBACK  # noqa: E402
 
-LOOKBACK = 180
+# 回看窗口必须与每日盘后扫描 / 个股深度面板同一来源，否则回补出来的历史档位
+# 与实时面板对不上（2026-09-08 之前这里硬编码 180，面板用 260）。
+LOOKBACK = DEEP_LOOKBACK
 DEFAULT_PROCS = 8
 # 分片数 = 进程数 × 该系数，片更细便于负载均衡（避免某片都是慢股票拖尾巴）
 CHUNKS_PER_PROC = 4
@@ -252,31 +255,57 @@ def main():
             if ex is not None:
                 ex.shutdown(wait=True)
 
-        # 建单 + 推进出场（与 deep_tracker.backfill 同口径）
+        # 建单 + 推进出场（与 deep_tracker.backfill 同口径）：
+        # 逐日 sync → update 交替，且 update 用 as_of 截断到当日——
+        # 同股合并要看前一笔单在当日时点的真实状态，回放不能穿越到未来行情。
         from strategy.deep_tracker import sync_from_scan, update_open_tracks
         prog.write(progress=92, message="补建跟踪单…")
-        added = skipped = 0
+        added = merged = skipped = filled = expired = closed = errs = 0
+
+        def _advance(_d):
+            nonlocal filled, expired, closed, errs
+            try:
+                u = update_open_tracks(conn, limit=5000, as_of=_d)
+                filled += u["filled"]
+                expired += u["expired"]
+                closed += u["closed"]
+                errs += u.get("errors", 0)
+            except Exception as e:
+                _log(f"推进失败 {_d}: {e}")
+
         for d in dates:
+            _advance(d)                      # 先把存量单推进到当日（合并判断的前提）
             try:
                 s = sync_from_scan(conn, d)
                 added += s["added"]
+                merged += s.get("merged", 0)
                 skipped += s["skipped"]
             except Exception as e:
                 _log(f"建单失败 {d}: {e}")
+                continue
+            _advance(d)                      # 当日新单也可能当日回踩成交
         prog.write(progress=96, message="推进出场结算…")
-        u = update_open_tracks(conn, limit=5000)
+        try:
+            errs += update_open_tracks(conn, limit=5000).get("errors", 0)
+        except Exception as e:
+            _log(f"收尾推进失败: {e}")
+        cnt = conn.execute(
+            """SELECT
+                 SUM(CASE WHEN status='holding'  THEN 1 ELSE 0 END) AS holding,
+                 SUM(CASE WHEN status='watching' THEN 1 ELSE 0 END) AS watching
+               FROM deep_track""").fetchone()
 
         result = {
             "days": len(dates), "scanned": len(todo),
-            "added": added, "skipped": skipped,
-            "filled": u["filled"], "expired": u["expired"], "closed": u["closed"],
-            "holding": u["holding"], "watching": u["watching"],
-            "errors": u.get("errors", 0),
+            "added": added, "merged": merged, "skipped": skipped,
+            "filled": filled, "expired": expired, "closed": closed,
+            "holding": int(cnt["holding"] or 0), "watching": int(cnt["watching"] or 0),
+            "errors": errs,
             "elapsed_s": round(time.time() - t_start, 1),
         }
         prog.done(result)
-        _log(f"完成：扫描 {len(todo)} 天，新增 {added} 单，建仓 {u['filled']}，"
-             f"出场 {u['closed']}，异常 {u.get('errors', 0)}")
+        _log(f"完成：扫描 {len(todo)} 天，新增 {added} 单，同股合并 {merged}，建仓 {filled}，"
+             f"出场 {closed}，异常 {errs}")
         return 0
     except Exception as e:
         import traceback

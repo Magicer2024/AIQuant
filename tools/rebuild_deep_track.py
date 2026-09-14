@@ -74,16 +74,48 @@ def _rebuild(conn, table: str, dates: list) -> dict:
     dt.ensure_table(conn)
     conn.execute(f"DELETE FROM {table}")
     conn.commit()
-    added = skipped = 0
+    # 逐日 sync → update 交替：sync_from_scan 的同股合并要看前一笔单在**当日时点**
+    # 的真实状态（holding / closed+exit_date）。先全部建完再统一推进的话建单时全是
+    # watching，会把同股在不同时期的独立机会错误并成每股一条。
+    added = merged = skipped = filled = expired = closed = errs = 0
     for d in dates:
+        # 三步顺序同 deep_tracker.backfill：先把存量单推进到当日，再建/合并当日
+        # 候选，最后补推一次（当日新单也可能当日回踩成交）。
+        def _advance():
+            nonlocal filled, expired, closed, errs
+            try:
+                u = dt.update_open_tracks(conn, limit=10000, as_of=d)
+                filled += u["filled"]
+                expired += u["expired"]
+                closed += u["closed"]
+                errs += u.get("errors", 0)
+            except Exception as e:
+                print(f"    ⚠ 推进失败 {d}: {e}")
+        _advance()
         try:
             s = dt.sync_from_scan(conn, d)
             added += s["added"]
+            merged += s.get("merged", 0)
             skipped += s["skipped"]
         except Exception as e:
             print(f"    ⚠ 建单失败 {d}: {e}")
-    u = dt.update_open_tracks(conn, limit=10000)
-    return {"added": added, "skipped": skipped, **u}
+            continue
+        _advance()
+    # 回放只到最后一个扫描日，最后统一拉到最新交易日
+    try:
+        u = dt.update_open_tracks(conn, limit=10000)
+        errs += u.get("errors", 0)
+    except Exception as e:
+        print(f"    ⚠ 收尾推进失败: {e}")
+    final = conn.execute(
+        f"""SELECT
+              SUM(CASE WHEN status='holding'  THEN 1 ELSE 0 END) AS holding,
+              SUM(CASE WHEN status='watching' THEN 1 ELSE 0 END) AS watching
+            FROM {table}""").fetchone()
+    return {"added": added, "merged": merged, "skipped": skipped,
+            "filled": filled, "expired": expired, "closed": closed,
+            "holding": int(final["holding"] or 0), "watching": int(final["watching"] or 0),
+            "errors": errs}
 
 
 def main():
@@ -119,7 +151,7 @@ def main():
 
     print("重建中（建单 + 推进出场）…")
     info = _rebuild(conn, table, dates)
-    print(f"  建单 {info['added']}，跳过 {info['skipped']}，"
+    print(f"  建单 {info['added']}，同股合并 {info.get('merged', 0)}，跳过 {info['skipped']}，"
           f"建仓 {info['filled']}，失效 {info['expired']}，出场 {info['closed']}，"
           f"持仓中 {info['holding']}，观察中 {info['watching']}，异常 {info.get('errors', 0)}")
 

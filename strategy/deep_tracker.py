@@ -32,6 +32,13 @@
         持满 max_hold_days 个交易日 → max_hold_days（按当日收盘了结）
 · 收益：return_pct 基于实际建仓价与实际出场价；max_return/min_return 用持仓期盘中最高低点。
 · 持仓时间：hold_tdays = 建仓日到出场日之间的**交易日数**（不含建仓日）；hold_days 为自然日。
+· 同股合并：同一 code 在前一笔未了结期间再次被推荐，**不另建单**（资金有限同一只只买一次）——
+        watching：用最新信号刷新买入计划（买点/止损/止盈/推荐日都换新，回踩窗口从新推荐日重算，
+                  等价于撤旧挂单换新挂单）；
+        holding / closed 且新推荐日 ≤ exit_date：只在原单 rerec_dates 记一笔"又被推荐"；
+        expired 但新推荐日仍在旧回踩窗口内：复活为 watching 并刷新计划（仅历史回放会命中，
+                  实时模式下窗口内不可能已标 expired）；
+        出场之后（exit_date < 新推荐日）或窗口已过的 expired：视为新机会，正常建新单。
 
 ⚠ 与 recommend_outcome（出场跟踪面板）的区别：那边跟踪的是**每日推荐**（fusion 打分），
   本表跟踪的是**个股深度深析信号**，两者信号源不同、互不覆盖；出场口径保持一致便于横向对比。
@@ -95,6 +102,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         last_price    REAL,            -- 持仓中的最新收盘（浮盈展示）
         last_date     TEXT,
         reasons       TEXT,            -- JSON 数组，推荐理由
+        rerec_dates   TEXT,            -- JSON 数组，持有期内被再次推荐的其他推荐日（合并进本单）
         created_at    TEXT,
         updated_at    TEXT,
         UNIQUE (scan_date, code)
@@ -103,6 +111,9 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_dt_code   ON {_TABLE}(code);
     CREATE INDEX IF NOT EXISTS idx_dt_scan   ON {_TABLE}(scan_date);
     """)
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
+    if "rerec_dates" not in cols:
+        conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN rerec_dates TEXT")
 
 
 def _now() -> str:
@@ -195,6 +206,65 @@ def _daily_top_n() -> Optional[int]:
     return None if v in (None, 0, "") else int(v)
 
 
+def _rerec_append(v, date: str) -> str:
+    """rerec_dates JSON 数组追加一个推荐日（去重、保序）。"""
+    try:
+        lst = json.loads(v) if v else []
+    except Exception:
+        lst = []
+    if not isinstance(lst, list):
+        lst = []
+    if date not in lst:
+        lst.append(date)
+    return json.dumps(lst, ensure_ascii=False)
+
+
+def _refresh_plan(conn, prior: dict, d: dict, scan_date: str, now: str) -> None:
+    """用最新信号刷新一条未成交单的买入计划（撤旧挂单换新挂单）。
+
+    scan_date 换成新推荐日 → 回踩窗口从新日重算；旧推荐日进 rerec_dates 留痕。
+    """
+    conn.execute(
+        f"""UPDATE {_TABLE} SET scan_date=?, name=?, industry=?, level=?, label=?,
+            sig_entry=?, sig_stop=?, sig_tp=?, status=?, reasons=?, rerec_dates=?,
+            updated_at=? WHERE id=?""",
+        (scan_date, d.get("name"), d.get("industry"), d.get("level"), d.get("label"),
+         d.get("entry_price"), d.get("stop_loss"), d.get("take_profit"),
+         STATUS_WATCHING, _reasons_to_json(d.get("reasons")),
+         _rerec_append(prior.get("rerec_dates"), prior["scan_date"]),
+         now, prior["id"]),
+    )
+
+
+def _merge_into_prior(conn, d: dict, scan_date: str, now: str) -> bool:
+    """同股合并（规则见模块头注释）：合并进前一笔则返回 True（调用方不再 INSERT）。"""
+    prior = conn.execute(
+        f"""SELECT id, scan_date, status, exit_date, rerec_dates FROM {_TABLE}
+            WHERE code = ? AND scan_date < ?
+            ORDER BY scan_date DESC LIMIT 1""",
+        (d["code"], scan_date),
+    ).fetchone()
+    if not prior:
+        return False
+    prior = dict(prior)
+    st = prior["status"]
+    if st == STATUS_WATCHING:
+        _refresh_plan(conn, prior, d, scan_date, now)
+        return True
+    if st == STATUS_HOLDING or (
+            st == STATUS_CLOSED and prior["exit_date"] and scan_date <= prior["exit_date"]):
+        conn.execute(
+            f"UPDATE {_TABLE} SET rerec_dates=?, updated_at=? WHERE id=?",
+            (_rerec_append(prior.get("rerec_dates"), scan_date), now, prior["id"]),
+        )
+        return True
+    if st == STATUS_EXPIRED and _count_tdays(
+            conn, d["code"], prior["scan_date"], scan_date) <= _entry_window():
+        _refresh_plan(conn, prior, d, scan_date, now)
+        return True
+    return False
+
+
 # ─────────────────────────────────────────────
 # 1. 从每日扫描结果同步候选
 # ─────────────────────────────────────────────
@@ -202,7 +272,9 @@ def sync_from_scan(conn: sqlite3.Connection, scan_date: Optional[str] = None) ->
     """把最近一次（或指定）全市场深析扫描的候选写成跟踪单。
 
     已存在同 (scan_date, code) 的记录跳过，重跑安全。
-    返回 { scan_date, added, skipped, candidates }。
+    同股合并：候选若已有未了结（或推荐日落在其持有期内）的前一笔跟踪单，
+    合并进该单而不另建（见模块头「同股合并」与 _merge_into_prior）。
+    返回 { scan_date, added, merged, skipped, candidates }。
     """
     ensure_table(conn)
     if not scan_date:
@@ -210,7 +282,7 @@ def sync_from_scan(conn: sqlite3.Connection, scan_date: Optional[str] = None) ->
             "SELECT MAX(scan_date) AS d FROM stock_deep_signal").fetchone()
         scan_date = row["d"] if row else None
     if not scan_date:
-        return {"scan_date": None, "added": 0, "skipped": 0, "candidates": 0}
+        return {"scan_date": None, "added": 0, "merged": 0, "skipped": 0, "candidates": 0}
 
     # 排序取头部：见 _rank_order_by 的评估依据（级别 → 强信号档 → 贴 MA20 → 代码稳定序）
     # 板块过滤与面板 1 的 get_market_signal_latest 同一条件 —— 两边必须一致，
@@ -223,19 +295,25 @@ def sync_from_scan(conn: sqlite3.Connection, scan_date: Optional[str] = None) ->
         sql += f" LIMIT {int(top_n)}"
     rows = conn.execute(sql, (scan_date,)).fetchall()
     now = _now()
-    added = skipped = 0
+    added = merged = skipped = 0
     for r in rows:
         d = dict(r)
         # 没有可执行买点的候选不跟踪（无止损位就无法定义卖点）
         if d.get("entry_price") is None:
             skipped += 1
             continue
+        # 重跑同一天：本单已是当日候选的产物，跳过。
+        # 必须放在合并检查之前——否则同日重跑会去刷新更早的持仓/观察单，
+        # 把它的 scan_date 改成今天，直接撞 UNIQUE(scan_date, code)。
         cur = conn.execute(
             f"SELECT id FROM {_TABLE} WHERE scan_date = ? AND code = ?",
             (scan_date, d["code"]),
         ).fetchone()
         if cur:
             skipped += 1
+            continue
+        if _merge_into_prior(conn, d, scan_date, now):
+            merged += 1
             continue
         conn.execute(
             f"""INSERT INTO {_TABLE}
@@ -251,56 +329,68 @@ def sync_from_scan(conn: sqlite3.Connection, scan_date: Optional[str] = None) ->
         )
         added += 1
     conn.commit()
-    return {"scan_date": scan_date, "added": added, "skipped": skipped,
-            "candidates": len(rows)}
+    return {"scan_date": scan_date, "added": added, "merged": merged,
+            "skipped": skipped, "candidates": len(rows)}
 
 
 # ─────────────────────────────────────────────
 # 2. 推进未了结的跟踪单
 # ─────────────────────────────────────────────
-def _prices_after(conn, code: str, start_date: str, limit: int = 60):
-    """取 start_date 之后（不含）的交易日行情，升序。"""
-    return conn.execute(
-        """SELECT trade_date, open, high, low, close
-           FROM daily_price
-           WHERE code = ? AND trade_date > ?
-           ORDER BY trade_date ASC LIMIT ?""",
-        (code, start_date, limit),
-    ).fetchall()
+def _prices_after(conn, code: str, start_date: str, limit: int = 60,
+                  as_of: Optional[str] = None):
+    """取 start_date 之后（不含）的交易日行情，升序。as_of 限定只看到"当日"为止的行情。"""
+    sql = """SELECT trade_date, open, high, low, close
+             FROM daily_price
+             WHERE code = ? AND trade_date > ?"""
+    args: list = [code, start_date]
+    if as_of:
+        sql += " AND trade_date <= ?"
+        args.append(as_of)
+    return conn.execute(sql + " ORDER BY trade_date ASC LIMIT ?", (*args, limit)).fetchall()
 
 
-def _prices_from(conn, code: str, start_date: str, limit: int = 60):
-    """取 start_date 起（含）的交易日行情，升序。
+def _prices_from(conn, code: str, start_date: str, limit: int = 60,
+                 as_of: Optional[str] = None):
+    """取 start_date 起（含）的交易日行情，升序。as_of 限定只看到"当日"为止的行情。
 
     出场推进必须用"含建仓日"的序列：建仓当日是 T+1 买入日（当日不能卖），
     序列 j=1 就是建仓日，跳过它才等价于"A 股 T+1 当日不判出场"。
     若用"建仓日之后"的序列，j=1 会变成建仓次日，T+1 规则会误跳过一个交易日。
     """
-    return conn.execute(
-        """SELECT trade_date, open, high, low, close
-           FROM daily_price
-           WHERE code = ? AND trade_date >= ?
-           ORDER BY trade_date ASC LIMIT ?""",
-        (code, start_date, limit),
-    ).fetchall()
+    sql = """SELECT trade_date, open, high, low, close
+             FROM daily_price
+             WHERE code = ? AND trade_date >= ?"""
+    args: list = [code, start_date]
+    if as_of:
+        sql += " AND trade_date <= ?"
+        args.append(as_of)
+    return conn.execute(sql + " ORDER BY trade_date ASC LIMIT ?", (*args, limit)).fetchall()
 
 
-def _last_market_date(conn) -> Optional[str]:
+def _last_market_date(conn, as_of: Optional[str] = None) -> Optional[str]:
     """全市场最新交易日（用于区分"还没到下一个交易日"与"真的停牌/退市"）。"""
-    row = conn.execute("SELECT MAX(trade_date) AS d FROM daily_price").fetchone()
+    sql = "SELECT MAX(trade_date) AS d FROM daily_price"
+    if as_of:
+        sql += " WHERE trade_date <= ?"
+        row = conn.execute(sql, (as_of,)).fetchone()
+    else:
+        row = conn.execute(sql).fetchone()
     return row["d"] if row else None
 
 
-def _count_tdays(conn, code: str, d0: str, d1: str) -> int:
+def _count_tdays(conn, code: str, d0: str, d1: str,
+                 as_of: Optional[str] = None) -> int:
     """d0（不含）到 d1（含）之间的交易日数。"""
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM daily_price WHERE code = ? AND trade_date > ? AND trade_date <= ?",
-        (code, d0, d1),
-    ).fetchone()
+    sql = ("SELECT COUNT(*) AS c FROM daily_price "
+           "WHERE code = ? AND trade_date > ? AND trade_date <= ?")
+    args: list = [code, d0, d1]
+    if as_of and as_of < d1:
+        args[2] = as_of
+    row = conn.execute(sql, args).fetchone()
     return int(row["c"]) if row else 0
 
 
-def _try_fill(conn, t: dict) -> Optional[str]:
+def _try_fill(conn, t: dict, as_of: Optional[str] = None) -> Optional[str]:
     """watching → holding：窗口内回踩买点即成交；超期判 expired。
 
     返回新状态（holding / expired），无变化返回 None。
@@ -309,7 +399,7 @@ def _try_fill(conn, t: dict) -> Optional[str]:
     sig_entry = t["sig_entry"]
     if not sig_entry or sig_entry <= 0:
         return None
-    prices = _prices_after(conn, code, scan_date, limit=_entry_window() + 2)
+    prices = _prices_after(conn, code, scan_date, limit=_entry_window() + 2, as_of=as_of)
     if not prices:
         return None
     now = _now()
@@ -340,7 +430,7 @@ def _try_fill(conn, t: dict) -> Optional[str]:
     return None
 
 
-def _run_exit(conn, t: dict) -> Optional[dict]:
+def _run_exit(conn, t: dict, as_of: Optional[str] = None) -> Optional[dict]:
     """holding → closed：按止损 / 固定止盈 / 持仓上限出场并结算。
 
     返回出场结果 dict，未出场返回 None（已更新浮盈）。
@@ -351,12 +441,12 @@ def _run_exit(conn, t: dict) -> Optional[dict]:
     if not entry_date or not exec_entry or exec_entry <= 0:
         return None
 
-    prices = _prices_from(conn, code, entry_date, limit=_max_hold() + 5)
+    prices = _prices_from(conn, code, entry_date, limit=_max_hold() + 5, as_of=as_of)
     if len(prices) < 2:
         # 除建仓日外没有任何后续行情。两种可能：
         #   ① 建仓日就是全市场最新交易日（T+1 还没到）→ 保持 holding，等下一交易日推进
         #   ② 停牌/退市，全市场已往前走了它却没数据 → 判数据缺失，按建仓价平掉不计盈亏
-        lmd = _last_market_date(conn)
+        lmd = _last_market_date(conn, as_of=as_of)
         if lmd and lmd <= entry_date:
             return None
         conn.execute(
@@ -450,8 +540,13 @@ def _close(conn, t: dict, exit_date: str, exit_price: float, reason: str) -> dic
             "return_pct": ret, "hold_tdays": hold_tdays}
 
 
-def update_open_tracks(conn: sqlite3.Connection, limit: int = 2000) -> dict:
-    """推进所有 watching / holding 的跟踪单。返回 { filled, expired, closed, holding, watching }。"""
+def update_open_tracks(conn: sqlite3.Connection, limit: int = 2000,
+                       as_of: Optional[str] = None) -> dict:
+    """推进所有 watching / holding 的跟踪单。返回 { filled, expired, closed, holding, watching }。
+
+    as_of：只看该日期（含）之前的行情——历史回补/重建逐日推进时必须传，
+    否则一单会直接结算到今天，后续日期的同股合并判断就看不到"当时还在持有"。
+    """
     ensure_table(conn)
     rows = conn.execute(
         f"""SELECT * FROM {_TABLE}
@@ -466,7 +561,7 @@ def update_open_tracks(conn: sqlite3.Connection, limit: int = 2000) -> dict:
         t = dict(r)
         try:
             if t["status"] == STATUS_WATCHING:
-                st = _try_fill(conn, t)
+                st = _try_fill(conn, t, as_of=as_of)
                 if st == STATUS_HOLDING:
                     filled += 1
                     t["status"] = STATUS_HOLDING
@@ -475,11 +570,11 @@ def update_open_tracks(conn: sqlite3.Connection, limit: int = 2000) -> dict:
                     if row:
                         t["entry_date"] = row["entry_date"]
                         t["entry_price"] = row["entry_price"]
-                    _run_exit(conn, t)  # 建仓当日只累计，通常返回 None
+                    _run_exit(conn, t, as_of=as_of)  # 建仓当日只累计，通常返回 None
                 elif st == STATUS_EXPIRED:
                     expired += 1
             else:
-                res = _run_exit(conn, t)
+                res = _run_exit(conn, t, as_of=as_of)
                 if res:
                     closed += 1
         except Exception as e:
@@ -510,6 +605,8 @@ def update_open_tracks(conn: sqlite3.Connection, limit: int = 2000) -> dict:
 # ─────────────────────────────────────────────
 def _row_to_item(d: dict) -> dict:
     d["reasons"] = _reasons_load(d.get("reasons"))
+    d["rerec_dates"] = _reasons_load(d.get("rerec_dates"))
+    d["rerec_count"] = len(d["rerec_dates"])
     d["exit_reason_label"] = EXIT_LABEL.get(d.get("exit_reason"), d.get("exit_reason") or "")
     d["status_label"] = {
         STATUS_WATCHING: "待回踩",
@@ -554,6 +651,37 @@ def get_tracks(conn: sqlite3.Connection, status: Optional[str] = None,
         (*args, limit, offset),
     ).fetchall()
     return [_row_to_item(dict(r)) for r in rows]
+
+
+def get_track_events(conn: sqlite3.Connection, code: str) -> list:
+    """该股跟踪单的**实际成交事件**（建仓 / 卖出），供 K 线叠加标注。
+
+    与图上的 B/S pin 是两套口径：B/S 是每日规则档位（y 只是当日 low/high，无价格
+    含义），这里的 y 是**真实成交价**。未建仓（watching）/ 已失效（expired）无事件。
+    """
+    ensure_table(conn)
+    rows = conn.execute(
+        f"""SELECT scan_date, entry_date, entry_price, exit_date, exit_price,
+                   exit_reason, return_pct
+            FROM {_TABLE}
+            WHERE code = ? AND entry_date IS NOT NULL
+            ORDER BY scan_date""",
+        (code,),
+    ).fetchall()
+    events = []
+    for r in rows:
+        events.append({
+            "date": r["entry_date"], "price": r["entry_price"], "kind": "entry",
+            "scan_date": r["scan_date"],
+        })
+        if r["exit_date"] and r["exit_price"]:
+            events.append({
+                "date": r["exit_date"], "price": r["exit_price"], "kind": "exit",
+                "scan_date": r["scan_date"],
+                "reason": EXIT_LABEL.get(r["exit_reason"], r["exit_reason"]),
+                "return_pct": r["return_pct"],
+            })
+    return events
 
 
 def get_stats(conn: sqlite3.Connection, days: Optional[int] = None) -> dict:
@@ -701,23 +829,49 @@ def backfill(conn: sqlite3.Connection, days: int = 30) -> dict:
         "ORDER BY scan_date DESC LIMIT ?", (int(days),)).fetchall()]
     dates.reverse()  # 从老到新推进，保证出场顺序正确
     out = {"days": len(dates), "avail_days": int(avail or 0), "requested_days": int(days),
-           "added": 0, "skipped": 0, "candidates": 0,
+           "added": 0, "merged": 0, "skipped": 0, "candidates": 0,
            "filled": 0, "expired": 0, "closed": 0}
+    # 必须逐日推进 → 建单交替：同股合并规则要看前一笔单在**当日时点**的真实状态
+    # （holding / closed+exit_date）。若先把所有日期建完再统一推进，建单时全部是
+    # watching，会把整段历史里同股的独立机会错误并成每股一条。
     for d in dates:
+        # 三步顺序很关键：
+        # ① 先把存量单推进到「当日」——否则前一天的单在本日 sync 时仍停在 watching，
+        #    连续推荐会把它的 scan_date 一路刷新到最后一个信号日、丢掉真实买点；
+        # ② 再建/合并当日候选（同股合并要看 ① 之后的真实状态）；
+        # ③ 当日新建的单也可能当日就回踩成交，补推一次。
+        try:
+            u = update_open_tracks(conn, limit=5000, as_of=d)
+            out["filled"] += u["filled"]
+            out["expired"] += u["expired"]
+            out["closed"] += u["closed"]
+        except Exception:
+            pass
         try:
             s = sync_from_scan(conn, d)
             out["added"] += s["added"]
+            out["merged"] += s["merged"]
             out["skipped"] += s["skipped"]
             out["candidates"] += s["candidates"]
         except Exception:
             continue
-    u = update_open_tracks(conn, limit=5000)
-    out["filled"] = u["filled"]
-    out["expired"] = u["expired"]
-    out["closed"] = u["closed"]
-    out["holding"] = u["holding"]
-    out["watching"] = u["watching"]
-    out["errors"] = u.get("errors", 0)
-    if u.get("error_samples"):
-        out["error_samples"] = u["error_samples"]
+        try:
+            u = update_open_tracks(conn, limit=5000, as_of=d)
+            out["filled"] += u["filled"]
+            out["expired"] += u["expired"]
+            out["closed"] += u["closed"]
+        except Exception:
+            continue
+    # 回放只推进到最后一个扫描日；最后统一拉到最新交易日
+    try:
+        update_open_tracks(conn, limit=5000)
+    except Exception:
+        pass
+    final = conn.execute(
+        f"""SELECT
+              SUM(CASE WHEN status='holding'  THEN 1 ELSE 0 END) AS holding,
+              SUM(CASE WHEN status='watching' THEN 1 ELSE 0 END) AS watching
+            FROM {_TABLE}""").fetchone()
+    out["holding"] = int(final["holding"] or 0)
+    out["watching"] = int(final["watching"] or 0)
     return out

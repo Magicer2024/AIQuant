@@ -24,7 +24,7 @@ from strategy.indicators import calc_all_indicators
 from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
 from config.personal_config import is_main_board, main_board_filter
 from config.strategy_params import DEEP_EMA20_AUX as _EMA20_AUX_CFG
-from config.strategy_params import DEEP_TRACK, DEEP_TP_AMP_RATIO
+from config.strategy_params import DEEP_TRACK, DEEP_TP_AMP_RATIO, DEEP_LOOKBACK
 
 # 环境变量支持 A/B 验证（tools/_eval_deep_buypoints.py）：DEEP_EMA20_AUX=1 强制开启、
 # 0 强制关闭，否则用配置默认（enabled=False = 基线）。模块加载时读取一次即可。
@@ -958,7 +958,7 @@ def _current_signal(df: pd.DataFrame, trend: dict, volprice: dict, rhythm: dict,
 # ─────────────────────────────────────────────
 # 主入口
 # ─────────────────────────────────────────────
-def analyze_stock(conn, code: str, lookback: int = 260, recent_days: int = 45,
+def analyze_stock(conn, code: str, lookback: int = DEEP_LOOKBACK, recent_days: int = 45,
                   light: bool = False, as_of: Optional[str] = None) -> dict:
     """个股深度分析主入口。
 
@@ -1478,7 +1478,7 @@ _DEFAULT_SCAN_WORKERS = int(os.environ.get("DEEP_SCAN_WORKERS", "0") or 0)
 
 def run_full_market_scan(conn, max_stocks: Optional[int] = None,
                          progress_callback=None, batch: int = 50,
-                         scan_date: Optional[str] = None, lookback: int = 180,
+                         scan_date: Optional[str] = None, lookback: int = DEEP_LOOKBACK,
                          as_of: Optional[str] = None,
                          workers: Optional[int] = None) -> dict:
     """全市场深析扫描：对全部活跃股票跑深析信号，把「买入/加仓且不追高」的候选落库。

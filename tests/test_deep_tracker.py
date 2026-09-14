@@ -346,13 +346,145 @@ def test_close_manual():
     print(f"✓ 手动平仓：+{res['return_pct']}% · 持仓 {r['hold_tdays']} 个交易日")
 
 
+def test_track_events():
+    """K 线叠加用：只输出**实际成交事件**（建仓价/卖出价），未建仓的单不出事件"""
+    c = _conn()
+    _bars(c, "100005", [(10.0, 10.1, 9.9, 10.0)])
+    _bars(c, "100005", [(10.0, 10.2, 9.90, 10.1)], start=1)      # 次日回踩 → 建仓 10.00
+    _bars(c, "100005", [(10.1, 11.8, 10.1, 11.6)], start=2)      # 收盘 11.6 ≥ 止盈 11.5
+    _signal(c, "100005", DATES[0], entry=10.0, stop=9.4, tp=11.5)
+    _signal(c, "100006", DATES[0], entry=10.0)                   # 无行情 → 一直待回踩
+    dt.sync_from_scan(c, DATES[0])
+    dt.update_open_tracks(c)
+    ev = dt.get_track_events(c, "100005")
+    assert [(e["date"], e["kind"], e["price"]) for e in ev] == [
+        (DATES[1], "entry", 10.0), (DATES[2], "exit", 11.6)], ev
+    assert ev[1]["reason"] == "止盈" and ev[1]["return_pct"] > 15, ev[1]
+    assert dt.get_track_events(c, "100006") == []
+    print("✓ 成交事件：建仓 10.00 → 止盈 11.60（待回踩的单不出事件）")
+
+
+# ── 11. 同股持有期内再推荐 → 合并成一条 ────────────────────────────
+def test_merge_holding_records_rerec():
+    """持仓中再次推荐：不新建单，只在原单 rerec_dates 记一笔"""
+    c = _conn()
+    _bars(c, "200001", [(10.0, 10.1, 9.9, 10.0)])                # DATES[0] 信号日
+    _bars(c, "200001", [(10.1, 10.2, 10.0, 10.1)] * 6, start=1)  # 次日回踩建仓，一直在持
+    _signal(c, "200001", DATES[0], entry=10.0, stop=9.4)
+    dt.sync_from_scan(c, DATES[0])
+    dt.update_open_tracks(c)
+    assert _one(c, "200001")["status"] == "holding"
+    _signal(c, "200001", DATES[2], entry=10.0, stop=9.4)
+    r = dt.sync_from_scan(c, DATES[2])
+    assert r["merged"] == 1 and r["added"] == 0, r
+    rows = c.execute("SELECT * FROM deep_track WHERE code='200001'").fetchall()
+    assert len(rows) == 1, "持仓期内再推荐不应新建单"
+    item = dt.get_tracks(c, status="holding")[0]
+    assert item["rerec_dates"] == [DATES[2]], item["rerec_dates"]
+    assert item["rerec_count"] == 1
+    assert item["entry_date"] == DATES[1], "建仓信息不受合并影响"
+    print("✓ 持仓中再推荐 → 只记账不建仓")
+
+
+def test_merge_watching_refreshes_plan():
+    """待回踩期间再推荐：计划刷新为最新信号，推荐日后移、回踩窗口重算，旧日进 rerec_dates"""
+    c = _conn()
+    _bars(c, "200002", [(10.0, 10.4, 9.95, 10.3)] * 4)           # 一直不深回踩
+    _bars(c, "200002", [(9.50, 9.60, 9.30, 9.40)], start=4)      # DATES[4] 才回踩到新买点
+    _signal(c, "200002", DATES[0], entry=9.5, stop=9.0, tp=11.0)
+    dt.sync_from_scan(c, DATES[0])
+    assert _one(c, "200002")["status"] == "watching"             # 推进留到刷新之后
+    _signal(c, "200002", DATES[2], entry=9.4, stop=8.9, tp=12.0)
+    r = dt.sync_from_scan(c, DATES[2])
+    assert r["merged"] == 1 and r["added"] == 0, r
+    it = dt.get_tracks(c, status="watching")[0]
+    assert it["scan_date"] == DATES[2] and abs(it["sig_entry"] - 9.4) < 1e-6, it
+    assert it["rerec_dates"] == [DATES[0]], it["rerec_dates"]
+    dt.update_open_tracks(c)
+    it = _one(c, "200002")
+    assert it["status"] == "holding" and it["entry_date"] == DATES[4], it  # 窗口从 DATES[2] 重算才来得及成交
+    print("✓ 待回踩再推荐 → 撤旧挂单换新挂单，窗口重算")
+
+
+def test_merge_closed_within_hold_vs_after_exit():
+    """closed：推荐日 ≤ exit_date（真实持有期内）→ 合并；出场之后 → 新机会正常建单"""
+    c = _conn()
+    _bars(c, "200003", [(10.0, 10.1, 9.9, 10.0)])
+    _bars(c, "200003", [(10.1, 10.2, 9.90, 10.1)], start=1)      # DATES[1] 建仓
+    _bars(c, "200003", [(10.0, 10.0, 9.30, 9.30)], start=2)      # DATES[2] 止损出场
+    _bars(c, "200003", [(9.30, 9.40, 9.20, 9.30)] * 5, start=3)
+    _signal(c, "200003", DATES[0], entry=10.0, stop=9.4)
+    dt.sync_from_scan(c, DATES[0])
+    dt.update_open_tracks(c)
+    r0 = _one(c, "200003")
+    assert r0["status"] == "closed" and r0["exit_date"] == DATES[2], dict(r0)
+    _signal(c, "200003", DATES[2], entry=10.0, stop=9.4)         # 推荐日=出场日：持有期内
+    r = dt.sync_from_scan(c, DATES[2])
+    assert r["merged"] == 1 and r["added"] == 0, r
+    _signal(c, "200003", DATES[4], entry=9.3, stop=8.8)          # 出场后：新机会
+    r = dt.sync_from_scan(c, DATES[4])
+    assert r["added"] == 1 and r["merged"] == 0, r
+    rows = c.execute("SELECT * FROM deep_track WHERE code='200003' ORDER BY scan_date").fetchall()
+    assert len(rows) == 2
+    old = dict(rows[0])
+    assert old["rerec_dates"] and DATES[2] in old["rerec_dates"], old  # JSON 原文
+    assert rows[1]["status"] == "watching" and rows[1]["scan_date"] == DATES[4]
+    print("✓ closed：持有期内再推荐并入原单，出场后另起新单")
+
+
+def test_merge_expired_revival_in_replay():
+    """as_of 回放：expired 后若新推荐日仍在旧回踩窗口内 → 复活刷新，不留下双单"""
+    c = _conn()
+    _bars(c, "200004", [(10.0, 10.1, 9.9, 10.0)])
+    _bars(c, "200004", [(10.5, 10.8, 10.4, 10.7)] * 5, start=1)  # 窗口内一路不回踩
+    _bars(c, "200004", [(10.7, 10.9, 9.50, 9.60)], start=6)      # DATES[6] 回踩新买点
+    _signal(c, "200004", DATES[0], entry=10.0, stop=9.4)
+    dt.sync_from_scan(c, DATES[0])
+    dt.update_open_tracks(c, as_of=DATES[5])                     # 推到窗口耗尽 → expired
+    assert _one(c, "200004")["status"] == "expired"
+    _signal(c, "200004", DATES[3], entry=9.6, stop=9.0)          # 第 3 天又推荐（仍在旧窗口内）
+    r = dt.sync_from_scan(c, DATES[3])
+    assert r["merged"] == 1 and r["added"] == 0, r
+    dt.update_open_tracks(c)
+    rows = c.execute("SELECT * FROM deep_track WHERE code='200004'").fetchall()
+    assert len(rows) == 1, "复活合并后仍应只有一条"
+    assert rows[0]["status"] == "holding" and rows[0]["entry_date"] == DATES[6], dict(rows[0])
+    print("✓ expired 窗口内再推荐 → 复活刷新为最新计划")
+
+
+def test_backfill_replay_no_concurrent_dupes():
+    """backfill 逐日回放（sync→update 交替 + as_of 截断）：同股不出现并发重复单"""
+    c = _conn()
+    _bars(c, "600004", [(10.0, 10.1, 9.9, 10.0)])
+    _bars(c, "600004", [(9.20, 9.55, 9.00, 9.50)], start=1)      # DATES[1] 低开建仓 @9.20
+    _bars(c, "600004", [(9.50, 9.55, 9.45, 9.50)] * 4, start=2)  # 持有期内横盘，不破止损 9.4
+    _bars(c, "600004", [(9.45, 9.55, 9.42, 9.45)] * 6, start=6)  # 收 9.45 守住止损 9.4 → DATES[10] 持满到期
+    for i in (0, 1, 2, 4, 6):
+        _signal(c, "600004", DATES[i], entry=10.0, stop=9.4)     # 持有期内反复推荐
+    # 三步回放（推进→建单→推进）：D0 的单在 D1 步先成交，D1~D6 四次再推全走持仓记账
+    out = dt.backfill(c, days=30)
+    assert out["added"] == 1 and out["merged"] == 4, out         # 首单 + 4 次持有期内再推
+    rows = c.execute("SELECT * FROM deep_track WHERE code='600004'").fetchall()
+    assert len(rows) == 1, "持有期内的重复信号必须全部并进首单"
+    import json as _json
+    assert _json.loads(rows[0]["rerec_dates"]) == [DATES[1], DATES[2], DATES[4], DATES[6]]
+    assert rows[0]["status"] == "closed" and rows[0]["exit_date"] == DATES[10], dict(rows[0])
+    assert rows[0]["exit_reason"] == "max_hold_days", rows[0]["exit_reason"]
+    assert abs(rows[0]["return_pct"] - 2.72) < 0.02, rows[0]["return_pct"]   # (9.45-9.2)/9.2
+    print(f"✓ backfill 回放：{out['added']} 建单 + {out['merged']} 合并，无并发同码单")
+
+
 if __name__ == "__main__":
     for fn in (
         test_fill_on_pullback, test_fill_on_gap_down, test_expire_when_no_pullback,
         test_t1_no_exit, test_stop_loss_and_settlement, test_take_profit,
         test_no_take_on_intraday_spike, test_max_hold_exit, test_delisted,
         test_hold_when_entry_is_last_bar, test_stats, test_tracks_filter_and_order,
-        test_sync_idempotent, test_close_manual,
+        test_sync_idempotent, test_close_manual, test_track_events,
+        test_merge_holding_records_rerec, test_merge_watching_refreshes_plan,
+        test_merge_closed_within_hold_vs_after_exit,
+        test_merge_expired_revival_in_replay,
+        test_backfill_replay_no_concurrent_dupes,
     ):
         fn()
     print("\n全部通过 ✅")

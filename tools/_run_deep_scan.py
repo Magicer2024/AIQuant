@@ -3,7 +3,7 @@
 
 用法: python tools/_run_deep_scan.py
 与生产 POST /stock_deep/scan 同口径：run_full_market_scan(conn, progress_callback=...)，
-默认 lookback=180、scan_date=今天、batch=50。
+lookback 取 config.strategy_params.DEEP_LOOKBACK（当前 260）、scan_date=今天、batch=50。
 """
 import os
 import sys
