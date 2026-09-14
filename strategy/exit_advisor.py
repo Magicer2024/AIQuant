@@ -31,6 +31,51 @@ DEFAULT_TRAILING_PCT = OVERSOLD_REBOUND_V4.get("trailing_pct", 0.10)
 DEFAULT_MAX_HOLD_DAYS = 10
 
 
+def atr_dynamic_stop_pct(df: pd.DataFrame) -> Optional[float]:
+    """当日「ATR 自适应止损」比例（返回负小数，如 -0.0845）——**每日重算**。
+
+    口径与短线推荐线完全一致（`short_atr_stop_{enabled,k,floor,cap}`）：
+
+        pct = clamp(k × ATR14% , floor , cap)      ATR14% = ATR14(最新交易日) / 最新收盘价
+
+    ⚠ **「每天动态」的确切含义**：ATR 取的是 **df 最新交易日** 的 ATR14，而不是建仓日的。
+    所以同一笔持仓的止损宽度会随市场/个股波动率逐日变化（波动放大→放宽、收敛→收紧），
+    止损价 = 成本价 × (1 + 返回的 pct)，锚定成本价不变。
+
+    与推荐线的差异：推荐线在**信号日一次性定死**（写进 stock_signal.stop_loss）；
+    本函数服务**手动持仓诊断**（personal_position），持仓页每次刷新都重新算。
+
+    :return: 负小数止损比例；**None 表示 ATR 不可用**（开关关闭 / 数据不足 / ATR 非数），
+             调用方必须回退固定 `short_stop_loss`，不要自行兜底成 0（0 会让止损价=成本价）。
+    """
+    if df is None or len(df) < 15:
+        return None
+    for c in ("high", "low", "close"):
+        if c not in df.columns:
+            return None
+    try:
+        from config.strategy_params import get_param
+        if not bool(int(get_param("short_atr_stop_enabled") or 0)):
+            return None
+        k = float(get_param("short_atr_stop_k"))
+        floor = float(get_param("short_atr_stop_floor"))
+        cap = float(get_param("short_atr_stop_cap"))
+    except Exception:
+        return None
+    try:
+        from strategy.indicators import calc_atr
+        close = float(df["close"].iloc[-1])
+        atr = float(calc_atr(df["high"].astype(float), df["low"].astype(float),
+                             df["close"].astype(float), 14).iloc[-1])
+    except Exception:
+        return None
+    # NaN 自比较为假 → 用 atr != atr 判 NaN（避免为此引入 numpy 依赖）
+    if not close or close <= 0 or (atr != atr) or atr <= 0:
+        return None
+    lo, hi = min(floor, cap), max(floor, cap)
+    return -round(min(max(atr / close * k, lo), hi), 4)
+
+
 def evaluate_exit(
     entry_price: float,
     entry_date: str,
@@ -40,6 +85,7 @@ def evaluate_exit(
     partial_tp: float = DEFAULT_PARTIAL_TP,
     trailing_pct: float = DEFAULT_TRAILING_PCT,
     max_hold_days: Optional[int] = DEFAULT_MAX_HOLD_DAYS,
+    stop_is_dynamic: bool = False,
 ) -> dict:
     """评估单只推荐票的出场状态。
 
@@ -51,6 +97,8 @@ def evaluate_exit(
         partial_tp: 浮盈减半阈值（如 0.10 = +10%）
         trailing_pct: 移动止盈回撤比例（如 0.10 = 10%）
         max_hold_days: 最长持仓交易日数，None 表示不限（长线趋势跟踪不设上限）
+        stop_is_dynamic: 止损比例是否为**每日重算**的动态值（如 ATR 自适应）。
+            True 时硬止损只用**当前收盘价**判定，不用持仓期最低价 —— 见下方注释。
 
     Returns:
         dict: {
@@ -123,7 +171,11 @@ def evaluate_exit(
     # 持仓页/同步横幅用本函数（快照，简单直观），推荐出场跟踪用前者（逐日，严谨）。
 
     # 1. 硬止损
-    if "low" in after.columns:
+    # 固定止损：用持仓期**最低价**判定（"曾经破过线"即视为该出，快照式，保持原行为）。
+    # 动态止损（stop_is_dynamic=True，如 ATR 每日重算）：只能用**当前收盘价**判定 ——
+    #   波动率下行时止损线会上移，可能高于过去某个低点；若仍用历史最低价，
+    #   "当初没破线、现在还是赚的"仓位会被误判为已触发止损（假阳性）。
+    if not stop_is_dynamic and "low" in after.columns:
         min_low = float(after["low"].min())
         if min_low <= stop_price:
             return {

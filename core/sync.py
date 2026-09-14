@@ -132,6 +132,7 @@ from strategy.rec_filters import (
     chase_filter_series, chase_filter, extension_filter_series,
     rsi_sweet_spot_series,
 )
+from strategy.indicators import calc_atr
 from config.strategy_params import (SHORT_ENGINE, NEXT_DAY_MOMENTUM,
                                     SURGE_BREAKOUT, PULLBACK_DIP)
 
@@ -1339,6 +1340,47 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             return round(float(close_val) / m - 1.0, 4)
         return 0.0
 
+    # ── 短线 ATR 自适应止损（2026-09-14 落地，用户决策采纳）──────────────
+    # 短线信号自带止损价 = 信号日收盘价 × (1 − clamp(k×ATR14%, floor, cap))，
+    # 替代固定 -5%：波动大的票给宽止损、波动小的给窄止损，解决「止损宽约 1.0×ATR
+    # 太紧、被震荡反复扫损」（实盘 33 笔止损单中 22 笔卖出后 5 日内反弹 >+3%）。
+    # ATR 为 rolling 口径（只回看信号日及之前）→ 无未来函数；全量重算模式下对
+    # 每个历史信号日取值同样只用到该日及之前数据。关闭开关或 ATR 缺失
+    # （次新股/长停断档）时回退固定比例 stop_loss_sc，绝不崩。
+    # 依据 tools/eval_short_risk_rules.py（26,262 条终态信号、四窗口、复用线上
+    # _short_exit_sim 状态机）：组合级 top3 全期 +0.32%→+0.63%、同窗口 -0.84%
+    # →+1.68%、样本内 -0.20%→-0.04%、样本外 +0.91%→+1.40%；止损率 37.1%→8.3%、
+    # 胜率 44.7%→50.5%；分半年 7/8 优于基线。⚠ 代价：左尾变肥（最差单笔
+    # -12.90%→-21.33%，收盘判定 + 连续跌停穿透），均值仅恶化 0.45pp。
+    from config.strategy_params import get_param as _get_param
+    _atr_on = bool(int(_get_param("short_atr_stop_enabled") or 0))
+    _atr_k = float(_get_param("short_atr_stop_k"))
+    _atr_floor = float(_get_param("short_atr_stop_floor"))
+    _atr_cap = float(_get_param("short_atr_stop_cap"))
+    _atr = None
+    if _atr_on:
+        try:
+            _atr = calc_atr(df["high"].astype(float), df["low"].astype(float),
+                            df["close"].astype(float), 14)
+        except Exception as _e:
+            print(f"  [WARN] {code} ATR 计算失败，短线止损回退固定比例: {_e}")
+            _atr = None
+
+    def _atr_stop_sc(ts, price):
+        """短线止损比例（负小数）：ATR 自适应优先，缺失/异常回退固定 stop_loss_sc。
+        floor/cap 双向夹逼；floor > cap 的病态覆盖值时取 floor（保守优先）。"""
+        if _atr is None or not price or price <= 0:
+            return stop_loss_sc
+        try:
+            _a = float(_atr.get(ts, float("nan")))
+        except Exception:
+            _a = float("nan")
+        if not _a or _a != _a or _a <= 0:
+            return stop_loss_sc
+        _lo, _hi = min(_atr_floor, _atr_cap), max(_atr_floor, _atr_cap)
+        _w = min(max(_a / float(price) * _atr_k, _lo), _hi)
+        return -round(_w, 4)
+
     if SHORT_ENGINE == "oversold_rebound":
         # ── 短线：超跌反弹v3 + 趋势闸门 + 质量过滤 ──
         reb = strategy_oversold_rebound(df)
@@ -1357,7 +1399,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             price = round(float(r["close"]), 2)
             buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
             buy_volume = int(buy_money // (price * 100) * 100)
-            stop_loss = round(price * (1 + stop_loss_sc), 2)
+            stop_loss = round(price * (1 + _atr_stop_sc(dt, price)), 2)
             take_profit = round(price * (1 + take_profit_sc), 2)
             trigger_list = [
                 f"超跌反弹v3 评分 {score4:.1f}/4",
@@ -1456,7 +1498,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             price = round(float(row["close"]), 2)
             buy_money = int(START_CAPITAL_SC * POSITION_PER_SC)
             buy_volume = int(buy_money // (price * 100) * 100)
-            stop_loss = round(price * (1 + stop_loss_sc), 2)
+            stop_loss = round(price * (1 + _atr_stop_sc(row.name, price)), 2)
             take_profit = round(price * (1 + take_profit_sc), 2)
             trigger_list = []
             if float(row.get("VOL_SCORE", 0) or 0) >= 2.0:

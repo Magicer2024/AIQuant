@@ -2877,7 +2877,16 @@ function renderPositionAdvice(advice) {
     };
     const m = map[advice.status] || map.hold;
     const reason = advice.reason ? ' · ' + advice.reason : '';
-    return `<div style="padding:4px 10px;font-size:12px;color:${m.color};border-left:2px solid ${m.color};background:rgba(255,255,255,0.02);margin-top:2px">${m.icon} 诊断：${m.label}${reason}</div>`;
+    // 生效止损价 + 来源。短线是「ATR 动态」：每天用最新交易日的 ATR14 重算，
+    // 波动放大→止损放宽、收敛→收紧，所以止损价每天可能不同（不是 bug）。
+    const det = advice.detail || {};
+    let stopTxt = '';
+    if (det.stop_price) {
+        const pct = (det.stop_loss_pct != null) ? (det.stop_loss_pct * 100).toFixed(2) + '%' : '';
+        const src = det.stop_mode === 'atr' ? 'ATR动态' : '固定';
+        stopTxt = ` · 止损 ${Number(det.stop_price).toFixed(2)}（${src}${pct ? ' ' + pct : ''}）`;
+    }
+    return `<div style="padding:4px 10px;font-size:12px;color:${m.color};border-left:2px solid ${m.color};background:rgba(255,255,255,0.02);margin-top:2px">${m.icon} 诊断：${m.label}${reason}${stopTxt}</div>`;
 }
 
 async function loadMyPositions() {
@@ -2924,11 +2933,15 @@ async function loadMyPositions() {
             const warnHtml = p.warning ? `<div class="position-warn">⚠ ${p.warning}</div>` : '';
             const adviceHtml = renderPositionAdvice(p.advice);
             const pname = (p.name||p.code).replace(/'/g, "\\'");
+            // 生效止损价：手填优先，否则 ATR 动态（每日重算）—— 让用户一眼看到当前止损位
+            const stopLine = p.stop_eff
+                ? ` · <span title="${p.stop_source==='manual'?'你手填的止损价':'ATR 动态止损（每天按最新波动率重算）'}">止损${Number(p.stop_eff).toFixed(2)}${p.stop_source==='atr'?'(ATR)':''}</span>`
+                : '';
             return `
             <div class="position-row">
                 <div class="pr-left" onclick="openKline('${p.code}')">
                     <div class="pr-name">${p.name||p.code}</div>
-                    <div class="pr-code">${p.code} · ${p.shares}股 · 成本${p.cost_price.toFixed(2)}</div>
+                    <div class="pr-code">${p.code} · ${p.shares}股 · 成本${p.cost_price.toFixed(2)}${stopLine}</div>
                 </div>
                 <div class="pr-mid">
                     <div class="pr-price">${p.latest_close?p.latest_close.toFixed(2):'--'}</div>
@@ -3181,7 +3194,13 @@ const OPTIMIZER_PARAM_LABELS = {
     high_vol_sig_threshold: '高波动融合分阈值',
     trend_gate_ma: '趋势闸门均线周期',
     trend_gate_slope_lookback: '趋势闸门斜率回看天数',
-    short_stop_loss: '短线止损比例',
+    short_stop_loss: '短线止损比例(ATR关闭时回退)',
+    short_atr_stop_enabled: '短线ATR自适应止损开关',
+    short_atr_stop_k: '短线ATR止损倍数k',
+    short_atr_stop_floor: '短线ATR止损宽度下限',
+    short_atr_stop_cap: '短线ATR止损宽度上限',
+    deep_atr_stop_enabled: '个股深度止损宽度上限开关',
+    deep_atr_stop_cap: '个股深度止损宽度上限',
     short_take_profit: '短线止盈比例',
 };
 function optimizerParamLabel(key) { return OPTIMIZER_PARAM_LABELS[key] || key; }

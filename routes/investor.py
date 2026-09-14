@@ -1639,7 +1639,7 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
     if not code or not cost_price or cost_price <= 0 or not opened_at:
         return None
     try:
-        from strategy.exit_advisor import evaluate_exit, get_max_hold
+        from strategy.exit_advisor import evaluate_exit, get_max_hold, atr_dynamic_stop_pct
         import pandas as pd
         rows = conn.execute(
             """
@@ -1654,10 +1654,20 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
         df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
         kwargs = {}
         hz = horizon or "short"
+        stop_mode, atr_pct = "fixed", None
         if hz == "short":
-            # 短线：移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
+            # 短线：止损 = ATR 自适应，**每天用最新交易日的 ATR14 重算**（2026-09-14 落地）。
+            # 与推荐线同口径：pct = clamp(k×ATR14%, floor, cap)，锚定成本价；
+            # ATR 不可用（开关关闭/数据不足）时回退固定 short_stop_loss，绝不落成 0。
+            # 移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
+            atr_pct = atr_dynamic_stop_pct(df)
+            if atr_pct is not None:
+                stop_mode = "atr"
             kwargs = dict(
-                stop_loss_pct=get_param("short_stop_loss"),
+                stop_loss_pct=(atr_pct if atr_pct is not None
+                               else get_param("short_stop_loss")),
+                # 动态止损 → 硬止损只按当前收盘判定（否则波动率下行时会假阳性）
+                stop_is_dynamic=(atr_pct is not None),
                 partial_tp=get_param("short_take_profit"),
                 trailing_pct=get_param("short_trailing_pct"),
                 max_hold_days=int(get_param("short_max_hold_days")),
@@ -1671,12 +1681,20 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
                 trailing_pct=get_param("mid_trailing_pct") if hz == "mid" else get_param("long_trailing_pct"),
                 max_hold_days=get_max_hold(hz),
             )
-        return evaluate_exit(
+        res = evaluate_exit(
             entry_price=float(cost_price),
             entry_date=str(opened_at)[:10],
             df=df,
             **kwargs,
         )
+        # 标注止损来源，供前端区分「ATR 动态」与「固定比例」——
+        # 否则用户看到止损价变化会以为是 bug（实际是波动率变了）。
+        if isinstance(res, dict) and isinstance(res.get("detail"), dict):
+            res["detail"]["stop_mode"] = stop_mode
+            res["detail"]["stop_loss_pct"] = (
+                atr_pct if atr_pct is not None
+                else (kwargs.get("stop_loss_pct")))
+        return res
     except Exception:
         return None
 
@@ -1727,19 +1745,28 @@ def list_positions():
             pnl = value - cost if d.get("latest_close") else 0
             pnl_pct = (pnl / cost * 100) if cost > 0 else 0
 
-            # 是否触发止损/止盈预警
-            warning = None
-            sl = d.get("stop_loss")
-            tp = d.get("take_profit")
-            if d.get("latest_close") and sl and d["latest_close"] <= sl:
-                warning = "已触及止损价，请考虑止损"
-            elif d.get("latest_close") and tp and d["latest_close"] >= tp:
-                warning = "已触及止盈价，可考虑止盈"
-
             # 出场诊断（清仓/减仓/持有）——复用推荐票出场纪律（按持仓周期选参数）
             advice = _diagnose_position(conn, d.get("code"),
                                         d.get("cost_price"), d.get("opened_at"),
                                         d.get("horizon") or "short")
+
+            # 是否触发止损/止盈预警。止损价优先级：**用户手填 → ATR 动态**（每日重算）。
+            # ATR 动态止损不落库（每天都变），从诊断 detail 取 —— 与诊断结论同源，
+            # 否则会出现"预警说没破、诊断说已止损"的自相矛盾。
+            warning = None
+            sl = d.get("stop_loss")
+            tp = d.get("take_profit")
+            stop_eff, stop_src = sl, ("manual" if sl else None)
+            if not stop_eff and advice:
+                _det = advice.get("detail") or {}
+                if _det.get("stop_price"):
+                    stop_eff = _det["stop_price"]
+                    stop_src = _det.get("stop_mode") or "atr"
+            if d.get("latest_close") and stop_eff and d["latest_close"] <= stop_eff:
+                _src_txt = "手填" if stop_src == "manual" else "ATR动态"
+                warning = f"已触及止损价 {stop_eff:.2f}（{_src_txt}），请考虑止损"
+            elif d.get("latest_close") and tp and d["latest_close"] >= tp:
+                warning = "已触及止盈价，可考虑止盈"
 
             total_cost += cost
             total_value += value
@@ -1755,6 +1782,9 @@ def list_positions():
                 "pnl": round(pnl, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "warning": warning,
+                # 生效止损价与来源（manual=用户手填 / atr=每日动态 / None=未取到）
+                "stop_eff": round(float(stop_eff), 2) if stop_eff else None,
+                "stop_source": stop_src,
                 "advice": advice,
             })
 

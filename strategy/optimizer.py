@@ -143,9 +143,16 @@ def run_daily_diagnosis(days: int = DIAG_DAYS) -> dict:
                             if r["t10_return"] is not None and r["t10_return"] > 0)
             ratio = recovered / len(stopped)
             if ratio >= 0.4:
+                if bool(int(get_param("short_atr_stop_enabled") or 0)):
+                    _stop_desc = (
+                        f"当前 ATR 自适应止损（{get_param('short_atr_stop_k')}×ATR14，"
+                        f"夹逼 {get_param('short_atr_stop_floor'):.0%}~"
+                        f"{get_param('short_atr_stop_cap'):.0%}）")
+                else:
+                    _stop_desc = f"当前固定止损 {get_param('short_stop_loss')*100:.0f}%"
                 findings.append(
                     f"止损单中 {ratio*100:.0f}% 在 T+10 收正（{recovered}/{len(stopped)}），"
-                    f"当前止损 {get_param('short_stop_loss')*100:.0f}% 可能偏紧")
+                    f"{_stop_desc} 可能偏紧")
 
         # 归因②：低分单拖累——fusion_score 下半区 vs 上半区胜率
         scored = sorted([(float(r["fusion_score"] or 0), v) for v, r in rets],

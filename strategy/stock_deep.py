@@ -25,6 +25,7 @@ from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
 from config.personal_config import is_main_board, main_board_filter
 from config.strategy_params import DEEP_EMA20_AUX as _EMA20_AUX_CFG
 from config.strategy_params import DEEP_TRACK, DEEP_TP_AMP_RATIO, DEEP_LOOKBACK
+from config.strategy_params import get_param as _get_param
 
 # 环境变量支持 A/B 验证（tools/_eval_deep_buypoints.py）：DEEP_EMA20_AUX=1 强制开启、
 # 0 强制关闭，否则用配置默认（enabled=False = 基线）。模块加载时读取一次即可。
@@ -668,6 +669,36 @@ def _reachable_take(close: float, stop_l: float, rhythm: dict, rr_target: float)
     return round(close + risk * rr_target * close, 2) if risk > 0 else None
 
 
+def _deep_stop_cap(entry: float, stop: Optional[float]) -> Optional[float]:
+    """个股深度止损**宽度上限**（2026-09-14 用户拍板 cap=8%，比价依据见同批工具/参数注释）。
+
+    深析链止损原为「收盘 − 2.5×ATR」且**完全无夹逼**，实测宽度中位 10.2% / P95 19.8% /
+    最大 52% —— 宽到失去约束力（88% 的笔只能到期离场）。2026-09-14 出场多臂实验
+    （tools/eval_deep_atr_stop.py）结论是**收窄有效**（与短线线「放宽有效」方向相反）：
+    buy 池 n=2635 配对均差 +0.376% (t=+5.38)、all 池 n=35517 +0.139% (t=+8.74)，
+    cap8 在 buy/all 池各 2/3 月最优；尾部同步改善（all 池最差单笔 −35.50%→−19.00%）。
+
+    ⚠ 代价：削左尾也削右尾 —— 胜率 48.2%→46.2%(buy)、54.5%→53.1%(all)，中位同步下降；
+    均值/PF 的改善来自「左尾削得更多」。想要胜率可回退 cap12/cap15。
+
+    ⚠ 只在**止损价**上收紧：调用方必须先算好止盈再调本函数（回测里 take_profit 取的是
+    库里原值，即由未夹逼止损推出），否则回测一致性被破坏。
+
+    enabled=0 或 cap≤0 时**逐字节等价于改动前行为**（绝不因参数缺失把止损改宽）。
+    """
+    if stop is None or entry is None or entry <= 0 or stop <= 0:
+        return stop
+    try:
+        if float(_get_param("deep_atr_stop_enabled") or 0) <= 0:
+            return stop
+        cap = float(_get_param("deep_atr_stop_cap") or 0)
+    except Exception:
+        return stop          # 参数不可读 → 保持原止损，绝不收紧/放宽
+    if cap <= 0 or cap >= 1:
+        return stop
+    return max(stop, round(entry * (1.0 - cap), 2))
+
+
 def _signal_plan_at(df: pd.DataFrame, rhythm: dict, i: int,
                     stop_mult: float = 2.5, rr_target: float = 2.5) -> dict:
     """在第 i 行评估规则信号 + 节奏修正 + 分档，返回该日的完整建议计划。
@@ -688,6 +719,8 @@ def _signal_plan_at(df: pd.DataFrame, rhythm: dict, i: int,
     entry = round(close, 2)
     stop_l = round(close - stop_mult * atr, 2) if (level in ("buy", "add") and atr and np.isfinite(atr) and atr > 0) else None
     tp_l = _reachable_take(close, stop_l, rhythm, rr_target) if stop_l else None
+    # 止损宽度上限放在止盈之后：止盈口径保持「由未夹逼止损推出」（与回测 A0 一致）
+    stop_l = _deep_stop_cap(entry, stop_l)
     return {
         "date": df.index[i],
         "close": entry,
@@ -920,8 +953,12 @@ def _current_signal(df: pd.DataFrame, trend: dict, volprice: dict, rhythm: dict,
     if swing_low and swing_low > 0 and swing_low < close and stop > swing_low:
         stop = max(stop, swing_low)   # 止损不深于近期摆动低点
     stop = round(stop, 2)
-    risk = (close - stop) / close if close > 0 else 0
+    # 止盈先按**未夹逼**的止损推（与回测 A0 口径一致：回测里 take_profit 取的是库里原值），
+    # 再做「止损宽度上限」夹逼；风报比 / risk_pct 用夹逼后的真实止损重算，
+    # 保证面板显示的风报比就是实际会挂的那条止损算出来的。
     tp = _reachable_take(close, stop, rhythm, rr_target)
+    stop = _deep_stop_cap(round(close, 2), stop)
+    risk = (close - stop) / close if close > 0 else 0
     reward = (tp - close) / close if (tp and close > 0) else 0
     rr = round(reward / risk, 2) if risk > 0 else None
 

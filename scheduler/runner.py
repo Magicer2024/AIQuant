@@ -26,7 +26,7 @@ def _evaluate_holdings():
     硬止损 / 浮盈达启动线后移动止盈（回撤清仓）/ 破MA5 / 超期兜底。
     """
     try:
-        from strategy.exit_advisor import evaluate_exit, get_max_hold
+        from strategy.exit_advisor import evaluate_exit, get_max_hold, atr_dynamic_stop_pct
         from config.strategy_params import get_param
         from core.db import get_conn
         import pandas as pd
@@ -52,10 +52,19 @@ def _evaluate_holdings():
                 df = pd.DataFrame([dict(x) for x in price_rows]).set_index("trade_date")
                 kwargs = {}
                 hz = r["horizon"]
+                stop_mode, atr_pct = "fixed", None
                 if hz == "short":
-                    # 短线：移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
+                    # 短线：止损 = ATR 自适应，每天用最新交易日 ATR14 重算（2026-09-14 落地），
+                    # 与持仓页 _diagnose_position 同口径；ATR 不可用时回退固定 short_stop_loss。
+                    # 移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
+                    atr_pct = atr_dynamic_stop_pct(df)
+                    if atr_pct is not None:
+                        stop_mode = "atr"
                     kwargs = dict(
-                        stop_loss_pct=get_param("short_stop_loss"),
+                        stop_loss_pct=(atr_pct if atr_pct is not None
+                                       else get_param("short_stop_loss")),
+                        # 动态止损 → 硬止损只按当前收盘判定（否则波动率下行时会假阳性）
+                        stop_is_dynamic=(atr_pct is not None),
                         partial_tp=get_param("short_take_profit"),
                         trailing_pct=get_param("short_trailing_pct"),
                         max_hold_days=int(get_param("short_max_hold_days")),
@@ -74,6 +83,10 @@ def _evaluate_holdings():
                     df=df,
                     **kwargs,
                 )
+                if isinstance(adv.get("detail"), dict):
+                    adv["detail"]["stop_mode"] = stop_mode
+                    adv["detail"]["stop_loss_pct"] = (
+                        atr_pct if atr_pct is not None else kwargs.get("stop_loss_pct"))
             except Exception:
                 continue
             items.append({
