@@ -1121,14 +1121,77 @@ async function loadSurgePicks() {
         if (hint && data.date) {
             hint.textContent = '信号日 ' + data.date + ' · 大阳突破 × 龙虎榜净买双重严筛 · 次日开盘买入 · 严守止损、仓位从轻 · 宁缺毋滥';
         }
+        // 历史跟踪在「无信号日」也要显示——这是板块的长期成绩单，不随当日有无信号消失
+        let html = '';
         if (!items.length) {
-            box.innerHTML = '<div class="empty-state">今日无强势突破信号<br><span style="color:var(--text-muted);font-size:12px">龙虎榜净买严筛无合格候选（或大盘过热被门控），宁缺毋滥</span></div>';
-            return;
+            html += '<div class="empty-state" style="grid-column:1 / -1">今日无强势突破信号<br><span style="color:var(--text-muted);font-size:12px">龙虎榜净买严筛无合格候选（或大盘过热被门控），宁缺毋滥</span></div>';
+        } else {
+            html += items.map(it => renderSurgeCard(it)).join('');
         }
-        box.innerHTML = items.map(it => renderSurgeCard(it)).join('');
+        html += renderSurgeHistory(data.history || [], data.history_summary || {});
+        box.innerHTML = html;
     } catch(e) {
         box.innerHTML = '<div class="empty-state">加载失败</div>';
     }
+}
+
+// 次日强势观察 · 历史跟踪列表：更早信号日每条信号按现实口径回放
+// （次日开盘买入 → 收盘判止损/止盈/到期，口径与推荐跟踪一致），给板块一个长期成绩单
+function renderSurgeHistory(hist, hs) {
+    if (!hist.length) return '';
+    const fmt = v => v != null ? Number(v).toFixed(2) : '--';
+    const retCls = v => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+    const statusColor = it => {
+        if (it.status === 'clear') return it.exit_reason === 'take_profit' ? 'var(--green, #10b981)' : 'var(--danger)';
+        if (it.status === 'hold') return 'var(--gold, #e0b34d)';
+        if (it.status === 'skipped') return 'var(--text-muted)';
+        return 'var(--text-secondary)';
+    };
+    const rows = hist.map(it => {
+        const ret = it.return_pct;
+        const retStr = ret == null ? '--' : (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%';
+        const exitStr = it.status === 'clear'
+            ? `${it.exit_date} @${fmt(it.exit_price)}`
+            : it.status === 'hold' ? `浮 @${fmt(it.last_close)}` : '--';
+        return `<tr>
+            <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span> ${it.name || ''}</td>
+            <td>${it.signal_date || '--'}</td>
+            <td>${it.entry_date ? `${it.entry_date} @${fmt(it.entry_price)}` : '--'}</td>
+            <td>${exitStr}</td>
+            <td>${it.hold_days != null ? it.hold_days + ' 日' : '--'}</td>
+            <td class="${retCls(ret)}" style="font-weight:600">${retStr}</td>
+            <td style="color:${statusColor(it)}">${it.status_label || '--'}</td>
+        </tr>`;
+    }).join('');
+    // 摘要只统计已结算笔数；持有中/放弃不进胜率，避免把没走完的当成绩
+    // ⚠ 原「累计 = Σ单笔收益率」已移除（2026-09-11）：单笔百分比直接相加无资金含义，
+    // 且与左侧「平均」重复表达同一批数据。等权资金曲线口径见「出场跟踪」的「等权累计」。
+    const stat = (v, cls) => v != null ? `<span class="exit-group-stat ${cls}">${v}</span>` : '';
+    const summaryHtml =
+        (hs.closed != null ? stat(`已结算 ${hs.closed} 笔`, '') : '') +
+        (hs.win_rate != null ? stat(`胜率 ${hs.win_rate}%`, hs.win_rate >= 50 ? 'positive' : 'negative') : '') +
+        (hs.avg_return != null ? stat(`平均 ${(hs.avg_return >= 0 ? '+' : '')}${hs.avg_return}%`, hs.avg_return >= 0 ? 'positive' : 'negative') : '') +
+        (hs.holding ? stat(`持有中 ${hs.holding}`, '') : '') +
+        (hs.skipped ? stat(`放弃 ${hs.skipped}`, '') : '');
+    // grid-column:1/-1 —— 本块是 .action-plan-grid 的子项，必须横跨整行，否则会被压进一格
+    return `
+        <div style="grid-column:1 / -1;margin-top:10px;border-top:1px solid var(--border, rgba(255,255,255,0.08));padding-top:8px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span style="font-weight:600;font-size:13px">📜 历史跟踪 · 次日开盘买入 → 止损/止盈/到期（${hs.max_hold_days || 5} 交易日）</span>
+                ${summaryHtml}
+                <button class="btn btn-sm" style="margin-left:auto" onclick="toggleSurgeHistory()">收起/展开</button>
+            </div>
+            <div id="surgeHistBox" class="table-wrapper" style="margin-top:6px;max-height:240px;overflow-y:auto">
+                <table><thead><tr>
+                    <th>股票</th><th>信号日</th><th>买入(次日开盘)</th><th>卖出</th><th>持仓</th><th>收益</th><th>状态</th>
+                </tr></thead><tbody>${rows}</tbody></table>
+            </div>
+        </div>`;
+}
+
+function toggleSurgeHistory() {
+    const box = document.getElementById('surgeHistBox');
+    if (box) box.style.display = box.style.display === 'none' ? '' : 'none';
 }
 
 // 次日强势观察卡片：轻量版 action-card（无建仓分批/信号灯，突出信号日涨幅与买卖价位）

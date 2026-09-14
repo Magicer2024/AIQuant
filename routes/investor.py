@@ -27,7 +27,7 @@ from config.personal_config import (
     MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
     EXIT_TRACK_START_DATE,
 )
-from config.strategy_params import T1_GAP_GUARD, MID_LONG_REGIME_CAP, get_param
+from config.strategy_params import T1_GAP_GUARD, MID_LONG_REGIME_CAP, get_param, SURGE_BREAKOUT
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -1013,10 +1013,117 @@ def surge_picks():
                 "scan_date": d.get("scan_date"),
                 "trade_date": d.get("trade_date"),
             })
+
+        # —— 历史跟踪：更早信号日的每条强势突破，按现实口径逐日回放 ——
+        # 入场 = 信号日次日开盘价（信号收盘后才产生，只能 T+1 开盘买）；
+        # 出场与 deep_tracker 同口径：收盘判定（收盘 ≤ 止损 → 止损、收盘 ≥ 止盈 → 止盈、
+        # max_hold_days 个交易日到期按收盘出）、建仓当日不判出场。
+        # 次日开盘已高开越过止盈 → 放弃追高（与卡片「错过不追」同口径，不计盈亏）。
+        max_hold = int(SURGE_BREAKOUT.get("max_hold_days", 5))
+        hist_rows = conn.execute(
+            f"""
+            SELECT s.code, s.name, s.price AS signal_price,
+                   s.stop_loss, s.take_profit, s.scan_date, s.trade_date
+            FROM stock_signal s
+            WHERE s.strategy = '强势突破'
+              AND s.scan_date < ?
+              AND s.buy_price IS NOT NULL
+              AND s.name NOT LIKE '%ST%'
+              AND s.name NOT LIKE '%退%'
+              {board_filter}
+            ORDER BY s.scan_date DESC, COALESCE(s.fusion_score, 0) DESC
+            LIMIT 40
+            """,
+            (scan_date,),
+        ).fetchall()
+        history = []
+        for r in hist_rows:
+            d = dict(r)
+            sig_day = d.get("trade_date") or d.get("scan_date")
+            stop = d.get("stop_loss")
+            tp = d.get("take_profit")
+            h = {
+                "code": d.get("code"), "name": d.get("name"),
+                "signal_date": d.get("scan_date"), "signal_price": d.get("signal_price"),
+                "stop_loss": stop, "take_profit": tp,
+            }
+            px = conn.execute(
+                """SELECT trade_date, open, close, high, low FROM daily_price
+                   WHERE code = ? AND trade_date > ? ORDER BY trade_date ASC LIMIT ?""",
+                (d["code"], sig_day, max_hold + 1),
+            ).fetchall()
+            if not px:
+                h.update(status="pending", status_label="待买入",
+                         entry_date=None, entry_price=None,
+                         exit_date=None, exit_price=None, exit_reason=None,
+                         hold_days=None, return_pct=None)
+                history.append(h)
+                continue
+            entry_price = px[0]["open"]
+            if not entry_price or entry_price <= 0:
+                continue   # 停牌/数据缺口，无法回放也不该假装有结果
+            h["entry_date"] = px[0]["trade_date"]
+            h["entry_price"] = round(entry_price, 2)
+            if tp and entry_price > tp:
+                # 高开直接越过止盈位 → 现实中不会追，放弃
+                h.update(status="skipped", status_label="放弃·高开越过止盈",
+                         exit_date=None, exit_price=None, exit_reason=None,
+                         hold_days=None, return_pct=None)
+                history.append(h)
+                continue
+            exit_date = exit_price = exit_reason = None
+            exit_j = None
+            for j, p in enumerate(px[:max_hold], start=1):
+                close = p["close"]
+                if not close or close <= 0:
+                    break
+                if j == 1:
+                    continue   # 建仓当日不判出场（与推荐跟踪同口径）
+                if stop and close <= stop:
+                    exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "stop_loss", j
+                    break
+                if tp and close >= tp:
+                    exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "take_profit", j
+                    break
+                if j >= max_hold:
+                    exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "max_hold_days", j
+                    break
+            if exit_reason:
+                h.update(status="clear",
+                         status_label={"stop_loss": "止损", "take_profit": "止盈",
+                                       "max_hold_days": "到期了结"}[exit_reason],
+                         exit_date=exit_date, exit_price=round(exit_price, 2),
+                         exit_reason=exit_reason,
+                         hold_days=exit_j,
+                         return_pct=round((exit_price - entry_price) / entry_price * 100, 2))
+            else:
+                last = px[min(len(px), max_hold) - 1]
+                h.update(status="hold", status_label="持有中",
+                         exit_date=None, exit_price=None, exit_reason=None,
+                         hold_days=min(len(px), max_hold),
+                         return_pct=round((last["close"] - entry_price) / entry_price * 100, 2),
+                         last_close=round(last["close"], 2))
+            history.append(h)
+        closed = [x for x in history if x["status"] == "clear"]
+        wins = [x for x in closed if (x["return_pct"] or 0) > 0]
+        history_summary = {
+            "total": len(history),
+            "closed": len(closed),
+            "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
+            "avg_return": round(sum(x["return_pct"] for x in closed) / len(closed), 2) if closed else None,
+            "cum_return": round(sum(x["return_pct"] for x in closed), 2) if closed else None,
+            "holding": sum(1 for x in history if x["status"] == "hold"),
+            "skipped": sum(1 for x in history if x["status"] == "skipped"),
+            "pending": sum(1 for x in history if x["status"] == "pending"),
+            "max_hold_days": max_hold,
+        }
+
         return ok({
             "date": scan_date,
             "count": len(items),
             "items": _sanitize(items),
+            "history": _sanitize(history),
+            "history_summary": history_summary,
             "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
                     "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
         })
