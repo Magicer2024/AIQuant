@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260825">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260911">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:13px}
@@ -601,7 +601,7 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
-                <h3>推荐复盘 · 过去30天推荐的真实表现与出场结果</h3>
+                <h3>推荐复盘 · 过去60天推荐的真实表现与出场结果</h3>
                 <span class="text-muted" style="font-size:12px" id="recHistoryUpdatedAt"></span>
             </div>
             <div id="recHistorySummary"></div>
@@ -982,8 +982,19 @@ function renderPickMiniRow(it, hz) {
     const sg = it.signal || {};
     const num = v => (v != null ? Number(v).toFixed(2) : '--');
     const pct = it.latest_pct;
-    const pctHtml = pct != null
-        ? ` · <span class="${pct >= 0 ? 'idx-up' : 'idx-down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>` : '';
+    const pctCls = pct == null ? '' : (pct >= 0 ? 'idx-up' : 'idx-down');
+    const pctTxt = pct != null ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '';
+    // 最新价 = 该股最近一个有行情交易日的收盘价（非盘中实时价）。
+    // 显式成列，方便一眼对比「现价 vs 回踩买点/止盈/止损」的相对位置。
+    const lastPx = it.latest_close != null ? Number(it.latest_close) : null;
+    const lastTip = lastPx == null
+        ? '暂无最新行情数据'
+        : `最新收盘价 ${lastPx.toFixed(2)}${pct != null ? `（${pctTxt}）` : ''}`
+          + `，取自该股最近一个有行情的交易日${it.latest_date ? `（${it.latest_date}）` : ''}`;
+    const lastHtml = `<div class="pm-price pm-last" title="${lastTip}">
+            <div class="${pctCls}">${lastPx != null ? lastPx.toFixed(2) : '--'}</div>
+            ${pct != null ? `<div class="pm-last-pct ${pctCls}">${pctTxt}</div>` : ''}
+        </div>`;
     const rr = ap.risk_reward_ratio;
     const rrCls = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
     const rrHtml = rr != null
@@ -992,15 +1003,24 @@ function renderPickMiniRow(it, hz) {
     const label = (sg.label || '').replace(/"/g, '');
     // 抄底类短线 = 回踩确认入场：买入价语义是「回踩买点」，非次日直接买
     const pullback = hz === 'short' && it.strategy && it.strategy !== '隔日动量';
+    // 回踩买点 = 本行「买入」列的数值。把它显式写进徽章文案与悬浮提示，
+    // 消除「回踩买到底是回踩到哪个价位」的歧义（2026-09-11 用户反馈）。
+    const pbPx = ap.entry_price != null ? num(ap.entry_price) : null;
+    const pbTip = pbPx
+        ? `回踩确认入场：回踩买点 = ${pbPx}（即本行「买入」列）。推荐日后 5 个交易日内，
+价格回踩触及 ${pbPx} 才按该价建仓；一直不触及则视为未成交、放弃，
+涨上去不追高。止盈 ${num(ap.take_profit)} / 止损 ${num(ap.stop_loss)} 同样以该买点为基准。`.replace(/\n/g, '')
+        : '回踩确认入场：5 个交易日内价格回踩至买点才建仓，未回踩则放弃（涨上去不追高）';
     const pullbackHtml = pullback
-        ? '<span class="strategy-badge" style="background:rgba(255,170,60,.15);color:#ffaa3c" title="回踩确认入场：5个交易日内价格回踩至买点才建仓，未回踩则放弃">回踩买</span>' : '';
+        ? `<span class="strategy-badge" style="background:rgba(255,170,60,.15);color:#ffaa3c" title="${pbTip}">回踩买${pbPx ? ' ' + pbPx : ''}</span>` : '';
     return `<div class="pick-mini-row" onclick="openKline('${it.code}')" title="点击查看 K 线">
         <div class="pm-stock">
             <div class="pm-name">${sg.emoji ? `<span class="pm-sig" title="${label}">${sg.emoji}</span>` : ''}${it.name || it.code}${it.strategy ? `<span class="strategy-badge">${it.strategy}</span>` : ''}${pullbackHtml}</div>
-            <div class="pm-code">${it.code}${pctHtml}</div>
+            <div class="pm-code">${it.code}</div>
         </div>
         <div class="pm-score">${it.fusion_score != null ? it.fusion_score : '--'}</div>
-        <div class="pm-price pm-buy" title="${pullback ? '回踩买点（5个交易日内触及才建仓）' : '建议买入'}">${num(ap.entry_price)}</div>
+        ${lastHtml}
+        <div class="pm-price pm-buy" title="${pullback ? (pbPx ? `回踩买点 ${pbPx}：推荐日后 5 个交易日内价格触及即按 ${pbPx} 建仓，未触及则放弃（不追高）` : '回踩买点（5 个交易日内触及才建仓）') : '建议买入'}">${num(ap.entry_price)}</div>
         <div class="pm-price pm-tp" title="止盈目标">${num(ap.take_profit)}</div>
         <div class="pm-price pm-stop" title="止损">${num(ap.stop_loss)}</div>
         <div class="pm-rr" title="盈亏比">${rrHtml}</div>
@@ -1016,7 +1036,7 @@ function renderPickGroupBody(g, list) {
         return '<div class="action-plan-grid">' + list.map(it => renderPickCard(it)).join('') + '</div>';
     }
     return `<div class="pick-mini-list">
-        <div class="pick-mini-head"><span>股票</span><span>综合分</span><span>买入</span><span>止盈</span><span>止损</span><span>盈亏比</span></div>
+        <div class="pick-mini-head"><span>股票</span><span>综合分</span><span title="最新收盘价（该股最近一个有行情的交易日）">最新</span><span>买入</span><span>止盈</span><span>止损</span><span>盈亏比</span></div>
         ${list.map(it => renderPickMiniRow(it, g.key)).join('')}
     </div>`;
 }
@@ -1230,6 +1250,7 @@ function renderSurgeCard(it) {
                     <div class="price-lbl">信号日收盘</div>
                     <div class="price-val">${fmt(it.signal_price)}</div>
                     <div class="price-sub">当日 ${pctHtml}</div>
+                    ${it.latest_close != null ? `<div class="price-sub" title="最新收盘价（该股最近一个有行情的交易日，非盘中实时价）；用于判断现价相对止盈/止损的位置">最新 <b>${Number(it.latest_close).toFixed(2)}</b></div>` : ''}
                     ${statusHtml}
                 </div>
                 <div class="action-arrow">·</div>
@@ -1708,7 +1729,8 @@ function renderSdTrack(items, st, updatedAt) {
           stat('平均持仓', st.avg_hold_tdays == null ? '--' : st.avg_hold_tdays + ' 日') +
           stat('平均收益', _sdPct(st.avg_return), _sdPctCls(st.avg_return)) +
           stat('盈亏比', st.profit_factor == null ? '--' : st.profit_factor) +
-          stat('累计收益', _sdPct(st.cum_return), _sdPctCls(st.cum_return)) +
+          /* 「累计收益 = Σ单笔收益率」2026-09-11 移除：单笔百分比相加无资金含义（610 单会累出巨大数字），
+             与左侧「平均收益」表达同一批数据；要看资金曲线请用带复利的等权口径 */
           stat('持仓中', (st.holding || 0) + ' 笔', '', 'holding') +
           stat('待回踩', (st.watching || 0) + ' 笔', '', 'watching') +
           stat('已失效', (st.expired || 0) + ' 笔', '', 'expired') +
@@ -2445,13 +2467,22 @@ const EXIT_HORIZON_META = {
     long:  { label: '长线', icon: '🏔️', hint: '不限持仓期 · 趋势跟踪' },
 };
 
-// 各周期统计 chips（summary.perf：累计收益 = 全部段盈亏之和，累计胜率 = 盈亏>0 的段占比）
+// 各周期统计 chips
+// ⚠ 口径（2026-09-11 修正）：原「累计收益 = 各段盈亏之和」是单笔收益率**简单相加**，
+// 无资金含义 —— 37 笔会累出 -111.7%，读起来像"本金亏光还倒欠"，实际只是算术和。
+// 改为两个可解释口径：平均每笔（等权，无仓位假设）+ 等权累计（每笔满仓复利连乘）。
 function exitStatChip(hz, perf) {
     const p = (perf && perf[hz]) || {};
     let s = '';
-    if (p.cum_pnl != null) {
-        const sign = p.cum_pnl >= 0 ? '+' : '';
-        s += `<span class="exit-group-stat ${p.cum_pnl >= 0 ? 'positive' : 'negative'}">累计收益 ${sign}${p.cum_pnl}%</span>`;
+    const n = (p.clear || 0) + (p.hold || 0);
+    if (p.avg_pct != null) {
+        const sign = p.avg_pct >= 0 ? '+' : '';
+        const raw = p.cum_pnl != null ? `${p.cum_pnl >= 0 ? '+' : ''}${p.cum_pnl}%` : '--';
+        s += `<span class="exit-group-stat ${p.avg_pct >= 0 ? 'positive' : 'negative'}" title="平均每笔收益：${n} 笔（已卖出 ${p.clear || 0} + 持仓中 ${p.hold || 0}）的等权算术平均，不依赖仓位假设，是唯一可直接比较的口径。原「累计收益 ${raw}」为单笔收益率直接相加，无资金含义，已弃用">平均每笔 ${sign}${p.avg_pct}%</span>`;
+    }
+    if (p.comp_pct != null) {
+        const sign = p.comp_pct >= 0 ? '+' : '';
+        s += `<span class="exit-group-stat ${p.comp_pct >= 0 ? 'positive' : 'negative'}" title="等权资金曲线：每笔按满仓等权、依时间顺序复利连乘（共 ${n} 笔）。若按 20% 仓位下单，对总资金的影响约为该值的五分之一">等权累计 ${sign}${p.comp_pct}%</span>`;
     }
     if (p.win_rate != null) {
         s += `<span class="exit-group-stat ${p.win_rate >= 50 ? 'positive' : 'negative'}" title="${p.segments || 0} 段中盈利 ${p.win_rate >= 0 ? Math.round(p.win_rate * (p.segments || 0) / 100) : 0} 段">累计胜率 ${p.win_rate}%</span>`;
@@ -2482,6 +2513,13 @@ function renderExitRows(list) {
         const exitPriceHtml = (sold && detail.exit_price != null)
             ? `<span title="${detail.exit_date || ''} 卖出">${Number(detail.exit_price).toFixed(2)}</span>`
             : '<span style="color:var(--text-muted)">--</span>';
+        // 现价：持仓/已卖出 = 评估时点收盘价；待回踩/未成交 = 该股最新收盘价
+        // （未成交单的现价用于判断「离回踩买点还差多少」）
+        const curPx = detail.current_price;
+        const curDate = detail.current_date || '';
+        const curHtml = curPx != null
+            ? `<span title="最新收盘价${curDate ? '：' + curDate : ''}（该股最近一个有行情的交易日，非盘中实时价）">${Number(curPx).toFixed(2)}</span>`
+            : '<span style="color:var(--text-muted)">--</span>';
         // 连续推荐：推荐日显示最新一次，附最早推荐日提示
         const firstDate = detail.first_scan_date;
         const scanHtml = (it.scan_date || '--')
@@ -2493,6 +2531,7 @@ function renderExitRows(list) {
             <td>${scanHtml}</td>
             <td>${detail.entry_date||'--'}</td>
             <td>${it.entry_price||'--'}</td>
+            <td>${curHtml}</td>
             <td>${exitPriceHtml}</td>
             <td>${holdDays}</td>
             <td class="${pnlCls}">${pnlStr}</td>
@@ -2717,6 +2756,8 @@ function renderPickCard(it) {
 
             const hzKey = it.horizon || 'short';
             const isLhb = it.strategy === '隔日动量';  // 龙虎榜资金异动专属 UI
+            // 抄底类短线（非隔日动量）= 回踩确认入场：入场价语义是「回踩买点」，须显式标注价位
+            const isPullback = hzKey === 'short' && it.strategy && it.strategy !== '隔日动量';
 // 现价已站上突破确认线 → 时机确认信号触发，整卡高亮提示
             const brokeOut = !!(it.confirm_trigger && it.latest_close && it.latest_close >= it.confirm_trigger);
             return `
@@ -2735,9 +2776,10 @@ function renderPickCard(it) {
                     ${exitHtml}
                     <div class="action-prices">
                         <div class="price-cell buy">
-                            <div class="price-lbl">建议买入</div>
+                            <div class="price-lbl">${isPullback ? '回踩买点' : '建议买入'}</div>
                             <div class="price-val">${entry}</div>
-                            ${pctHtml?`<div class="price-sub">最新 ${it.latest_close?.toFixed(2) || '--'} ${pctHtml}</div>`:''}
+                            ${it.latest_close!=null?`<div class="price-sub" title="最新收盘价${it.latest_date?`：${it.latest_date}`:''}（该股最近一个有行情的交易日，非盘中实时价）">最新 <b class="${(it.latest_pct||0)>=0?'idx-up':'idx-down'}">${Number(it.latest_close).toFixed(2)}</b>${pctHtml?' '+pctHtml:''}</div>`:''}
+                            ${isPullback?`<div class="price-sub confirm-waiting" title="回踩确认入场：推荐日后 5 个交易日内，价格回踩触及 ${entry} 才按该价建仓；一直不触及则视为未成交、放弃（涨上去不追高）">⏳ 5 日内回踩 ${entry} 才建仓 · 不追高</div>`:''}
                             ${it.confirm_trigger?(brokeOut
                                 ?`<div class="price-sub confirm-broken" title="现价已站上突破确认线（推荐后高点），回放验证突破后隔日胜率更高">🚀 已突破确认 ${it.confirm_trigger.toFixed(2)}</div>`
                                 :`<div class="price-sub confirm-waiting" title="回放验证：等收盘突破推荐后高点再入场，隔日胜率更高">突破确认 ${it.confirm_trigger.toFixed(2)}</div>`):''}
@@ -3036,16 +3078,20 @@ async function loadExplainerGrid() {
     } catch(e) {}
 }
 
+// 推荐复盘统计区间（天）：与后端 recommend_outcome 回补窗口一致（自 2026-07-20 起有数据），
+// 后端 days 上限 90，超窗部分自然为空
+const REC_HISTORY_DAYS = 60;
+
 async function loadRecHistory() {
     const summaryEl = document.getElementById('recHistorySummary');
     const tableEl = document.getElementById('recHistoryTable');
     const updEl = document.getElementById('recHistoryUpdatedAt');
     try {
-        const resp = await RequestManager.fetch('rec-history', API + '/investor/recommendations/history?days=30');
+        const resp = await RequestManager.fetch('rec-history', API + '/investor/recommendations/history?days=' + REC_HISTORY_DAYS);
         const d = resp.data || {};
         const items = d.items || [];
         const summary = d.summary || {};
-        if (updEl) updEl.textContent = '统计区间：近 ' + (d.days || 30) + ' 天';
+        if (updEl) updEl.textContent = '统计区间：近 ' + (d.days || REC_HISTORY_DAYS) + ' 天';
 
         if (!items || items.length === 0) {
             if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无历史推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到首页点「立即重算打分」生成推荐</span></div>';
@@ -4096,6 +4142,23 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
         tooltip: {
             trigger: 'axis',
             axisPointer: { type: 'cross' },
+            // 默认 0.4s 位移动画 + 内容变高时翻到光标另一侧，是移动时“闪一下”的根源：
+            // 经过 B/S 蜡烛时 tooltip 多出几行计划价/判因，高度变化导致翻转闪烁。动画关掉、
+            // 位置固定偏移并夹在图内，tooltip 永不盖住光标。
+            transitionDuration: 0,
+            extraCssText: 'pointer-events:none;',
+            position: function(point, params, dom, rect, size) {
+                var gap = 14, pad = 4;
+                var w = size.contentSize[0], h = size.contentSize[1];
+                var viewW = size.viewSize[0], viewH = size.viewSize[1];
+                var x = point[0] + gap;
+                if (x + w > viewW - pad) x = point[0] - w - gap;   // 右侧放不下放左侧
+                if (x < pad) x = pad;
+                var y = point[1] - h - gap;                        // 默认悬在光标上方
+                if (y < pad) y = point[1] + gap;                   // 顶部放不下改下方
+                if (y + h > viewH - pad) y = viewH - h - pad;
+                return [x, y];
+            },
             formatter: function(params) {
                 var idx = params[0]?.dataIndex;
                 if (idx == null) return '';

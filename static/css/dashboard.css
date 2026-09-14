@@ -882,7 +882,8 @@ tr:hover td {
 .pick-mini-list { display: flex; flex-direction: column; gap: 5px; }
 .pick-mini-head, .pick-mini-row {
     display: grid;
-    grid-template-columns: minmax(150px, 2fr) 60px repeat(3, minmax(56px, 0.8fr)) 78px;
+    /* 股票 | 综合分 | 最新 | 买入 | 止盈 | 止损 | 盈亏比（7 列，2026-09-11 增加「最新」列） */
+    grid-template-columns: minmax(132px, 1.9fr) 50px 62px repeat(3, minmax(50px, 0.75fr)) 70px;
     gap: 8px; align-items: center;
 }
 .pick-mini-head {
@@ -919,6 +920,9 @@ tr:hover td {
 .pm-buy { color: #ff5252; }
 .pm-tp { color: #00e676; }
 .pm-stop { color: var(--warning); }
+/* 最新价：填色跟随涨跌，下方小字涨幅提示 */
+.pm-last { line-height: 1.15; font-weight: 600; }
+.pm-last-pct { font-size: 10px; font-weight: 500; }
 .pm-rr { text-align: right; }
 .horizon-tag {
     display: inline-block; padding: 2px 8px; border-radius: 4px;

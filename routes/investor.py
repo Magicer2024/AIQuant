@@ -587,6 +587,10 @@ def today_recommendations():
                     COALESCE((SELECT d.low FROM daily_price d
                               WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
                              lp.low) AS latest_low,
+                    -- 最新价所属的行情日：前端据此提示"最新价是哪天的"，
+                    -- 停牌 / 数据滞后的票一眼可辨（2026-09-11 新增，配合最新价列展示）
+                    (SELECT d.trade_date FROM daily_price d
+                     WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1) AS latest_date,
                     i.industry
                 FROM stock_signal s
                 LEFT JOIN latest_price lp ON lp.code = s.code
@@ -840,6 +844,7 @@ def today_recommendations():
                 "pct_above_ma20": d.get("pct_above_ma20"),
                 "latest_close": d.get("latest_close"),
                 "latest_pct": d.get("latest_pct"),
+                "latest_date": d.get("latest_date"),
                 "action_plan": {
                     "entry_price": round(entry, 2) if entry else None,
                     "stop_loss": round(stop, 2) if stop else None,
@@ -1321,6 +1326,10 @@ def exit_advice():
                         df, first["scan_date"], first["buy_price"], window)
                     if fill_ts is None:
                         st = "watching" if pending else "expired"
+                        # 未成交（待回踩 / 窗口过期）也要回传最新价 + 所属行情日：
+                        # 用于判断「现价离回踩买点还差多少」（2026-09-11 新增，供前端"现价"列）
+                        _lc = df["close"].iloc[-1] if len(df) else None
+                        _lc = round(float(_lc), 2) if _lc is not None and pd.notna(_lc) else None
                         results.append({
                             "code": code,
                             "name": last["name"],
@@ -1336,7 +1345,9 @@ def exit_advice():
                                 if pending else
                                 f"{window} 个交易日内未回踩买点，未成交（放弃）"),
                             "detail": {"entry_date": None, "hold_days": 0,
-                                       "current_pnl_pct": None},
+                                       "current_pnl_pct": None,
+                                       "current_price": _lc,
+                                       "current_date": str(df.index[-1]) if len(df) else None},
                         })
                         continue
                     prev_day = _df_prev_day(df, fill_ts)
@@ -1440,6 +1451,19 @@ def exit_advice():
             cp = [v for v in (_seg_pnl(r) for r in clears) if v is not None]
             hp = [v for v in (_seg_pnl(r) for r in holds) if v is not None]
             allp = cp + hp
+            # ⚠ 口径（2026-09-11 修正）：单笔收益率**不能简单相加**——把 37 笔的 -0.8%~-7.6%
+            # 直接求和会得到 "-111.7%"，读起来像"本金亏了 111%"，实际只是算术和，无资金含义。
+            # 正确展示两个口径：
+            #   avg_pct  = 平均每笔收益（等权，无仓位假设）—— 唯一不依赖仓位假设的可比指标
+            #   comp_pct = 等权资金曲线（按每笔满仓复利连乘）—— 标准策略业绩口径
+            # cum_pnl 保留为算术和（仅调试用，前端不再作为主口径展示）
+            _avg = round(sum(allp) / len(allp), 2) if allp else None
+            _comp = None
+            if allp:
+                _c = 1.0
+                for _v in allp:
+                    _c *= (1 + _v / 100)
+                _comp = round((_c - 1) * 100, 1)
             perf[hz] = {
                 "segments": len(segs),
                 "hold": len(holds),
@@ -1455,8 +1479,9 @@ def exit_advice():
                 "hold_mean_pct": round(sum(hp) / len(hp), 2) if hp else None,
                 # 综合（清仓+持仓）：全部段平均持有收益
                 "all_mean_pct": round(sum(allp) / len(allp), 2) if allp else None,
-                # 累计口径（分栏展示）：累计收益 = 全部段盈亏之和（已清仓已实现 + 持仓浮盈）；
-                # 累计胜率 = 盈亏 > 0 的段占比
+                # 展示口径（见上方注释）
+                "avg_pct": _avg,
+                "comp_pct": _comp,
                 "cum_pnl": round(sum(allp), 2) if allp else None,
                 "win_rate": round(sum(1 for v in allp if v > 0) / len(allp) * 100, 1) if allp else None,
             }
@@ -2131,7 +2156,7 @@ def risk_alerts():
 
 
 # ─────────────────────────────────────────────
-# 6. 历史推荐回测：过去 30 天推荐的真实表现
+# 6. 历史推荐回测：过去 N 天推荐的真实表现（默认 60 天）
 # ─────────────────────────────────────────────
 @investor_bp.route("/outcome_summary", methods=["GET"])
 def outcome_summary():
@@ -2167,12 +2192,15 @@ def outcome_list():
 @investor_bp.route("/recommendations/history", methods=["GET"])
 def recommendations_history():
     """历史推荐回测：过去 N 天短线推荐的股票，到今天的实际涨跌
-    GET /api/investor/recommendations/history?days=30
+    GET /api/investor/recommendations/history?days=60
     优先从 recommend_outcome 表读取持久化数据，fallback 到实时计算。
     口径：仅统计短线（horizon=short）推荐；同一股票连续交易日不间断
     被推荐时合并为一段，只显示首次推荐日并给出连续推荐天数。
+    默认 60 天（recommend_outcome 自 EXIT_TRACK_START_DATE=2026-07-20 起有数据），上限 90。
     """
-    days = request.args.get("days", "30", type=int)
+    # ⚠ 默认值必须是 int：Flask 在参数缺失时直接返回 default、不做类型转换，
+    # 若写 "60"（字符串）则 min(days, 90) 抛 TypeError → 500（2026-09-10 修）
+    days = request.args.get("days", 60, type=int)
     days = max(1, min(days, 90))
 
     # 优先尝试从 recommend_outcome 读取
