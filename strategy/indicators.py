@@ -217,6 +217,67 @@ def calc_volume_ratio(volume: pd.Series, period: int = 5) -> pd.Series:
     return vr.rename("VOLUME_RATIO")
 
 
+def calc_true_ret(df: pd.DataFrame, price_col: str = "close",
+                  group_col: str = "code", drop_abs_over: float = 25.0) -> pd.Series:
+    """
+    ⚠ daily_price 权威日收益 = `close / close.shift(1) - 1`，**不要用 `pct_change` 字段**。
+
+    为什么（tools/_diag_which_is_truth.py / _diag_data_completeness.py，2026-09-24 实测）：
+      · `daily_price.pct_change` 有 **63.3% 的行恒为 0**（turnover=0 的行 89.0% 为 0，
+        turnover>0 的行仅 1.9% 为 0）——该字段在大量行上根本未写入。
+      · 其中 80.2% 的零值行里 `close` 明显在变动（|自算涨幅|>0.5%）
+        ⇒ 「0」是缺值而非「平盘」。
+      · `daily_price.close` 跨价源是**连续**的：换源处隔夜跳空分布与同源处几乎相同
+        （中位 0.45% vs 0.40%，|gap|>11% 仅 0.06% vs 0.12%），98.99% 的自算涨幅
+        落在 ±10.5%（涨跌停）内 ⇒ close 是可信的单一序列。
+      · ⚠ 历史事故：用 `pct_change < 9.8` 判涨停 ⇒ 全 0 行恒为真 ⇒ 涨停票没被剔除，
+        样本从 601 虚增到 2348（memory 铁律 18 即此事故）。
+      · ⚠ 反向事故：误判 close 混价源、改用它做 `cumprod(1+pct_change)` 重建序列，
+        会把 63% 的交易日当成 0% 而毁掉整条价格序列（本次曾犯，已作废）。
+
+    残留噪声：约 0.74% 的行 |自算涨幅|>11%（换源/复牌残差）。本函数将这些行
+    （|ret| > drop_abs_over）标为 NaN，供调用方剔除。
+
+    :return: 与 df 等长的百分数日收益 Series（异常行为 NaN）
+    """
+    p = pd.to_numeric(df[price_col], errors="coerce")
+    if group_col in df.columns:
+        prev = p.groupby(df[group_col], sort=False).shift(1)
+    else:
+        prev = p.shift(1)
+    ret = (p / prev.replace(0, np.nan) - 1) * 100
+    return ret.where(ret.abs() <= drop_abs_over)
+
+
+def audit_daily_price(df: pd.DataFrame, pct_col: str = "pct_change",
+                      thresh: float = 0.10) -> dict:
+    """daily_price 数据健康自检：报告 pct_change 字段的「零值缺写」比例。
+
+    调用方可据此决定是否信任该列——**本项目的结论是：不信任，一律用
+    `calc_true_ret()` 自算**。返回 dict，`pct_zero_ratio` 超过 thresh 即打印告警。
+    """
+    n = len(df)
+    if n == 0 or pct_col not in df.columns:
+        return {"n": 0, "pct_zero_ratio": None, "warn": False}
+    pct = pd.to_numeric(df[pct_col], errors="coerce")
+    zero_ratio = float((pct == 0).mean())
+    warn = zero_ratio > thresh
+    if warn:
+        print(f"  [WARN] daily_price.{pct_col} 有 {zero_ratio:.1%} 的值为 0（疑似未写入），"
+              f"勿用于涨跌幅/涨停判定；请改用 indicators.calc_true_ret()")
+    return {"n": n, "pct_zero_ratio": zero_ratio, "warn": warn}
+
+
+def calc_volume_ratio(volume: pd.Series, period: int = 5) -> pd.Series:
+    """
+    量比：当日成交量 / 过去N日平均量
+    量比 > 2 为放量，量比 < 0.5 为缩量
+    """
+    avg_volume = volume.shift(1).rolling(window=period).mean()
+    vr = volume / avg_volume
+    return vr.rename("VOLUME_RATIO")
+
+
 def calc_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     计算所有技术指标，返回含完整指标的 DataFrame

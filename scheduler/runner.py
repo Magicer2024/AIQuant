@@ -26,7 +26,8 @@ def _evaluate_holdings():
     硬止损 / 浮盈达启动线后移动止盈（回撤清仓）/ 破MA5 / 超期兜底。
     """
     try:
-        from strategy.exit_advisor import evaluate_exit, get_max_hold, atr_dynamic_stop_pct
+        from strategy.exit_advisor import (evaluate_exit, get_max_hold,
+                                           atr_dynamic_stop_pct, LIVE_MID_TRAILING_PCT)
         from config.strategy_params import get_param
         from core.db import get_conn
         import pandas as pd
@@ -74,7 +75,11 @@ def _evaluate_holdings():
                     # 止损用 evaluate_exit 默认 -6%（与 short_stop_loss 同值，无独立参数）
                     kwargs = dict(
                         partial_tp=get_param("mid_partial_tp") if hz == "mid" else get_param("long_partial_tp"),
-                        trailing_pct=get_param("mid_trailing_pct") if hz == "mid" else get_param("long_trailing_pct"),
+                        # ⚠ 中线用 LIVE_MID_TRAILING_PCT(0.10) 而非 mid_trailing_pct(0.05)：
+                        # 本链路走 evaluate_exit（移动止盈无启动线），语义与推荐跟踪不同，
+                        # 详见 strategy/exit_advisor.py::LIVE_MID_TRAILING_PCT 注释。
+                        trailing_pct=(LIVE_MID_TRAILING_PCT if hz == "mid"
+                                      else get_param("long_trailing_pct")),
                         max_hold_days=get_max_hold(hz),
                     )
                 adv = evaluate_exit(

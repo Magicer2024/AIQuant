@@ -18,6 +18,7 @@ import json
 import threading
 import requests
 import time
+import re
 
 DATA_CACHE_DIR = "data_cache"
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
@@ -708,3 +709,110 @@ def fetch_lhb_detail(start_date: str, end_date: str, progress_cb=None) -> pd.Dat
                      "reason": lambda s: " / ".join(sorted(set(str(x) for x in s if str(x) != "nan")))})
         )
     return out
+
+
+# ─────────────────────────────────────────────
+# 龙虎榜「机构专用席位」买卖统计（akshare 东方财富 stock_lhb_jgmmtj_em）
+# ─────────────────────────────────────────────
+
+# akshare stock_lhb_jgmmtj_em 原始列名 → 本项目 stock_lhb_jg_detail 表字段
+_LHB_JG_COL_MAP = {
+    "代码": "code",
+    "名称": "name",
+    "上榜日期": "trade_date",
+    "收盘价": "close_price",
+    "涨跌幅": "pct_change",
+    "买方机构数": "buyer_jg_count",
+    "卖方机构数": "seller_jg_count",
+    "机构买入总额": "jg_buy_amt",
+    "机构卖出总额": "jg_sell_amt",
+    "机构买入净额": "jg_net_buy",
+    "市场总成交额": "market_total_amt",
+    "机构净买额占总成交额比": "jg_net_ratio",
+    "换手率": "turnover_rate",
+    "流通市值": "float_mkt_cap",
+    "上榜原因": "reason",
+}
+
+
+def _jg_window_days(reason: str) -> int:
+    """从上榜原因反推金额字段的统计窗口（交易日数）：单日榜 → 1，连续 N 日榜 → N。
+
+    实测（2026-09-22）：含「连续」的原因其市场总成交额 = 近 N 日 amount 之和
+    （倍数 2.0~4.3x），不含「连续」的日榜恒为 1.00x（等于当日额）。
+    """
+    r = str(reason or "")
+    if "连续" not in r:
+        return 1
+    m = re.search(r"连续\s*(\d+)\s*个交易日", r)
+    if m:
+        return int(m.group(1))
+    if "三个交易日" in r:
+        return 3
+    if "十个交易日" in r:
+        return 10
+    return 3          # 含「连续」但措辞异常时按最常见的 3 日窗口处理
+
+
+def fetch_lhb_jg_detail(start_date: str, end_date: str,
+                        progress_cb=None) -> pd.DataFrame:
+    """
+    抓取龙虎榜「机构专用席位」买卖每日统计（akshare ak.stock_lhb_jgmmtj_em，东方财富）。
+    按自然月分段请求，与 fetch_lhb_detail 同策略。
+
+    ⚠ 返回**原始多行**，刻意不做 (trade_date, code) 聚合：
+       同一股票同日可因多个上榜原因各占一行，而金额字段随 reason 的窗口变化
+       （单日榜 == 当日额；「连续三个交易日」榜 == 近 3 日累计），
+       按票聚合会把 3 日额混进单日额，必须靠 reason / window_days 显式区分。
+       需要「当日机构动向」时筛 window_days == 1。
+
+    close_price / pct_change / turnover_rate / float_mkt_cap 恒为当日值，两种口径下一致。
+
+    :param start_date: 起始日 YYYYMMDD 或 YYYY-MM-DD
+    :param end_date:   结束日 YYYYMMDD 或 YYYY-MM-DD
+    :param progress_cb: 进度回调 fn(seg_start, seg_end, i, total)
+    :return: 标准化 DataFrame，列名与 stock_lhb_jg_detail 表字段一致
+    """
+    import akshare as ak
+
+    start_date = start_date.replace("-", "")
+    end_date = end_date.replace("-", "")
+    segs = list(_month_ranges(start_date, end_date))
+    frames = []
+    for i, (s, e) in enumerate(segs):
+        if progress_cb:
+            progress_cb(s, e, i, len(segs))
+        for attempt in range(3):
+            try:
+                df = ak.stock_lhb_jgmmtj_em(start_date=s, end_date=e)
+                if df is not None and not df.empty:
+                    frames.append(df)
+                break
+            except Exception as ex:
+                if attempt == 2:
+                    print(f"  [lhb-jg] {s}~{e} 抓取失败（已重试）: {ex}")
+                else:
+                    time.sleep(1.5)
+    if not frames:
+        return pd.DataFrame()
+
+    raw = pd.concat(frames, ignore_index=True)
+    keep = [c for c in _LHB_JG_COL_MAP if c in raw.columns]
+    out = raw[keep].rename(columns=_LHB_JG_COL_MAP)
+    if out.empty:
+        return out
+
+    out["code"] = out["code"].astype(str).str.zfill(6)
+    # 上榜日期在 akshare 里是 datetime.date，统一成 YYYY-MM-DD 字符串
+    out["trade_date"] = pd.to_datetime(out["trade_date"]).dt.strftime("%Y-%m-%d")
+    num_cols = ["close_price", "pct_change", "buyer_jg_count", "seller_jg_count",
+                "jg_buy_amt", "jg_sell_amt", "jg_net_buy", "market_total_amt",
+                "jg_net_ratio", "turnover_rate", "float_mkt_cap"]
+    for c in num_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    out["reason"] = out["reason"].fillna("").astype(str)
+    out["window_days"] = out["reason"].map(_jg_window_days)
+    # (date, code, reason) 理论唯一；去重防分段边界 / 重试造成的重复
+    out = out.drop_duplicates(subset=["trade_date", "code", "reason"], keep="last")
+    return out.reset_index(drop=True)

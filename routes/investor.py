@@ -11,9 +11,11 @@ routes/investor.py —— 个人投资者专属 API
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import date, datetime
 from typing import Optional
 
@@ -27,7 +29,8 @@ from config.personal_config import (
     MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
     EXIT_TRACK_START_DATE,
 )
-from config.strategy_params import T1_GAP_GUARD, MID_LONG_REGIME_CAP, get_param, SURGE_BREAKOUT
+from config.strategy_params import (T1_GAP_GUARD, RECO_REGIME_CAP, get_param,
+                                    SURGE_BREAKOUT, FIRST_REVERSAL)
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -488,7 +491,9 @@ def today_recommendations():
     来源：stock_signal 表（融合分高 + 已有明确买入价/止损/止盈）
     分组：mid/long 按 fusion_score DESC；short 先 fusion≥门控、再按低扩展度排序，
           各取 limit 条（默认 4）；short 组另受 short_top_n=3 约束（2026-08-20 收缩）；
-          regime 天花板 cold→0 / cool→2 / normal→组上限
+          regime 天花板（RECO_REGIME_CAP 单一来源）：short cold→0/cool→2；
+          mid/long cool→2/1 收缩、cold 不归零（2026-09-15，实测 cold 是 mid/long
+          唯一正期望档）；其余 regime 走各周期默认上限
     支持 ?date=2026-06-18 查看指定日期；?horizon=short 只看单组
     返回 {date, market_regime, count, groups:{short,mid,long}, items(=short 组别名，兼容旧前端)}
     """
@@ -537,7 +542,11 @@ def today_recommendations():
         # 隔日动量豁免；参数 >=99 禁用）
         from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
                                           short_market_gate_sql,
-                                          short_observe_bottom_sql)
+                                          short_observe_bottom_sql,
+                                          long_order_clause,
+                                          long_second_order_clause,
+                                          long_pool_filter_sql,
+                                          long_sort_pool_mult)
         t1_cond, t1_params = short_t1_filter_sql(conn, scan_date, scan_date)
         # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量（正期望 alpha 线），
         # 抄底/回踩类一律不推；与出场跟踪/复盘入库同口径。
@@ -559,11 +568,23 @@ def today_recommendations():
             #   2) 抄底票按扩展度排序补足剩余名额（方向由 short_ext_sort_desc 控制，
             #      当前升序=低扩展优先；2026-08-22 降序实验被真实复盘口径推翻回退，
             #      见 short_order_clause 注释）。
-            # mid/long 保持融合分排序
-            order_clause = (short_order_clause()
-                            if hz == "short" else "COALESCE(s.fusion_score, 0) DESC")
-            rows_by_horizon[hz] = conn.execute(
-                f"""
+            # mid 保持融合分排序；long 2026-09-19 起用两层排序（波动收敛池 → 不追高），
+            # 见 long_order_clause 注释（原 fusion DESC 只有 3 个离散值，top4 等价随机）
+            if hz == "short":
+                order_clause = short_order_clause()
+            elif hz == "long":
+                order_clause = long_order_clause()
+            else:
+                order_clause = "COALESCE(s.fusion_score, 0) DESC"
+            # long 两层排序：先按 vol_ratio 取池，再在池内按扩展度升序取名额
+            # 第二层作用于第一层的派生表，无表别名 ⇒ 必须传空串（见函数注释）
+            _long_second = long_second_order_clause("") if hz == "long" else None
+            # long 票池过滤（趋势+斜率+低波三项必需），与复盘入库/出场跟踪同口径。
+            # 2026-09-20：票池本身长期负 alpha（−0.92%/t=−7.30），必须过滤而非只换排序键
+            _long_pool = long_pool_filter_sql() if hz == "long" else ""
+            # 今日推荐多取 3 倍候选（盈亏比不达标的「避免」级会被剔除，由替补顶上）
+            _want = limit * 3
+            _inner = f"""
                 SELECT
                     s.code, s.name, s.price AS signal_price,
                     s.buy_price, s.stop_loss, s.take_profit,
@@ -602,18 +623,29 @@ def today_recommendations():
                   AND s.name NOT LIKE '%退%'
                   -- 强势突破是首页独立栏目信号线，不占今日推荐名额
                   AND COALESCE(s.strategy, '') != '强势突破'
+                  -- 反转首日（2026-09-24）同为独立观察栏目线，不占今日推荐名额
+                  AND COALESCE(s.strategy, '') != '反转首日'
                   -- 缩量回踩 2026-08-26 停用（出场跟踪实证负期望，挤占正期望动量名额），
                   -- 与退出跟踪/复盘入库同口径不占名额
                   AND COALESCE(s.strategy, '') != '缩量回踩'
                   {board_filter}
                   {pe_filter}
                   {gate_sql}
+                  {_long_pool}
                 ORDER BY {order_clause}
                 LIMIT ?
-                """,
-                # 多取 3 倍候选：盈亏比不达标的「避免」级会被剔除，由替补顶上
-                (scan_date, hz, *gate_params, limit * 3),
-            ).fetchall()
+                """
+            if _long_second:
+                # 两层：内层按波动收敛取池，外层在池内按扩展度升序取名额。
+                # ⚠ 不能写成单层字典序 ORDER BY vol_ratio ASC, pct_above_ma20 ASC
+                # （两者皆连续值 ⇒ 退化成 vol_ratio 单键，2026 年 Δ=−5.62%）。
+                _sql = (f"SELECT * FROM ({_inner}) "
+                        f"ORDER BY {_long_second} LIMIT ?")
+                _params = (scan_date, hz, *gate_params,
+                           _want * long_sort_pool_mult(), _want)
+            else:
+                _sql, _params = _inner, (scan_date, hz, *gate_params, _want)
+            rows_by_horizon[hz] = conn.execute(_sql, _params).fetchall()
         all_rows = [r for hz in horizons for r in rows_by_horizon[hz]]
 
         # ── 联动查询 1：当前大盘冷热（影响信号灯；多日宽度 composite，10 分钟缓存） ──
@@ -865,12 +897,11 @@ def today_recommendations():
                 "trade_date": d.get("trade_date"),
             }
 
-        # 构建候选卡片后剔除「避免」级（盈亏比 <1.5 一票否决），再截取前 limit 条
-        # 短线数量天花板（docs/short-reco-dynamic-count-plan.md A）：
-        #   cold→0 / cool→2 / neutral/warm/hot→SHORT_CAP(=short_top_n，现 3)，满足「最多3/最少0」；
-        #   cold 整组出 0（不再 buy→wait 降级——本来就 0 条）。
-        _REGIME_CAP = {"cold": 0, "cool": 2, "neutral": SHORT_CAP,
-                       "warm": SHORT_CAP, "hot": SHORT_CAP, "unknown": SHORT_CAP}
+        # 展示层 regime 天花板（config.RECO_REGIME_CAP 单一来源）：
+        #   short: cold→0 / cool→2 / 其余→short_top_n；
+        #   mid/long: cool 收缩（2/1），cold 不再归零 —— 2026-09-14 实测 cold 是
+        #   mid/long 唯一正期望档（long T+60 +2.96% n=2328），归零前提与数据相反，
+        #   且当日曾致三档全空（mid 11 条 / long 345 条达标被丢）；其余 → limit。
         groups = {}
         for hz in horizons:
             items = [_build_item(dict(r)) for r in rows_by_horizon[hz]]
@@ -879,19 +910,10 @@ def today_recommendations():
             # 由后续候选顶上或数量减少（宁缺毋滥）。
             items = [it for it in items
                      if it["signal"]["level"] not in ("avoid", "sell")]
-            if hz == "short":
-                cap = _REGIME_CAP.get(market_regime, SHORT_CAP)
-                items = items[:cap] if cap > 0 else []
-                groups[hz] = items
-            else:
-                # mid/long 市场环境天花板（2026-08）：长线是只做多趋势策略，
-                # cold 普跌市里负期望 → cold 整组出 0、cool 收缩；None = 不受 regime 限制
-                ml_cap = MID_LONG_REGIME_CAP.get(hz, {}).get(market_regime)
-                if ml_cap is not None:
-                    items = items[:ml_cap] if ml_cap > 0 else []
-                else:
-                    items = items[:limit]
-                groups[hz] = items
+            default_cap = SHORT_CAP if hz == "short" else limit
+            cap = RECO_REGIME_CAP.get(hz, {}).get(market_regime, default_cap)
+            items = items[:cap] if cap > 0 else []
+            groups[hz] = items
         for hz in ("short", "mid", "long"):
             groups.setdefault(hz, [])
         short_items = groups.get("short", [])
@@ -916,6 +938,172 @@ def available_dates():
         return ok({"dates": dates})
 
 
+def _surge_history(conn, before_scan_date, board_filter, days):
+    """次日强势观察 · 历史表现：过去 days 天内全部强势突破信号，按现实口径逐条回放。
+
+    呈现格式与「推荐复盘」一致：T+1~T+5 多期持有漂移 + 结算成绩单。
+    入场 = 信号日次日开盘价（信号收盘后才产生，只能 T+1 开盘买）；
+    出场 = **隔日了结**（`SURGE_BREAKOUT["max_hold_days"]` = 1）：
+      次日（T+1）收盘为最终出场基准 —— 收盘 ≤ 止损 → 止损、收盘 ≥ 止盈 → 止盈、
+      否则收盘了结。`judge_entry_day` 开启时建仓当日即纳入判定（跳空破位的票当天就出）。
+    次日开盘已高开越过止盈 → 放弃追高（与卡片「错过不追」同口径，不计盈亏）。
+    T+n = 买入后第 n 个交易日收盘相对买入价的涨幅**（与出场规则无关的持有漂移对照，
+    用于观察「拿更久是更好还是更差」；放弃/待买入为 None，不进统计）**。
+
+    2026-09-22 由「5 日持有 + 建仓当日不判出场」改为隔日了结（见 reference/surge-observation.md §7）。
+    全族 544 日 n=1695 实测：胜率 36.9% → 45.6%、均值 -0.19% → +0.09%、最差 -26.28% → -12.47%。
+
+    返回 (history, history_summary)。
+    """
+    max_hold = max(1, int(SURGE_BREAKOUT.get("max_hold_days", 1)))
+    judge_entry_day = bool(SURGE_BREAKOUT.get("judge_entry_day", True))
+    drift_days = max(5, max_hold)      # T+1~T+5 持有漂移始终算满 5 期，便于对比
+    # 不含当日信号日：当日那批在卡片区展示，避免同一信号双份计数
+    upper = before_scan_date or "9999-12-31"
+    hist_rows = conn.execute(
+        f"""
+        SELECT s.code, s.name, s.price AS signal_price,
+               s.stop_loss, s.take_profit, s.scan_date, s.trade_date
+        FROM stock_signal s
+        WHERE s.strategy = '强势突破'
+          AND s.scan_date < ?
+          AND s.scan_date >= date('now', ?)
+          AND s.buy_price IS NOT NULL
+          AND s.name NOT LIKE '%ST%'
+          AND s.name NOT LIKE '%退%'
+          {board_filter}
+        ORDER BY s.scan_date DESC, COALESCE(s.fusion_score, 0) DESC
+        LIMIT 300
+        """,
+        (upper, f"-{days} days"),
+    ).fetchall()
+
+    history = []
+    for r in hist_rows:
+        d = dict(r)
+        sig_day = d.get("trade_date") or d.get("scan_date")
+        stop = d.get("stop_loss")
+        tp = d.get("take_profit")
+        h = {
+            "code": d.get("code"), "name": d.get("name"),
+            "signal_date": d.get("scan_date"), "signal_price": d.get("signal_price"),
+            "stop_loss": stop, "take_profit": tp,
+            "t1_return": None, "t2_return": None,
+            "t3_return": None, "t4_return": None, "t5_return": None,
+        }
+        px = conn.execute(
+            """SELECT trade_date, open, close, high, low FROM daily_price
+               WHERE code = ? AND trade_date > ? ORDER BY trade_date ASC LIMIT ?""",
+            (d["code"], sig_day, drift_days + 1),
+        ).fetchall()
+        if not px:
+            h.update(status="pending", status_label="待买入",
+                     entry_date=None, entry_price=None,
+                     exit_date=None, exit_price=None, exit_reason=None,
+                     hold_days=None, return_pct=None)
+            history.append(h)
+            continue
+        entry_price = px[0]["open"]
+        if not entry_price or entry_price <= 0:
+            continue   # 停牌/数据缺口，无法回放也不该假装有结果
+        h["entry_date"] = px[0]["trade_date"]
+        h["entry_price"] = round(entry_price, 2)
+        if stop and entry_price <= stop:
+            # 次日开盘已跌破止损线（跳空破位）→ 买入即亏，现实不会买（开盘即可见，无前视）
+            h.update(status="skipped", status_label="放弃·开盘破止损",
+                     exit_date=None, exit_price=None, exit_reason=None,
+                     hold_days=None, return_pct=None)
+            history.append(h)
+            continue
+        if tp and entry_price > tp:
+            # 高开直接越过止盈位 → 现实中不会追，放弃（不给 T+n：根本没持仓）
+            h.update(status="skipped", status_label="放弃·高开越过止盈",
+                     exit_date=None, exit_price=None, exit_reason=None,
+                     hold_days=None, return_pct=None)
+            history.append(h)
+            continue
+        # T+n：买入后第 n 个交易日收盘相对买入价的涨幅（px[0] 即买入当日 = T+1）
+        # 与出场规则无关的「持有漂移」对照：用来观察拿更久是更好还是更差
+        for n in range(1, drift_days + 1):
+            close_n = px[n - 1]["close"] if len(px) >= n else None
+            h[f"t{n}_return"] = (round((close_n - entry_price) / entry_price * 100, 2)
+                                 if close_n and close_n > 0 else None)
+        exit_date = exit_price = exit_reason = None
+        exit_j = None
+        for j, p in enumerate(px[:max_hold], start=1):
+            close = p["close"]
+            if not close or close <= 0:
+                break
+            if j == 1 and not judge_entry_day:
+                continue   # 建仓当日不判出场（多日持仓模式；隔日了结时此分支不生效）
+            if stop and close <= stop:
+                exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "stop_loss", j
+                break
+            if tp and close >= tp:
+                exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "take_profit", j
+                break
+            if j >= max_hold:
+                exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "max_hold_days", j
+                break
+        if exit_reason:
+            h.update(status="clear",
+                     status_label={"stop_loss": "止损", "take_profit": "止盈",
+                                   "max_hold_days": ("次日了结" if max_hold == 1 else "到期了结")}[exit_reason],
+                     exit_date=exit_date, exit_price=round(exit_price, 2),
+                     exit_reason=exit_reason,
+                     hold_days=exit_j,
+                     return_pct=round((exit_price - entry_price) / entry_price * 100, 2))
+        else:
+            last = px[min(len(px), max_hold) - 1]
+            h.update(status="hold", status_label="持有中",
+                     exit_date=None, exit_price=None, exit_reason=None,
+                     hold_days=min(len(px), max_hold),
+                     return_pct=round((last["close"] - entry_price) / entry_price * 100, 2),
+                     last_close=round(last["close"], 2))
+        history.append(h)
+
+    # —— 成绩单：仅已结算进胜率/均值（持有中、放弃不算成绩）——
+    # ⚠ 不提供「单笔收益率累加」：百分比直接相加无资金含义，且与平均值重复表达同一批数据。
+    closed = [x for x in history if x["status"] == "clear"]
+    wins = [x for x in closed if (x["return_pct"] or 0) > 0]
+    losses = [x for x in closed if (x["return_pct"] or 0) <= 0]
+    gain = sum(x["return_pct"] for x in wins)
+    absloss = abs(sum(x["return_pct"] for x in losses))
+
+    def _period(key):
+        vals = [x[key] for x in history if x.get(key) is not None]
+        if not vals:
+            return {"n": 0, "win": 0, "win_rate": None, "avg_return": None}
+        w = sum(1 for v in vals if v > 0)
+        return {"n": len(vals), "win": w,
+                "win_rate": round(w / len(vals) * 100, 1),
+                "avg_return": round(sum(vals) / len(vals), 2)}
+
+    history_summary = {
+        "total": len(history),
+        "closed": len(closed),
+        "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
+        "avg_return": round(sum(x["return_pct"] for x in closed) / len(closed), 2) if closed else None,
+        "profit_factor": round(gain / absloss, 2) if absloss > 0 else None,
+        "best_return": round(max(x["return_pct"] for x in closed), 2) if closed else None,
+        "worst_return": round(min(x["return_pct"] for x in closed), 2) if closed else None,
+        "stop_loss_count": sum(1 for x in closed if x["exit_reason"] == "stop_loss"),
+        "take_profit_count": sum(1 for x in closed if x["exit_reason"] == "take_profit"),
+        "expire_count": sum(1 for x in closed if x["exit_reason"] == "max_hold_days"),
+        "holding": sum(1 for x in history if x["status"] == "hold"),
+        "skipped": sum(1 for x in history if x["status"] == "skipped"),
+        "pending": sum(1 for x in history if x["status"] == "pending"),
+        "t1": _period("t1_return"), "t2": _period("t2_return"),
+        "t3": _period("t3_return"), "t4": _period("t4_return"),
+        "t5": _period("t5_return"),
+        "max_hold_days": max_hold,
+        "judge_entry_day": judge_entry_day,
+        "exit_mode_label": "隔日了结（T+1 收盘）" if max_hold == 1 else f"{max_hold} 日到期了结",
+        "window_days": days,
+    }
+    return history, history_summary
+
+
 @investor_bp.route("/surge_picks", methods=["GET"])
 def surge_picks():
     """次日强势观察（强势突破信号线）—— 首页独立栏目，不混入今日推荐
@@ -927,9 +1115,15 @@ def surge_picks():
     盘中触涨停 21.4%（tools/eval_lhb_surge_boost.py 两窗验证）——高风险
     博弈型信号，前端需展示风险提示。
     支持 ?date=2026-08-18 查看指定日期；?limit 默认 6、上限 12。
+    另返回 history / history_summary =「历史表现」（推荐复盘格式）：过去
+    ?days 天（默认 60、上限 180，与 recommend_outcome 回补窗口同尺度）全部
+    强势突破信号的逐条真实回放 + T+1~T+5 多期收益与结算成绩单；无信号日
+    也照常返回，保证成绩单不随当日有无信号消失。
     """
     limit = request.args.get("limit", default=6, type=int)
     limit = max(0, min(limit, 12))
+    days = request.args.get("days", default=60, type=int)
+    days = max(1, min(days, 180))
     target_date = request.args.get("date")
 
     board_filter = ""
@@ -946,8 +1140,20 @@ def surge_picks():
                 "WHERE strategy = '强势突破'"
             ).fetchone()
             scan_date = row["d"] if row else None
+
+        # 历史成绩单先算：它不依赖当日有无信号
+        history, history_summary = _surge_history(
+            conn, scan_date, board_filter, days)
+
         if not scan_date or limit == 0:
-            return ok({"date": scan_date, "count": 0, "items": []})
+            return ok({
+                "date": scan_date, "count": 0, "items": [],
+                "history": _sanitize(history),
+                "history_summary": history_summary,
+                "days": days,
+                "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
+                        "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
+            })
 
         rows = conn.execute(
             f"""
@@ -1019,109 +1225,7 @@ def surge_picks():
                 "trade_date": d.get("trade_date"),
             })
 
-        # —— 历史跟踪：更早信号日的每条强势突破，按现实口径逐日回放 ——
-        # 入场 = 信号日次日开盘价（信号收盘后才产生，只能 T+1 开盘买）；
-        # 出场与 deep_tracker 同口径：收盘判定（收盘 ≤ 止损 → 止损、收盘 ≥ 止盈 → 止盈、
-        # max_hold_days 个交易日到期按收盘出）、建仓当日不判出场。
-        # 次日开盘已高开越过止盈 → 放弃追高（与卡片「错过不追」同口径，不计盈亏）。
-        max_hold = int(SURGE_BREAKOUT.get("max_hold_days", 5))
-        hist_rows = conn.execute(
-            f"""
-            SELECT s.code, s.name, s.price AS signal_price,
-                   s.stop_loss, s.take_profit, s.scan_date, s.trade_date
-            FROM stock_signal s
-            WHERE s.strategy = '强势突破'
-              AND s.scan_date < ?
-              AND s.buy_price IS NOT NULL
-              AND s.name NOT LIKE '%ST%'
-              AND s.name NOT LIKE '%退%'
-              {board_filter}
-            ORDER BY s.scan_date DESC, COALESCE(s.fusion_score, 0) DESC
-            LIMIT 40
-            """,
-            (scan_date,),
-        ).fetchall()
-        history = []
-        for r in hist_rows:
-            d = dict(r)
-            sig_day = d.get("trade_date") or d.get("scan_date")
-            stop = d.get("stop_loss")
-            tp = d.get("take_profit")
-            h = {
-                "code": d.get("code"), "name": d.get("name"),
-                "signal_date": d.get("scan_date"), "signal_price": d.get("signal_price"),
-                "stop_loss": stop, "take_profit": tp,
-            }
-            px = conn.execute(
-                """SELECT trade_date, open, close, high, low FROM daily_price
-                   WHERE code = ? AND trade_date > ? ORDER BY trade_date ASC LIMIT ?""",
-                (d["code"], sig_day, max_hold + 1),
-            ).fetchall()
-            if not px:
-                h.update(status="pending", status_label="待买入",
-                         entry_date=None, entry_price=None,
-                         exit_date=None, exit_price=None, exit_reason=None,
-                         hold_days=None, return_pct=None)
-                history.append(h)
-                continue
-            entry_price = px[0]["open"]
-            if not entry_price or entry_price <= 0:
-                continue   # 停牌/数据缺口，无法回放也不该假装有结果
-            h["entry_date"] = px[0]["trade_date"]
-            h["entry_price"] = round(entry_price, 2)
-            if tp and entry_price > tp:
-                # 高开直接越过止盈位 → 现实中不会追，放弃
-                h.update(status="skipped", status_label="放弃·高开越过止盈",
-                         exit_date=None, exit_price=None, exit_reason=None,
-                         hold_days=None, return_pct=None)
-                history.append(h)
-                continue
-            exit_date = exit_price = exit_reason = None
-            exit_j = None
-            for j, p in enumerate(px[:max_hold], start=1):
-                close = p["close"]
-                if not close or close <= 0:
-                    break
-                if j == 1:
-                    continue   # 建仓当日不判出场（与推荐跟踪同口径）
-                if stop and close <= stop:
-                    exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "stop_loss", j
-                    break
-                if tp and close >= tp:
-                    exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "take_profit", j
-                    break
-                if j >= max_hold:
-                    exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "max_hold_days", j
-                    break
-            if exit_reason:
-                h.update(status="clear",
-                         status_label={"stop_loss": "止损", "take_profit": "止盈",
-                                       "max_hold_days": "到期了结"}[exit_reason],
-                         exit_date=exit_date, exit_price=round(exit_price, 2),
-                         exit_reason=exit_reason,
-                         hold_days=exit_j,
-                         return_pct=round((exit_price - entry_price) / entry_price * 100, 2))
-            else:
-                last = px[min(len(px), max_hold) - 1]
-                h.update(status="hold", status_label="持有中",
-                         exit_date=None, exit_price=None, exit_reason=None,
-                         hold_days=min(len(px), max_hold),
-                         return_pct=round((last["close"] - entry_price) / entry_price * 100, 2),
-                         last_close=round(last["close"], 2))
-            history.append(h)
-        closed = [x for x in history if x["status"] == "clear"]
-        wins = [x for x in closed if (x["return_pct"] or 0) > 0]
-        history_summary = {
-            "total": len(history),
-            "closed": len(closed),
-            "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
-            "avg_return": round(sum(x["return_pct"] for x in closed) / len(closed), 2) if closed else None,
-            "cum_return": round(sum(x["return_pct"] for x in closed), 2) if closed else None,
-            "holding": sum(1 for x in history if x["status"] == "hold"),
-            "skipped": sum(1 for x in history if x["status"] == "skipped"),
-            "pending": sum(1 for x in history if x["status"] == "pending"),
-            "max_hold_days": max_hold,
-        }
+        # 历史成绩单已在上方 `_surge_history()` 中构建完毕（推荐复盘格式：T+1~T+5 + 结算统计）
 
         return ok({
             "date": scan_date,
@@ -1129,9 +1233,604 @@ def surge_picks():
             "items": _sanitize(items),
             "history": _sanitize(history),
             "history_summary": history_summary,
+            "days": days,
             "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
                     "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
         })
+
+
+@investor_bp.route("/reversal_picks", methods=["GET"])
+def reversal_picks():
+    """反转首日观察（first_reversal 信号线）—— 首页独立栏目，不混入今日推荐。
+
+    背景：用户反馈「600641 已涨 4 天才推荐，反转第一天没推荐，次日买入会挂在高位」。
+    诊断 docs/short-lhb-chase-diagnosis.md；现有短线线**结构上无法在首日响**
+    （pure_bottom_v2 奖励「刚回踩」，首日大涨必被归零；隔日动量需龙虎榜上榜）。
+
+    本栏目只回答一个问题：**今天有哪些票刚完成「首次站上 MA20 + 大阳 + 放量」**——
+    即入场位最低的那一天（实测信号日中位偏离 MA20 仅 +3.8%；600641 首日 +4.90%，
+    而被推荐的 09-23 已是 +39.93%）。
+
+    ⚠ 诚实统计（tools/_diag_reversal_first_day.py ~ _v5.py，2024-07~2026-09，
+      544 交易日 / 4500 只，OC 现实口径）：
+        · n=15841、日均 29.1 只、原始 OC +0.328%、胜率 49.5%
+        · 市场中性超额 **+0.174pp（t=+2.80）**，分年 +0.23/+0.14/+0.18pp 三年一致
+        · **但胜率 49.5% 未达报告 §6C 的 52% 门槛**；扣 A 股往返成本（约 0.1%）后
+          仅余 +0.07pp ⇒ **不构成可交易的独立 alpha**
+        · 出场纪律对本线为**负贡献**（止损把胜率换到 52.4% 但期望跑输
+          「随便买一只持有 5 天」）⇒ 定位为**首日位置观察池，不是买入推荐**
+    故本线不占今日推荐名额、不计入**推荐线**胜率（与强势突破同口径隔离）；
+    但自 2026-09-24 起**纳入推荐复盘**：recommend_outcome 中以其独立 INSERT 记录，
+    在复盘里以 strategy='反转首日' **单独成组**展示（不改动短线推荐线成绩；
+    `tracked` 字段即该组汇总）。出场跟踪（routes 内嵌）仍不含本线。
+
+    数据源 = 实时 stock_signal（当日链路）∪ first_reversal_hist（历史回填表）；
+    最新信号日取两者 scan_date 最大者，同一 (code, scan_date) 以实时行为准。
+    ⇒ 当日链路尚未产出时，面板展示历史回填信号（响应体 `source` 字段标识
+    'live'/'hist'/'mixed'），卡片右侧不再空白。
+
+    ⚠ 单位陷阱：stock_signal.pct_above_ma20 是**分数**(0.051)，first_reversal_hist.ext_pct
+      是**百分数**(5.1) ⇒ SQL 内统一 *100，前端只认一个口径。
+    ⚠ 信号日涨幅用 close/prev_close 计算，**不用** daily_price.pct_change（有大量未写入的 0）。
+
+    当前已上线（FIRST_REVERSAL["enabled"]=True）；置 False 可一键下线，
+    实时链路关闭不再产出新行（历史回填行与复盘组不受影响），不报错。
+
+    支持 ?date=2026-09-24 查看指定日期；?limit 默认 12、上限 40。
+    """
+    limit = request.args.get("limit", default=12, type=int)
+    limit = max(0, min(limit, 40))
+    target_date = request.args.get("date")
+
+    # 板块过滤作用在 UNION 合并后的外层别名 r 上（实时/历史统一口径）
+    board_filter = ""
+    if MAIN_BOARD_ONLY:
+        board_filter = "".join(
+            f" AND r.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+
+    _stats_note = ("观察池，非买入推荐：实测市场中性超额 +0.174pp(t=+2.80)、"
+                   "分年 +0.23/+0.14/+0.18pp 三年一致，但胜率 49.5% 未达 52% 门槛，"
+                   "扣成本后不足 0.1%/笔。本线唯一确定价值＝入场位低"
+                   "（信号日中位偏离 MA20 +3.8%）且只响一次。")
+    # 长期成绩单：不随当日有无信号消失（与强势突破的 history 同定位），两分支都返回
+    _stats = {
+        "n": 15841, "per_day": 29.1,
+        "oc1_mean": 0.328, "win_rate": 49.5,
+        "excess_pp": 0.174, "t": 2.80,
+        "excess_by_year": {"2024": 0.23, "2025": 0.14, "2026": 0.18},
+        "median_ext": 3.8,
+    }
+    # 实盘前向跟踪（2026-09-24 起纳入推荐复盘，独立成组）：把 recommend_outcome 中
+    # strategy='反转首日' 的行按同一套出场数学评估后汇总。样本随交易日累积。
+    try:
+        from core.outcome_tracker import get_merged_summary
+        # ⚠ limit 必须放大：该线日均 ~20 只，90 天窗可达 1500+ 条，默认 500 会截断样本
+        _tracked = get_merged_summary(90, "short", strategy="反转首日", limit=5000)
+    except Exception:
+        _tracked = {"total": 0}
+
+    # ── 数据源：实时 stock_signal（当日链路）∪ first_reversal_hist（历史回填）──────
+    # ⚠ 实时行只有在 sync 跑到本线（enabled=True 且当日有候选）后才会出现；历史行由
+    #   tools/backfill_first_reversal.py 回填，保证「无实时信号时面板仍可浏览」。
+    #   同一 (code, scan_date) 以实时行为准（与 outcome_tracker.insert_new_outcomes 同口径，
+    #   避免回填行覆盖当日链路行）。
+    _rev_live = """
+        SELECT s.code, s.name, s.scan_date, s.trade_date,
+               s.price AS signal_price, s.buy_price, s.stop_loss, s.take_profit,
+               s.fusion_score, s.trigger_list,
+               -- ⚠ pct_above_ma20 是**分数**(0.051) 而 first_reversal_hist.ext_pct 是
+               --   百分数(5.1) ⇒ 这里统一 *100，前端只认一个口径
+               CASE WHEN s.pct_above_ma20 IS NOT NULL
+                    THEN s.pct_above_ma20 * 100 END AS ext_pct,
+               s.vol_ratio, NULL AS kdj_k, 0 AS hist_src
+        FROM stock_signal s
+        WHERE s.strategy = '反转首日'
+    """
+    _rev_hist = """
+        SELECT h.code, h.name, h.scan_date, h.scan_date AS trade_date,
+               NULL AS signal_price, h.buy_price, h.stop_loss, h.take_profit,
+               h.fusion_score, NULL AS trigger_list,
+               h.ext_pct, h.vol_ratio, h.kdj_k, 1 AS hist_src
+        FROM first_reversal_hist h
+        WHERE NOT EXISTS (
+            SELECT 1 FROM stock_signal s2
+            WHERE s2.code = h.code AND s2.scan_date = h.scan_date
+              AND s2.strategy = '反转首日')
+    """
+
+    with get_conn() as conn:
+        # 该表可能尚未创建（从未跑过回填脚本）⇒ 容错，仅用实时分支
+        _has_hist = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='first_reversal_hist'").fetchone())
+        _rev_src = (f"{_rev_live} UNION ALL {_rev_hist}" if _has_hist else _rev_live)
+
+        if target_date:
+            scan_date = target_date
+        else:
+            # 最新信号日 = 实时 ∪ 历史 的最大 scan_date（此前只查 stock_signal，
+            # 回填的历史信号因此完全不可见）
+            row = conn.execute(
+                f"SELECT MAX(scan_date) AS d FROM ({_rev_src})"
+            ).fetchone()
+            scan_date = row["d"] if row else None
+
+        if not scan_date or limit == 0:
+            return ok({
+                "date": scan_date, "count": 0, "items": [],
+                "enabled": bool(FIRST_REVERSAL.get("enabled")),
+                "stats": _stats,
+                "tracked": _tracked,
+                "days": 0,
+                "note": _stats_note + ("（信号线当前为关闭状态，"
+                                       "上线需将 FIRST_REVERSAL['enabled'] 置 True）"
+                                       if not FIRST_REVERSAL.get("enabled") else ""),
+            })
+
+        rows = conn.execute(
+            f"""
+            SELECT r.*, i.industry,
+                   -- 信号日当日涨幅：close/prev_close 权威口径。daily_price.pct_change
+                   -- 有大量未写入的 0（铁律 19），个股价位用它会把涨幅显示成 0.00%
+                   (SELECT d.close FROM daily_price d
+                    WHERE d.code = r.code AND d.trade_date = r.trade_date) AS close_day,
+                   (SELECT d.close FROM daily_price d
+                    WHERE d.code = r.code AND d.trade_date < r.trade_date
+                    ORDER BY d.trade_date DESC LIMIT 1) AS prev_close,
+                   -- 信号日全市场平均涨幅（只用于「普涨日信号偏多」提示，非个股口径）
+                   (SELECT AVG(d.pct_change) FROM daily_price d
+                    WHERE d.trade_date = r.trade_date) AS mkt_pct_day,
+                   -- 最新收盘/日期（判断次日是否已开盘/错过）
+                   (SELECT d.close FROM daily_price d
+                    WHERE d.code = r.code ORDER BY d.trade_date DESC LIMIT 1) AS latest_close,
+                   (SELECT MAX(d.trade_date) FROM daily_price d
+                    WHERE d.code = r.code) AS latest_date
+            FROM ({_rev_src}) r
+            LEFT JOIN stock_info i ON i.code = r.code
+            WHERE r.scan_date = ?
+              AND r.buy_price IS NOT NULL
+              AND COALESCE(r.name, '') NOT LIKE '%ST%'
+              AND COALESCE(r.name, '') NOT LIKE '%退%'
+              {board_filter}
+            -- 次排序按入场偏离升序（越低越是「首日」），与报告实测的「越低并不更优」
+            -- 并不冲突——本栏目排序服务于「找最低入场位」，不服务于收益预测
+            ORDER BY COALESCE(r.fusion_score, 0) DESC,
+                     COALESCE(r.ext_pct, 999) ASC
+            LIMIT ?
+            """,
+            (scan_date, limit),
+        ).fetchall()
+
+        items = []
+        for r in rows:
+            d = dict(r)
+            entry = d.get("buy_price") or d.get("signal_price") or 0
+            stop = d.get("stop_loss") or 0
+            tp = d.get("take_profit") or 0
+            risk_pct = round((entry - stop) / entry * 100, 1) if entry > 0 and stop > 0 else None
+            reward_pct = round((tp - entry) / entry * 100, 1) if entry > 0 and tp > 0 else None
+            risk_reward = (round(reward_pct / risk_pct, 2)
+                           if risk_pct and reward_pct and risk_pct > 0 else None)
+            triggers = []
+            tl = d.get("trigger_list")
+            if tl:
+                try:
+                    parsed = json.loads(tl)
+                    if isinstance(parsed, list):
+                        triggers = [str(x) for x in parsed]
+                except (json.JSONDecodeError, TypeError):
+                    triggers = [s.strip() for s in str(tl).split(",") if s.strip()]
+            # 历史回填行没有 trigger_list（first_reversal_hist 不存文本）⇒ 用与
+            # scan_first_reversal 同口径重建，避免历史卡片信息密度低于实时卡片
+            if not triggers and d.get("hist_src"):
+                _ext = d.get("ext_pct")
+                if _ext is not None:
+                    triggers.append(
+                        f"反转首日：首次站上 MA20（偏离 {_ext:+.1f}%，入场位低）")
+                _vr = d.get("vol_ratio")
+                if _vr is not None:
+                    triggers.append(f"量比 {_vr:.1f}（放量确认）")
+                _kk = d.get("kdj_k")
+                if _kk is not None:
+                    _tag = "⚠ 高位" if _kk > 80 else ("低位" if _kk < 20 else "")
+                    triggers.append(
+                        f"KDJ K={_kk:.0f}" + (f" · {_tag}" if _tag else ""))
+            # 信号日涨幅：close/prev_close 权威口径（勿用 pct_change，铁律 19）
+            _cd, _pc = d.get("close_day"), d.get("prev_close")
+            pct_day = (round((_cd / _pc - 1) * 100, 2)
+                       if _cd and _pc and _pc > 0 else None)
+            latest_close = d.get("latest_close")
+            started = bool(d.get("latest_date") and
+                           d["latest_date"] > (d.get("trade_date") or ""))
+            # 错过判定：次日已收盘且收盘价越过止盈价（首日优势已消失）
+            missed = bool(started and latest_close and tp and latest_close > tp)
+            items.append({
+                "code": d.get("code"),
+                "name": d.get("name"),
+                "industry": d.get("industry"),
+                "fusion_score": round(d.get("fusion_score") or 0, 1),
+                "pct_day": pct_day,
+                "mkt_pct_day": (round(d["mkt_pct_day"], 2)
+                                if d.get("mkt_pct_day") is not None else None),
+                "ext_pct": (round(d["ext_pct"], 2)
+                            if d.get("ext_pct") is not None else None),
+                "vol_ratio": (round(d["vol_ratio"], 2)
+                              if d.get("vol_ratio") is not None else None),
+                "kdj_k": (round(d["kdj_k"], 1)
+                          if d.get("kdj_k") is not None else None),
+                "signal_price": entry,
+                "stop_loss": stop,
+                "take_profit": tp,
+                "risk_pct": risk_pct,
+                "reward_pct": reward_pct,
+                "risk_reward_ratio": risk_reward,
+                "latest_close": latest_close,
+                "started": started,
+                "missed": missed,
+                "triggers": triggers,
+                "scan_date": d.get("scan_date"),
+                "trade_date": d.get("trade_date"),
+                # 'live' = 当日链路产出；'hist' = 历史回填（面板据此提示来源）
+                "source": "hist" if d.get("hist_src") else "live",
+            })
+
+        _src_kinds = {it["source"] for it in items}
+        return ok({
+            "date": scan_date,
+            "count": len(items),
+            "items": _sanitize(items),
+            "enabled": bool(FIRST_REVERSAL.get("enabled")),
+            "source": (None if not _src_kinds
+                       else ("hist" if _src_kinds == {"hist"}
+                             else ("live" if _src_kinds == {"live"} else "mixed"))),
+            "stats": _stats,
+            "tracked": _tracked,
+            "note": _stats_note,
+        })
+
+
+# ── 反转首日 · 出场原因 →（中文标签, 语义色调）────────────────────────────
+# 色调只表达「这笔交易的结果性质」，由前端映射成**本项目红涨绿跌**的配色：
+#   positive = 红（止盈类，赚了）/ negative = 绿（止损，亏了）
+#   neutral  = 灰（到期了结，无所谓好坏）/ holding = 金（尚在持仓，未结算）
+# ⚠ 不要抄 `recommendations/history` 前端那套 —— 那里用 var(--green) 画「已止盈」，
+#   与本项目 A 股约定（红涨绿跌）相反，属历史遗留；本栏目一律用语义色。
+_REV_EXIT_META = {
+    "take_profit":   ("止盈离场", "positive"),
+    "trailing_stop": ("移动止盈离场", "positive"),
+    "stop_loss":     ("止损离场", "negative"),
+    "max_hold_days": ("到期了结", "neutral"),
+    "no_fill":       ("未建仓", "neutral"),
+}
+# 出场原因固定展示顺序（分布条用；未列出的原因排在末尾）
+_REV_EXIT_ORDER = ["take_profit", "trailing_stop", "stop_loss",
+                   "max_hold_days", "no_fill"]
+
+
+@investor_bp.route("/reversal_history", methods=["GET"])
+def reversal_history():
+    """反转首日观察 · 历史表现：近 N 天逐条明细 + 成绩单（**独立成组**）。
+
+    GET /api/investor/reversal_history?days=60&limit=600
+        ?days  统计窗口（默认 60，上限 180；与「推荐复盘」「次日强势观察」同尺度）
+        ?limit 返回明细上限（默认 600，上限 2000；取数上限恒为 5000 不受其影响）
+
+    ⚠ 与「次日强势观察」的 history 有意不同：那个接口**自己回放**（因为强势突破
+      不进复盘表）；本线已经写入 recommend_outcome，就必须**直接读复盘表** ——
+      再写一套独立回放会造出第二套出场口径，正是铁律 18 禁止的。
+      于是本列表与上方「实盘跟踪」成绩单**同源同数学**，两者数值必然一致。
+      实现上把同一份明细同时喂给成绩单（get_merged_summary 的 items 形参），
+      彻底杜绝「列表 424 条、成绩单 425 条」这类分叉。
+
+    口径（与实盘跟踪 / 今日推荐完全一致）：
+      · 板块 —— 只主板。小资金未开通科创/创业板权限（config/personal_config.py
+        的 MAIN_BOARD_ONLY），是**可交易性硬约束**而非偏好；本线收益高度集中于
+        创业板（未过滤时 n=466 胜率 58.9%/均 +2.38% vs 主板 47.1%/+0.79%），
+        不过滤等于拿买不到的票抬成绩。
+      · 入场 = 信号日**次日开盘**（本线的首日窗口就是次日的开盘那一次）；
+        出场 = 移动止盈 / 止损 / 到期。⚠ 本线**豁免回踩确认入场**，
+        否则它就不再是「首日」而是另一条线（见 _evaluate_short）。
+      · 未结算行（exit_reason 为空）仍列出并标「持仓中」，计入 total、
+        **不计入胜率**（与 get_merged_summary 的最终收益口径一致）。
+
+    ext_pct / vol_ratio / kdj_k 由 first_reversal_hist ∪ stock_signal 补
+    （复盘表不存这三列），实时行优先 ⇒ 列表能回答「这只票凭什么在列表里」。
+    ⚠ 单位：stock_signal.pct_above_ma20 是分数(0.051) ⇒ *100 后才与
+      first_reversal_hist.ext_pct（百分数）同口径。
+
+    定位提醒（务必与数据一起读）：本线**不是买入推荐**，是**入场位置观察池**。
+    实测超额 +0.174pp(t=+2.80)、胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔。
+    """
+    days = max(5, min(request.args.get("days", default=60, type=int), 180))
+    limit = max(20, min(request.args.get("limit", default=600, type=int), 2000))
+
+    try:
+        from core.outcome_tracker import (get_merged_outcome_list,
+                                          get_merged_summary)
+        # 取数上限恒 5000：本线主板口径日均约 10 条，180 天窗最多 ~1800 条，
+        # 5000 足够且不会截断（截断会静默改小样本 = 成绩单失真）。
+        merged = get_merged_outcome_list(days, "short", limit=5000,
+                                         strategy="反转首日")
+        summary = get_merged_summary(days, "short", strategy="反转首日",
+                                     limit=5000, items=merged)
+    except Exception as e:
+        return fail(f"反转首日复盘读取失败: {e}", 500)
+
+    # ── 补 ext/kdj：复盘表不存这三列，得回信号源取 ─────────────────────
+    # 先 hist 后 live ⇒ 同一 (code, scan_date) 以实时行为准（与
+    # outcome_tracker.insert_new_outcomes 的 NOT EXISTS 反连接同口径）。
+    meta = {}
+    try:
+        with get_conn() as conn:
+            _has_hist = bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='first_reversal_hist'").fetchone())
+            if _has_hist:
+                for r in conn.execute(
+                        "SELECT code, scan_date, ext_pct, vol_ratio, kdj_k "
+                        "FROM first_reversal_hist WHERE scan_date >= date('now', ?)",
+                        (f"-{days} days",)):
+                    meta[(r["code"], r["scan_date"])] = {
+                        "ext_pct": r["ext_pct"], "vol_ratio": r["vol_ratio"],
+                        "kdj_k": r["kdj_k"]}
+            for r in conn.execute(
+                    "SELECT code, scan_date, pct_above_ma20, vol_ratio, "
+                    "       trigger_list FROM stock_signal "
+                    "WHERE strategy = '反转首日' AND scan_date >= date('now', ?)",
+                    (f"-{days} days",)):
+                # stock_signal 没有 kdj_k 列、vol_ratio 也未写入 ⇒ 从 trigger 文本兜底：
+                # 「量比 2.2（放量确认）」「KDJ K=52 / D=50」（scan_first_reversal 的固定文案）。
+                # 解析不到就留 None（前端显示 --）—— 显示层不做数值臆造。
+                _tl = r["trigger_list"] or ""
+                _vr = r["vol_ratio"]
+                if _vr is None:
+                    _m = re.search(r"量比\s*([\d.]+)", _tl)
+                    _vr = float(_m.group(1)) if _m else None
+                _mk = re.search(r"KDJ\s*K\s*=\s*([\d.]+)", _tl)
+                meta[(r["code"], r["scan_date"])] = {
+                    "ext_pct": (r["pct_above_ma20"] * 100
+                                if r["pct_above_ma20"] is not None else None),
+                    "vol_ratio": _vr,
+                    "kdj_k": float(_mk.group(1)) if _mk else None}
+    except Exception:
+        meta = {}   # 补充信息失败不得影响主列表
+
+    def _r2(v):
+        return round(v, 2) if v is not None else None
+
+    items = []
+    for it in merged[:limit]:
+        code, sd = it.get("code"), it.get("scan_date")
+        m = meta.get((code, sd), {})
+        reason = it.get("exit_reason")
+        if reason:
+            label, tone = _REV_EXIT_META.get(reason, (reason, "neutral"))
+        else:
+            label, tone = "持仓中", "holding"
+        items.append({
+            "code": code,
+            "name": it.get("name"),
+            # first_scan_date 与 scan_date 对本线恒等（同票不会连两天首破 MA20），
+            # 仍按复盘口径取 first_scan_date，便于与「推荐复盘」列表对齐
+            "scan_date": it.get("first_scan_date") or sd,
+            "entry_price": _r2(it.get("entry_price")),
+            "stop_loss": _r2(it.get("stop_loss")),
+            "take_profit": _r2(it.get("take_profit")),
+            "ext_pct": _r2(m.get("ext_pct")),
+            "vol_ratio": _r2(m.get("vol_ratio")),
+            "kdj_k": _r2(m.get("kdj_k")),
+            "fusion_score": round(it.get("fusion_score") or 0, 1),
+            "t1_return": _r2(it.get("t1_return")),
+            "t2_return": _r2(it.get("t2_return")),
+            "t3_return": _r2(it.get("t3_return")),
+            "t5_return": _r2(it.get("t5_return")),
+            "exit_return": _r2(it.get("exit_return")),
+            "exit_reason": reason,
+            "exit_date": it.get("exit_date"),
+            "exit_label": label,
+            "exit_tone": tone,
+            "hit_stop": bool(it.get("hit_stop")),
+            "hit_tp": bool(it.get("hit_tp")),
+            "settled": bool(reason),
+        })
+
+    # 出场原因分布。空 reason = 未结算（持仓中/待建仓），恒排最后。
+    _cnt = Counter(it["exit_reason"] for it in items)   # 含 None 键
+    breakdown = []
+    for k in _REV_EXIT_ORDER + sorted(x for x in _cnt
+                                      if x and x not in _REV_EXIT_ORDER):
+        if _cnt.get(k):
+            label, tone = _REV_EXIT_META.get(k, (k, "neutral"))
+            breakdown.append({"reason": k, "label": label,
+                              "tone": tone, "n": _cnt[k]})
+    if _cnt.get(None):
+        breakdown.append({"reason": None, "label": "持仓中/待建仓",
+                          "tone": "holding", "n": _cnt[None]})
+
+    _dates = [it["scan_date"] for it in items if it.get("scan_date")]
+    return ok(_sanitize({
+        "days": days,
+        "limit": limit,
+        "range": {"start": min(_dates) if _dates else None,
+                  "end": max(_dates) if _dates else None},
+        "total": len(items),
+        "truncated": len(merged) > len(items),
+        "summary": summary,
+        "exit_breakdown": breakdown,
+        "items": items,
+        "note": ("反转首日观察池的历史明细（主板口径，与上方实盘跟踪同源同数学）："
+                 "信号日次日开盘建仓 → 移动止盈/止损/到期。"
+                 "本线不是买入推荐 —— 实测超额 +0.174pp(t=+2.80)、"
+                 "胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔。"),
+    }))
+
+
+@investor_bp.route("/lhb_jg_track", methods=["GET"])
+def lhb_jg_track():
+    """龙虎榜「机构专用席位」建仓跟踪 —— 资金动向观察，**不是收益信号**。
+
+    ⚠ 诊断结论（tools/_diag_lhb_jg.py + _diag_lhb_jg2.py，2024-07~2026-09 / 13350 样本）：
+      机构买卖方向对次日收益**无区分度**，不要当买入信号用：
+        · 单日：机构净买 +0.72% vs 机构净卖 +0.66%，Δ=+0.058pp t=+0.53（不显著）
+        · 同「近20日上榜>=4次」下：机构净买 +0.94% vs **机构净卖 +1.19%**（方向反了）
+        · 「近20日机构净买>=4次」+1.22%（t=+2.24）看似显著，但剔除任一年即不显著（铁律 3 不过）
+      真正有效的是「**频繁上榜**」（活跃度），与机构方向无关。
+    故本接口定位为**成本位与资金动向参考**：机构在什么价位建了什么仓，
+    用于判断「现价相对机构成本的位置」（跌破成本区＝机构浮亏，是风险提示而非买点）。
+
+    数据源：stock_lhb_jg_detail 的**单日口径**（window_days=1）。
+    同一股票同日若只有「连续三个交易日」口径则不进本视图，避免把 3 日累计额当单日额。
+
+    价格分位：
+      cost_est  = Σ(机构净买额 × 当日收盘价) / Σ(机构净买额)，只对净买为正的上榜日加权
+                  ⇒ **机构建仓成本估算**（接口不提供真实成交价，此为可得的最优近似）
+      band      = 各上榜日 [最低, 最高] 的极值区间（前复权，与现价同源可比）
+      一律取 daily_price 前复权价，不用接口自带 close_price（原始价，混价源会出错）
+
+    参数：?days 回看交易日（默认 20，上限 120）/ ?min_cnt 最少净买次数（默认 2）
+          / ?limit 上限（默认 30，上限 100）/ ?sort cum_ratio|vs_cost|cost_est
+    """
+    days = max(5, min(request.args.get("days", default=20, type=int), 120))
+    min_cnt = max(1, min(request.args.get("min_cnt", default=2, type=int), 20))
+    limit = max(1, min(request.args.get("limit", default=30, type=int), 100))
+    sort_key = request.args.get("sort", default="cum_ratio")
+    # 本地 daily_price 不覆盖科创板(688)/北交所(920、8xxxxx)，这些票算不出成本位；
+    # 默认只留有行情的票（成本/现价齐全才有「价位」可言），可用 only_priced=0 放开。
+    only_priced = request.args.get("only_priced", default=1, type=int) == 1
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(trade_date) AS d FROM stock_lhb_jg_detail").fetchone()
+        as_of = row["d"] if row else None
+        if not as_of:
+            return ok({"as_of": None, "window_days": days, "count": 0, "items": [],
+                       "note": "机构席位表暂无数据，先执行 tools/backfill_lhb_jg.py"})
+
+        # 窗口起点 = 最新交易日往前 days-1 个交易日
+        start = conn.execute(
+            "SELECT MIN(trade_date) FROM (SELECT DISTINCT trade_date FROM daily_price "
+            "WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT ?)",
+            (as_of, days)).fetchone()[0] or as_of
+
+        # 一次 JOIN 取窗口内全部单日口径记录 + 当日前复权行情
+        rows = conn.execute(
+            """
+            SELECT j.trade_date, j.code, j.name, j.jg_net_buy, j.jg_net_ratio,
+                   j.buyer_jg_count, j.seller_jg_count, j.float_mkt_cap,
+                   j.reason, j.turnover_rate,
+                   d.close AS close, d.low AS low, d.high AS high,
+                   d.pct_change AS pct
+            FROM stock_lhb_jg_detail j
+            LEFT JOIN daily_price d
+                   ON d.code = j.code AND d.trade_date = j.trade_date
+            WHERE j.window_days = 1 AND j.trade_date >= ? AND j.trade_date <= ?
+            ORDER BY j.code, j.trade_date
+            """, (start, as_of)).fetchall()
+
+        latest = {r["code"]: dict(r) for r in conn.execute(
+            "SELECT code, close, trade_date, pct_change FROM latest_price")}
+        name_map = {r["code"]: r["name"] for r in conn.execute(
+            "SELECT code, name FROM stock_info")}
+
+    agg = {}
+    for r in rows:
+        code = r["code"]
+        net = r["jg_net_buy"] or 0
+        a = agg.setdefault(code, {
+            "code": code, "name": name_map.get(code) or r["name"] or code,
+            "cnt_in": 0, "cnt_total": 0, "cum_net": 0.0, "cum_out": 0.0,
+            "_wsum": 0.0, "_wpx": 0.0, "_lo": None, "_hi": None,
+            "buyers_max": 0, "sellers_max": 0, "last_net": None,
+            "first_date": r["trade_date"], "last_date": r["trade_date"],
+            "float_mkt_cap": r["float_mkt_cap"], "reasons": [], "signals": [],
+        })
+        a["cnt_total"] += 1
+        a["last_date"] = r["trade_date"]
+        a["buyers_max"] = max(a["buyers_max"], r["buyer_jg_count"] or 0)
+        a["sellers_max"] = max(a["sellers_max"], r["seller_jg_count"] or 0)
+        if r["float_mkt_cap"]:
+            a["float_mkt_cap"] = r["float_mkt_cap"]
+        if r["reason"] and r["reason"] not in a["reasons"]:
+            a["reasons"].append(r["reason"])
+        close = r["close"]
+        if close and close > 0:
+            if a["_lo"] is None or (r["low"] and r["low"] < a["_lo"]):
+                a["_lo"] = r["low"] or close
+            if a["_hi"] is None or (r["high"] and r["high"] > a["_hi"]):
+                a["_hi"] = r["high"] or close
+        if net > 0:
+            a["cnt_in"] += 1
+            a["cum_net"] += net
+            a["last_net"] = net
+            if close and close > 0:
+                a["_wsum"] += net
+                a["_wpx"] += net * close
+            a["signals"].append({
+                "date": r["trade_date"], "net": round(net, 0),
+                "close": round(close, 2) if close else None,
+                "pct": _sanitize(r["pct"]),
+                "buyers": r["buyer_jg_count"], "sellers": r["seller_jg_count"],
+                "net_ratio": round(r["jg_net_ratio"], 2) if r["jg_net_ratio"] is not None else None,
+                "reason": r["reason"],
+            })
+        else:
+            a["cum_out"] += -(net) if net < 0 else 0.0
+
+    items = []
+    n_no_price = 0
+    for code, a in agg.items():
+        if a["cnt_in"] < min_cnt:
+            continue
+        cost = (a["_wpx"] / a["_wsum"]) if a["_wsum"] > 0 else None
+        fmc = (a["float_mkt_cap"] or 0) * 1e8           # 亿元 → 元
+        lp = latest.get(code) or {}
+        last_close = lp.get("close")
+        if only_priced and not (cost and last_close):
+            n_no_price += 1
+            continue
+        items.append({
+            "code": code, "name": a["name"],
+            "cnt_in": a["cnt_in"], "cnt_total": a["cnt_total"],
+            "cum_net": round(a["cum_net"], 0),
+            "cum_out": round(-a["cum_out"], 0),
+            "cum_ratio": round(a["cum_net"] / fmc * 100, 3) if fmc > 0 else None,
+            "cost_est": round(cost, 2) if cost else None,
+            "band_low": round(a["_lo"], 2) if a["_lo"] else None,
+            "band_high": round(a["_hi"], 2) if a["_hi"] else None,
+            "last_close": round(last_close, 2) if last_close else None,
+            "last_price_date": lp.get("trade_date"),
+            "last_close_pct": _sanitize(lp.get("pct_change")),
+            "vs_cost": (round((last_close - cost) / cost * 100, 2)
+                        if (cost and last_close and cost > 0) else None),
+            "buyers_max": a["buyers_max"], "sellers_max": a["sellers_max"],
+            "float_mkt_cap": a["float_mkt_cap"],
+            "first_date": a["first_date"], "last_date": a["last_date"],
+            "reasons": a["reasons"][:3],
+            "signals": a["signals"][-8:],
+        })
+
+    def _key(it):
+        if sort_key == "vs_cost":
+            return it["vs_cost"] if it["vs_cost"] is not None else 9e9
+        if sort_key == "cost_est":
+            return it["cost_est"] if it["cost_est"] is not None else 9e9
+        return -(it["cum_ratio"] if it["cum_ratio"] is not None else 0)
+
+    items.sort(key=_key)
+    items = items[:limit]
+
+    n_above = sum(1 for x in items if (x["vs_cost"] or 0) > 0)
+    return ok({
+        "as_of": as_of, "window_days": days, "start_date": start,
+        "count": len(items), "min_cnt": min_cnt, "sort": sort_key,
+        "above_cost": n_above, "below_cost": len(items) - n_above,
+        "skipped_no_price": n_no_price,
+        "note": "资金动向与成本位参考，**非收益信号**：实测机构买卖方向对次日收益无区分度"
+                "（净买 +0.72% vs 净卖 +0.66%，Δ 不显著）；有效的是「频繁上榜」本身。"
+                "cost_est 为按净买额加权的上榜日收盘价估算，非机构真实成交价。"
+                "科创板/北交所因无本地行情未纳入。",
+        "items": _sanitize(items),
+    })
 
 
 @investor_bp.route("/exit_advice", methods=["GET"])
@@ -1169,7 +1868,14 @@ def exit_advice():
         #   mid/long = fusion_score 前 4。
         # 此前 exit_advice 仍用旧 fusion 排序（无门控/无剔除），与推荐复盘不一致——旧算法残余，已对齐。
         gate = float(get_param("short_conf_gate"))
-        gap_enabled = bool(T1_GAP_GUARD.get("enabled", True))
+        # gap guard 止盈离场。
+        # ⚠ 2026-09-19：历史链路默认禁用（history_gap_guard 默认 0）——原逻辑用
+        # latest_price.close（当前最新价）回溯历史信号 = 用未来价格剔除历史样本，
+        # 使「信号发出后涨过止盈价」的赢家被系统性踢出跟踪（实测名额内 short 剔 8.9%，
+        # 被剔票 T+5 +8.49%/胜率 90% vs 保留票 -0.26%/43.9%）；且实时语义下恒不触发。
+        # 详见 config/strategy_params.py::history_gap_guard 注释。
+        gap_enabled = (bool(T1_GAP_GUARD.get("enabled", True))
+                       and bool(int(get_param("history_gap_guard") or 0)))
         # gap guard 止盈离场（与 core/outcome_tracker.insert_new_outcomes 同口径：现价相对
         # 信号价涨幅 > 止盈涨幅 = 已错过买点不追，不纳入出场跟踪）；T1_GAP_GUARD 关闭时恒 0
         if gap_enabled:
@@ -1186,7 +1892,11 @@ def exit_advice():
             # 隔日动量豁免；参数 >=99 禁用）——各信号日按当天历史 regime 判定
             from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
                                               short_market_gate_sql,
-                                              short_observe_bottom_sql)
+                                              short_observe_bottom_sql,
+                                              long_order_clause,
+                                              long_second_order_clause,
+                                              long_pool_filter_sql,
+                                              long_sort_pool_mult)
             t1_cond, t1_params = short_t1_filter_sql(conn, EXIT_TRACK_START_DATE)
             # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量，与今日推荐同口径
             mk_cond, mk_params = short_market_gate_sql(conn, EXIT_TRACK_START_DATE)
@@ -1199,26 +1909,17 @@ def exit_advice():
                 "short": (short_order_clause(),
                           f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond} AND {ob_cond}",
                           [gate, *t1_params, *mk_params, *ob_params]),
-                "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
-                "long":  ("COALESCE(s.fusion_score, 0) DESC", "", []),
-            }
+            "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
+            # long 2026-09-20 起：「低波票池过滤 + 连续排序键」（见 long_pool_filter_sql /
+            # long_order_clause 注释；原 score>=2.0 票池长期超额 −0.92%/t=−7.30）
+            "long":  (long_order_clause(), long_pool_filter_sql(), []),
+        }
             # 每日名额上限：short 取 short_top_n（2026-08-20 由 4 → 3），mid/long 保持前 4
             caps = {"short": max(1, int(get_param("short_top_n"))), "mid": 4, "long": 4}
             # 2026-07-20 起的推荐记录（与「推荐复盘」同口径：每日名额 short=3 / mid/long=4）
             signals = []
             for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
-                signals += conn.execute(f"""
-                    SELECT code, name, scan_date, buy_price,
-                           stop_loss, take_profit, fusion_score, horizon, strategy
-                    FROM (
-                        SELECT s.code, s.name, s.scan_date, s.buy_price,
-                               s.stop_loss, s.take_profit, s.fusion_score,
-                               COALESCE(s.horizon, 'short') AS horizon,
-                               s.strategy,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
-                                   ORDER BY {order_clause}
-                               ) AS rn
+                _base_where = f"""
                         FROM stock_signal s
                         LEFT JOIN latest_price lp ON lp.code = s.code
                         WHERE s.scan_date >= ?
@@ -1229,14 +1930,63 @@ def exit_advice():
                           AND s.name NOT LIKE '%退%'
                           -- 强势突破是首页独立栏目信号线，不纳入出场跟踪
                           AND COALESCE(s.strategy, '') != '强势突破'
+                          -- 反转首日（2026-09-24）同为独立观察栏目线，不纳入出场跟踪
+                          AND COALESCE(s.strategy, '') != '反转首日'
                           -- 缩量回踩 2026-08-26 停用（实证负期望），不纳入出场跟踪
                           AND COALESCE(s.strategy, '') != '缩量回踩'
                           AND ({gap_sql}) = 0
                           {board_filter}
-                          {gate_sql_cond}
-                    )
-                    WHERE rn <= ?
-                """, (EXIT_TRACK_START_DATE, hz, *gate_params, caps[hz])).fetchall()
+                          {gate_sql_cond}"""
+                # 第二层作用于第一层的派生表，无表别名 ⇒ 必须传空串（见函数注释）
+                _long_second = (long_second_order_clause("")
+                                if hz == "long" else None)
+                if _long_second:
+                    # long 两层排序（与复盘入库 / 今日推荐同口径，见 long_order_clause）
+                    _pool = caps[hz] * long_sort_pool_mult()
+                    signals += conn.execute(f"""
+                        SELECT code, name, scan_date, buy_price,
+                               stop_loss, take_profit, fusion_score, horizon, strategy
+                        FROM (
+                            SELECT code, name, scan_date, buy_price, stop_loss,
+                                   take_profit, fusion_score, horizon, strategy,
+                                   pct_above_ma20,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY scan_date, horizon
+                                       ORDER BY {_long_second}
+                                   ) AS rn
+                            FROM (
+                                SELECT s.code, s.name, s.scan_date, s.buy_price,
+                                       s.stop_loss, s.take_profit, s.fusion_score,
+                                       COALESCE(s.horizon, 'short') AS horizon,
+                                       s.strategy, s.pct_above_ma20,
+                                       ROW_NUMBER() OVER (
+                                           PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
+                                           ORDER BY {order_clause}
+                                       ) AS rn_pool
+                                {_base_where}
+                            )
+                            WHERE rn_pool <= ?
+                        )
+                        WHERE rn <= ?
+                    """, (EXIT_TRACK_START_DATE, hz, *gate_params,
+                          _pool, caps[hz])).fetchall()
+                else:
+                    signals += conn.execute(f"""
+                        SELECT code, name, scan_date, buy_price,
+                               stop_loss, take_profit, fusion_score, horizon, strategy
+                        FROM (
+                            SELECT s.code, s.name, s.scan_date, s.buy_price,
+                                   s.stop_loss, s.take_profit, s.fusion_score,
+                                   COALESCE(s.horizon, 'short') AS horizon,
+                                   s.strategy,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
+                                       ORDER BY {order_clause}
+                                   ) AS rn
+                            {_base_where}
+                        )
+                        WHERE rn <= ?
+                    """, (EXIT_TRACK_START_DATE, hz, *gate_params, caps[hz])).fetchall()
 
             if not signals:
                 return ok({"items": [], "groups": {"short": [], "mid": [], "long": []},
@@ -1457,6 +2207,15 @@ def exit_advice():
             #   avg_pct  = 平均每笔收益（等权，无仓位假设）—— 唯一不依赖仓位假设的可比指标
             #   comp_pct = 等权资金曲线（按每笔满仓复利连乘）—— 标准策略业绩口径
             # cum_pnl 保留为算术和（仅调试用，前端不再作为主口径展示）
+            #
+            # ⚠ 口径（2026-09-19 再修正）：comp_pct（逐笔**顺序**复利）本身也是误导的——
+            # 它把**并行**持仓当成**串联**：短线 40+ 笔分布在 40 个交易日里、每日最多 3 只
+            # 同时持有，按顺序复利等价于假设"一份钱做完一笔再做下一笔"，于是 -2% 的单笔
+            # 均摊被放大成 -65% 的"累计"，视觉上像本金亏光。前端已弃用该口径，改用：
+            #   pnl_at_pos = 按仓位累计 = Σ(单笔收益%) × POSITION_PLAN_MAX_PCT
+            # 每笔按 20% 仓位下单时，对总资金的影响可**线性累加**（忽略复利，量级一致），
+            # 有明确资金含义，直接回答"我的账户大概亏/赚了多少"。comp_pct 保留字段仅供调试。
+            from config.personal_config import POSITION_PLAN_MAX_PCT
             _avg = round(sum(allp) / len(allp), 2) if allp else None
             _comp = None
             if allp:
@@ -1481,7 +2240,10 @@ def exit_advice():
                 "all_mean_pct": round(sum(allp) / len(allp), 2) if allp else None,
                 # 展示口径（见上方注释）
                 "avg_pct": _avg,
-                "comp_pct": _comp,
+                "comp_pct": _comp,     # 逐笔顺序复利（已弃用，仅调试/向后兼容）
+                "pnl_at_pos": (round(sum(allp) * POSITION_PLAN_MAX_PCT, 1)
+                               if allp else None),
+                "pos_pct": round(POSITION_PLAN_MAX_PCT * 100),
                 "cum_pnl": round(sum(allp), 2) if allp else None,
                 "win_rate": round(sum(1 for v in allp if v > 0) / len(allp) * 100, 1) if allp else None,
             }
@@ -1639,7 +2401,8 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
     if not code or not cost_price or cost_price <= 0 or not opened_at:
         return None
     try:
-        from strategy.exit_advisor import evaluate_exit, get_max_hold, atr_dynamic_stop_pct
+        from strategy.exit_advisor import (evaluate_exit, get_max_hold,
+                                           atr_dynamic_stop_pct, LIVE_MID_TRAILING_PCT)
         import pandas as pd
         rows = conn.execute(
             """
@@ -1678,7 +2441,11 @@ def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "s
             # （无独立 mid/long 止损参数；持仓诊断按成本价比例止损，与信号自带 ATR 止损价脱钩）
             kwargs = dict(
                 partial_tp=get_param("mid_partial_tp") if hz == "mid" else get_param("long_partial_tp"),
-                trailing_pct=get_param("mid_trailing_pct") if hz == "mid" else get_param("long_trailing_pct"),
+                # ⚠ 中线此处用 LIVE_MID_TRAILING_PCT(0.10) 而**非** mid_trailing_pct(0.05)：
+                # 本链路走 evaluate_exit（快照版，移动止盈无启动线），语义与推荐出场跟踪的
+                # evaluate_exit_by_prices（需先浮盈达标才启动）不同，详见 exit_advisor 常量注释。
+                trailing_pct=(LIVE_MID_TRAILING_PCT if hz == "mid"
+                              else get_param("long_trailing_pct")),
                 max_hold_days=get_max_hold(hz),
             )
         res = evaluate_exit(

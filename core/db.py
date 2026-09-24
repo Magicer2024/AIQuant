@@ -333,6 +333,42 @@ CREATE TABLE IF NOT EXISTS stock_lhb_detail (
 CREATE INDEX IF NOT EXISTS idx_lhb_date ON stock_lhb_detail(trade_date);
 CREATE INDEX IF NOT EXISTS idx_lhb_code ON stock_lhb_detail(code);
 
+-- 龙虎榜「机构专用席位」买卖统计（akshare stock_lhb_jgmmtj_em 东方财富）
+--
+-- ⚠ 口径警告（实测确认，2026-09-22）：
+--   同一 (trade_date, code) 会因不同「上榜原因」并存多行，而 reason 决定统计窗口：
+--     · 「日涨幅偏离值达7%」「日换手率达到20%」等 → 单日口径，
+--        金额四舍五入等于当日值（接口市场总成交额 / daily_price.amount == 1.00x）
+--     · 「连续三个交易日内…」→ N 日累计口径（实测 2.0~4.3x）
+--   故金额类字段（jg_buy_amt / jg_sell_amt / jg_net_buy / market_total_amt）
+--   **绝不可跨 reason 相加**，也不能按 (trade_date, code) 聚合（会把 3 日额当单日额）。
+--   相反，close_price / pct_change / turnover_rate / float_mkt_cap 恒为当日值，
+--   两种口径下完全一致，可直接使用。
+--   主键含 reason 就是为了保留全部口径；筛选单日动向用 window_days = 1。
+CREATE TABLE IF NOT EXISTS stock_lhb_jg_detail (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date          TEXT NOT NULL,
+    code                TEXT NOT NULL,
+    name                TEXT,
+    close_price         REAL,
+    pct_change          REAL,
+    buyer_jg_count      INTEGER,
+    seller_jg_count     INTEGER,
+    jg_buy_amt          REAL,
+    jg_sell_amt         REAL,
+    jg_net_buy          REAL,
+    market_total_amt    REAL,
+    jg_net_ratio        REAL,
+    turnover_rate       REAL,
+    float_mkt_cap       REAL,
+    reason              TEXT NOT NULL,
+    window_days         INTEGER DEFAULT 1,
+    UNIQUE(trade_date, code, reason)
+);
+CREATE INDEX IF NOT EXISTS idx_lhjg_date   ON stock_lhb_jg_detail(trade_date);
+CREATE INDEX IF NOT EXISTS idx_lhjg_code   ON stock_lhb_jg_detail(code);
+CREATE INDEX IF NOT EXISTS idx_lhjg_netbuy ON stock_lhb_jg_detail(trade_date, jg_net_buy);
+
 -- 高管增减持
 CREATE TABLE IF NOT EXISTS stock_mgmt_holding (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -543,6 +579,49 @@ CREATE TABLE IF NOT EXISTS recommend_outcome (
 CREATE INDEX IF NOT EXISTS idx_outcome_scan ON recommend_outcome(scan_date);
 CREATE INDEX IF NOT EXISTS idx_outcome_code ON recommend_outcome(code);
 
+-- 筹码优先排序 · 前向记录旁路表（2026-09-16，步骤③）
+-- ─────────────────────────────────────────────────────────────
+-- 目的：26k 历史样本已被多轮挖掘，IS/OOS 切分不再干净，且筹码 Δ 对样本期敏感
+--（子样本 Δ +0.87%→+0.47%，成因是样本构成而非口径）。故不做历史回填，
+-- 改为**前向对照**：每日 × core/outcome_tracker.insert_new_outcomes 里，用与
+-- 线上完全相同的 WHERE（门槛/T1 闸门/大盘门控/观察线/gap guard/板块过滤），
+-- 只把 ORDER BY 换成 chip_conc 优先，取同样 top_n 写本表。
+-- 两组群体天然对齐 ⇒ 唯一变量是排序键。
+--
+-- ⚠ 本表**不参与任何线上推荐/出场跟踪/复盘胜率**，纯记录。
+-- 列名与 recommend_outcome 保持一致，以便复用同一套评估函数
+--（evaluate_outcomes(table=...)），出场数学 import 线上 _short_exit_sim、不重写。
+CREATE TABLE IF NOT EXISTS recommend_outcome_shadow (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    code            TEXT NOT NULL,
+    scan_date       TEXT NOT NULL,
+    horizon         TEXT DEFAULT 'short',
+    strategy        TEXT,
+    entry_price     REAL,
+    stop_loss       REAL,
+    take_profit     REAL,
+    fusion_score    REAL,
+    t1_return       REAL,
+    t2_return       REAL,
+    t3_return       REAL,
+    t5_return       REAL,
+    t10_return      REAL,
+    max_return      REAL,
+    min_return      REAL,
+    hit_stop        INTEGER DEFAULT 0,
+    hit_tp          INTEGER DEFAULT 0,
+    exit_reason     TEXT,
+    exit_date       TEXT,
+    exit_return     REAL,
+    evaluated_at    TEXT,
+    -- 影子组专属
+    chip_conc       REAL,               -- 排序键（越小越集中）
+    in_baseline     INTEGER DEFAULT 0,  -- 是否也在线上基线 top_n 里（重叠度）
+    UNIQUE(code, scan_date, horizon)
+);
+CREATE INDEX IF NOT EXISTS idx_outcome_shadow_scan
+    ON recommend_outcome_shadow(scan_date);
+
 -- 策略参数运行时覆盖层（优化器建议被采纳/手动调整后写入，代码常量退化为默认值）
 CREATE TABLE IF NOT EXISTS strategy_param_override (
     param_key   TEXT PRIMARY KEY,
@@ -619,6 +698,53 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
         _safe_add_column(conn, "stock_signal", "strategy", "TEXT")
         # 短线扩展度列：价相对 MA20 偏离（short 组低扩展度排序用，S4 口径）
         _safe_add_column(conn, "stock_signal", "pct_above_ma20", "REAL")
+        # 筹码集中度影子列（2026-09-16，步骤②影子模式）：conc=(P90-P10)/(P90+P10)，
+        # 越小越集中。**只写列、不改排序、不回填历史行** —— 排序开关
+        # short_chip_sort_prioritize 默认 0，历史行为 NULL（排序时 COALESCE 到 9.9 排最后）。
+        # 填库走 core/sync.py::_build_signal_records（short 组），与回测同口径
+        # decay=0.65 / decay_floor=0.003 / warmup≥1300 交易日。
+        # 依据：docs/chip-peak-mktcap-verification.md（conc 作第一排序键时样本外 +0.91%→+1.34%、
+        # 止损率 37%→23%；作过滤器无效）。⚠ 只验过短线 T+5，勿移植 stock_deep。
+        _safe_add_column(conn, "stock_signal", "chip_conc", "REAL")
+        # 长线「波动收敛度」排序键列（2026-09-19）：60 日年化波动 ÷ 250 日年化波动，
+        # 越小＝相对自身常态越收敛。
+        # 依据 tools/_diag_long_rescore.py（重放 scan_long_term 打分逻辑，2015-2026
+        # 共 62.3 万信号 / 2488 采样日）+ _diag_long_key_eval.py（分年 + 剔除单年压力）：
+        #   横截面五分位 rho = −1.00 **完美单调**（10 个候选键中唯一），Δ = −4.13%
+        #   组合口径「vol_ratio 升序取 5×topN 池 → ext_ma20 升序取 topN」top4 等权 T+60：
+        #     均值 +5.23% / 中位 +2.52% / 胜率 58.3%
+        #     随机基线 +1.83% / +0.93% / 55.1%   ⇒ Δ = +3.41%
+        #     剔除任一单年后 Δ 恒正 [+3.01%, +3.85%]
+        # ⚠ 只作**排序键**，不作过滤器（当过滤器会大幅缩样本，未验证）。
+        # ⚠ 不能当**单键**用：纯 vol_ratio 升序虽全期 Δ 高达 +7.51%，但分年在
+        #   2018/2025/2026 为负（2026 −5.62%），是过拟合到 2016-2021 的强市段。
+        #   必须与 ext_ma20 组成两层结构（见 outcome_tracker.long_sort_clause）。
+        # 只写 long 组；short/mid 未验证 → NULL（排序时 COALESCE 到 9.9 排最后）。
+        _safe_add_column(conn, "stock_signal", "vol_ratio", "REAL")
+        # ── 长线选股重设计（2026-09-20）────────────────────────────────────────
+        # 背景：原「score>=2.0」票池长期**负 alpha** —— 相对全市场等权超额
+        #   -0.92%、t=-7.30（tools/_diag_long_pool.py，2015-2026 / 2416 采样日，
+        #   11 年里 8 年为负）。逐 mask 拆解（_diag_long_mask.py）定位到负 alpha 主体：
+        #     mask=11（趋势+斜率+浅回撤但**高波动**）日均 165 只，超额 -0.90% t=-6.54
+        #     mask=8 / 12 / 4（含「回撤<40%」但缺趋势）超额 -1.07~-1.72%，t 最低 -14.90
+        #   而 mask=7 / 15（趋势+斜率+低波）超额 +0.53~+0.56%，日胜率 ~60%
+        # ⇒ 把「低波」从事后加分改为**票池必需条件**，并用连续键排序。
+        #
+        # long_mask：四条件 bitmask（bit0 趋势 / bit1 斜率 / bit2 低波 / bit3 回撤受控），
+        #   票池过滤用 `(long_mask & 7) = 7`（趋势+斜率+低波三项必需）。
+        # vol60 / dd250：连续特征，供横截面百分位加权排序键 long_rank_key 使用。
+        # long_rank_key：0.75×pctile(vol60) + 0.25×pctile(dd250)，升序取 topN。
+        #   依据 tools/_diag_long_redesign.py（带真实出场纪律，498 采样日 / 1992 笔）：
+        #     本方案  全期 均值 +2.67% / 中位 +1.85% / 胜率 57.0% / 止损率 12.2%
+        #     现状    全期 均值 +2.16% / 中位 +0.68% / 胜率 52.7% / 止损率 13.4%
+        #     2026 年 本方案 +1.60%/胜率52.2%  现状 -0.38%/胜率53.3%
+        #     分年 11 年里 10 年为正、10 年胜率>=50%（2018 熊市 -6.82% 是唯一负值）
+        #   ⚠ 不能用**两层硬切池**近似（vol60 取 2×topN 池 → dd250 取 topN）：
+        #     全期看着更好（+2.84%/57.2%）但 2026 胜率掉到 48.9%，是软加权才稳。
+        _safe_add_column(conn, "stock_signal", "long_mask", "INTEGER")
+        _safe_add_column(conn, "stock_signal", "vol60", "REAL")
+        _safe_add_column(conn, "stock_signal", "dd250", "REAL")
+        _safe_add_column(conn, "stock_signal", "long_rank_key", "REAL")
         # 一次性回填 strategy_rules.horizon（按持仓期推导：<=10 短期，<=60 中期，否则长期）
         try:
             conn.execute("""
@@ -796,6 +922,7 @@ from core.repository.futures_repo import (
 )
 from core.repository.lhb_repo import (
     upsert_lhb_detail, get_lhb_detail, get_latest_lhb_date, get_lhb_map_for_date,
+    upsert_lhb_jg_detail, get_latest_lhb_jg_date, get_lhb_jg_rows,
 )
 from core.repository.mgmt_repo import (
     upsert_mgmt_holding, get_mgmt_holding, get_latest_mgmt_holding_date,

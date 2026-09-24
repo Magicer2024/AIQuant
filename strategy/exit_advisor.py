@@ -30,6 +30,16 @@ DEFAULT_PARTIAL_TP = 0.10       # 浮盈 +10% 减半
 DEFAULT_TRAILING_PCT = OVERSOLD_REBOUND_V4.get("trailing_pct", 0.10)
 DEFAULT_MAX_HOLD_DAYS = 10
 
+# 持仓诊断链路的「中线移动止盈回撤」专用值。
+# ⚠ 2026-09-19：**不跟随** mid_trailing_pct（当日由 0.10 收紧到 0.05）。
+# 原因：本链路走 evaluate_exit（快照版），其规则 3「移动止盈」是**无启动线**的——
+# 只要自持仓最高点回撤 ≥ trailing_pct 即清仓；而推荐出场跟踪走
+# evaluate_exit_by_prices，那里的移动止盈需先浮盈达标（partial_tp）才启动。
+# 两条链路语义不同：收紧到 0.05 会让持仓诊断在「+5% 浮盈后回撤 5%」就提示清仓，
+# 极易被日内噪声扫出。故此处保持 0.10 宽回撤（−6% 硬止损在下层兜底，不会出现
+# 移动止盈独自吃掉 10% 亏损的情形）。
+LIVE_MID_TRAILING_PCT = 0.10
+
 
 def atr_dynamic_stop_pct(df: pd.DataFrame) -> Optional[float]:
     """当日「ATR 自适应止损」比例（返回负小数，如 -0.0845）——**每日重算**。
@@ -358,13 +368,31 @@ def evaluate_exit_by_prices(
     # 防御：非法启动线（<=0）视为未设置，回退用 take_profit 作启动线
     if partial_tp is not None and partial_tp <= 0:
         partial_tp = None
+    launch_ratio = None   # 启动线的浮盈比例（仅 partial_tp<1 时有值），供倒挂校验用
     # 启动线双语义：partial_tp < 1 视为浮盈比例（换算为绝对价，如 0.10 → entry×1.10），
     # >= 1 视为绝对价（如 110.0）。调用方 _exit_trailing_params 传比例
     # （short 0.10 / mid 0.10 / long 0.20）；take_profit 恒为绝对价（信号自带），作兜底启动线。
     if partial_tp is not None and partial_tp < 1.0:
+        # 保留原始浮盈比例：供下方「回撤 < 启动线」不变量校验使用
+        launch_ratio = float(partial_tp)
         partial_tp = entry_price * (1 + partial_tp)
     launch_line = partial_tp if partial_tp is not None else take_profit
     trailing_enabled = trailing_pct is not None and launch_line is not None
+
+    # ── 不变量兜底（2026-09-19）：移动止盈回撤比例必须 **小于** 启动线浮盈比例 ──
+    # 否则启动后的最低出场价 = entry×(1+launch_ratio)×(1-trailing_pct) < entry，
+    # 「移动止盈」退化成「移动止亏」。mid 曾配置 启动 +6% / 回撤 10%，锁亏 -4.6%
+    # （实测 mid 已出场均值 -2.62%、胜率 28.8%，网格单调，见 strategy_params
+    # ::mid_trailing_pct 注释）。此处按 0.8× 自动收窄兜底，避免任何调用方再踩。
+    if trailing_enabled and launch_ratio is not None and trailing_pct >= launch_ratio:
+        corrected = max(0.01, round(launch_ratio * 0.8, 4))
+        try:
+            print(f"[exit_advisor] ⚠ 移动止盈参数倒挂：回撤 {trailing_pct:.4f} >= "
+                  f"启动线 {launch_ratio:.4f}，自动收窄至 {corrected:.4f}"
+                  f"（锁利下限 {(1 + launch_ratio) * (1 - corrected) - 1:+.2%}）")
+        except Exception:
+            pass
+        trailing_pct = corrected
 
     # 推荐日之后的交易日（含买入日）
     if hasattr(df.index, 'strftime'):

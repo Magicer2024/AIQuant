@@ -46,3 +46,8 @@ config/llm_config.yaml
 .agents/
 .claude/
 .codebuddy/
+
+# CLI 插件 / hook 运行时状态（非项目产物）
+.mimosa/
+.v2c/
+.video_agent/

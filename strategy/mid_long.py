@@ -173,6 +173,18 @@ def scan_long_term(df: pd.DataFrame, min_rows: int = 250,
 
     止损：MA120 × long_ma_stop_mult（默认 0.95，跌破长期趋势线离场）
     止盈：入场价 × 1.5（长线目标位，实战中建议移动止盈）
+
+    2026-09-20 补充输出（供票池过滤与连续排序键使用）
+    ------------------------------------------------
+    - `long_mask`：四个条件的 bitmask（bit0 趋势 / bit1 斜率 / bit2 低波 / bit3 回撤受控）
+    - `vol60` / `dd250`：连续特征值
+
+    原因：fusion_score 只有 3 档（见 long_order_clause 注释），排序零信息量；
+    且实测「score>=2.0」票池长期超额 **-0.92%、t=-7.30**（2015-2026，11 年里 8 年为负）。
+    逐 mask 拆解后发现负 alpha 主体是 mask=11（趋势+斜率+浅回撤但**高波动**，日均 165 只，
+    超额 -0.90%），而 mask=7/15（含低波）超额 +0.53~0.56%
+    ⇒ 必须把「低波」从事后加分改成**票池必需条件**，并用连续键排序。
+    详见 reference/long-selection.md §7。
     """
     if df is None or len(df) < min_rows:
         return None
@@ -191,32 +203,43 @@ def scan_long_term(df: pd.DataFrame, min_rows: int = 250,
 
     score = 0.0
     triggers: list[str] = []
+    # bitmask：bit0 趋势 / bit1 斜率 / bit2 低波 / bit3 回撤受控
+    long_mask = 0
+    vol60_val: float | None = None
+    dd_val: float | None = None
 
     # 1) 长趋势向上
     if last_ma60 > last_ma120 and last_close > last_ma120:
         score += 1.0
+        long_mask |= 1
         triggers.append("MA60>MA120 且股价站上 MA120")
 
     # 2) MA120 斜率向上
     if len(ma120) > 21 and not math.isnan(ma120.iloc[-22]):
         if last_ma120 > float(ma120.iloc[-22]):
             score += 1.0
+            long_mask |= 2
             triggers.append("MA120 斜率向上")
 
     # 3) 低波动
     ret = close.pct_change().dropna()
     if len(ret) >= 60:
         vol_annual = float(ret.tail(60).std() * math.sqrt(252))
+        if math.isfinite(vol_annual):
+            vol60_val = vol_annual
         if math.isfinite(vol_annual) and vol_annual < vol_max:
             score += 0.5
+            long_mask |= 4
             triggers.append(f"60 日年化波动率 {vol_annual * 100:.0f}%（低波）")
 
     # 4) 距高点回撤受控
     high_250 = float(close.tail(250).max())
     if high_250 > 0:
         dd = 1.0 - last_close / high_250
+        dd_val = dd
         if dd < max_drawdown_from_high:
             score += 0.5
+            long_mask |= 8
             triggers.append(f"距 250 日高点回撤 {dd * 100:.0f}%（受控）")
 
     if score < score_threshold or not triggers:
@@ -237,4 +260,10 @@ def scan_long_term(df: pd.DataFrame, min_rows: int = 250,
         "take_profit": round(last_close * 1.5, 2),
         "trade_date": trade_date,
         "triggers": triggers,
+        # 2026-09-20 新增：票池过滤（long_mask）与连续排序特征（vol60 / dd250）
+        "long_mask": long_mask,
+        "vol60": (round(vol60_val, 6) if vol60_val is not None
+                  and math.isfinite(vol60_val) else None),
+        "dd250": (round(dd_val, 6) if dd_val is not None
+                  and math.isfinite(dd_val) else None),
     }

@@ -24,9 +24,36 @@ from core.db import (
     has_watchlist_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
     # 龙虎榜（隔日动量信号线）
     upsert_lhb_detail, get_latest_lhb_date, get_lhb_map_for_date,
+    # 龙虎榜机构专用席位（机构建仓跟踪，独立数据轨道）
+    upsert_lhb_jg_detail, get_latest_lhb_jg_date, get_lhb_jg_rows,
 )
 from qlib_engine.data_bridge import append_daily_data, batch_append_daily, append_calendar_dates
 from qlib_engine import init_qlib as _init_qlib
+
+
+def sync_lhb_jg(start_date: str, end_date: str, verbose: bool = True) -> int:
+    """同步龙虎榜「机构专用席位」买卖统计（供机构建仓跟踪）。
+
+    与 stock_lhb_detail 分离存放，因为机构表**保留原始多行**：同一股票同日会因
+    多个上榜原因各占一行，而金额字段的统计窗口随原因变化（单日榜 == 当日额，
+    「连续三个交易日」榜 == 近 3 日累计额），按票聚合会把 3 日额混成单日额。
+    详见 core/db.py 的 stock_lhb_jg_detail 表注释。
+
+    独立于 NEXT_DAY_MOMENTUM / SURGE_BREAKOUT 开关：机构跟踪是数据积累，
+    不依赖信号是否启用。抓取失败不阻断同步主流程。
+    """
+    try:
+        from core.data_fetcher import fetch_lhb_jg_detail
+        if verbose:
+            print(f"\n>>> 同步龙虎榜机构席位 {start_date}~{end_date}...")
+        df = fetch_lhb_jg_detail(start_date, end_date)
+        n = upsert_lhb_jg_detail(df) if df is not None and not df.empty else 0
+        if verbose:
+            print(f">>> 机构席位同步完成，写入/更新 {n} 行")
+        return n
+    except Exception as e:
+        print(f"  [WARN] 机构席位同步失败（不阻断同步主流程）: {e}")
+        return 0
 
 
 def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") -> int:
@@ -127,6 +154,7 @@ from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.next_day_momentum import scan_next_day_momentum
 from strategy.surge_breakout import scan_surge_breakout
 from strategy.pullback_dip import scan_pullback_dip
+from strategy.first_reversal import scan_first_reversal
 from strategy.rec_filters import (
     trend_gate_series, quality_series, passes_quality,
     chase_filter_series, chase_filter, extension_filter_series,
@@ -134,7 +162,8 @@ from strategy.rec_filters import (
 )
 from strategy.indicators import calc_atr
 from config.strategy_params import (SHORT_ENGINE, NEXT_DAY_MOMENTUM,
-                                    SURGE_BREAKOUT, PULLBACK_DIP)
+                                    SURGE_BREAKOUT, PULLBACK_DIP,
+                                    FIRST_REVERSAL)
 
 # 短线抄底引擎选择：pure_bottom = v1 已反弹（线上默认，双口径回测验证组合）；
 # pure_bottom_v2 = 买回踩平滑版（P1-2.1 灰度，tools/_eval_pullback.py 34 cohort：
@@ -1041,6 +1070,9 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         except Exception as e:
             print(f"  [WARN] 龙虎榜同步失败（不阻断同步主流程）: {e}")
 
+    # 同步龙虎榜机构专用席位统计（机构建仓跟踪数据轨道）
+    sync_lhb_jg(start_date, end_date, verbose)
+
     log_sync("daily_sync", len(stocks), success_n, failed_n,
              elapsed, f"增量 {start_date}~{end_date} 单线程")
 
@@ -1224,13 +1256,15 @@ _SIGNAL_INSERT_SQL = """
        vol_score, ma_score, diverge_score, bottom_score, whale_score,
        trigger_list, buy_price, stop_loss, take_profit,
        buy_volume, buy_money, sent_wechat, created_at,
-       horizon, strategy, pct_above_ma20)
+       horizon, strategy, pct_above_ma20, chip_conc, vol_ratio,
+       long_mask, vol60, dd250, long_rank_key)
     VALUES
       (:scan_date, :trade_date, :code, :name, :price, :fusion_score,
        :vol_score, :ma_score, :diverge_score, :bottom_score, :whale_score,
        :trigger_list, :buy_price, :stop_loss, :take_profit,
        :buy_volume, :buy_money, :sent_wechat, :created_at,
-       :horizon, :strategy, :pct_above_ma20)
+       :horizon, :strategy, :pct_above_ma20, :chip_conc, :vol_ratio,
+       :long_mask, :vol60, :dd250, :long_rank_key)
 """
 
 
@@ -1275,6 +1309,32 @@ def _surge_market_ok() -> bool:
         return True
 
 
+def _first_rev_market_pct(scan_date=None):
+    """「反转首日」热门日门控所需的当日全市场平均涨幅（%）。
+
+    实测该线分档不单调（>+1% 热门档超额仍为正 +0.130pp），故 FIRST_REVERSAL
+    ["max_market_pct"] 默认 None = 不做门控；此时直接返回 None，不查库。
+    需要时可显式设阈值启用（口径与 _surge_market_ok 一致）。
+    """
+    if not FIRST_REVERSAL.get("enabled") or FIRST_REVERSAL.get("max_market_pct") is None:
+        return None
+    try:
+        with get_conn() as conn:
+            if scan_date:
+                row = conn.execute(
+                    "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
+                    "WHERE trade_date = ?", (scan_date,)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT AVG(pct_change) AS avg_pct FROM daily_price "
+                    "WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)"
+                ).fetchone()
+        avg_pct = row["avg_pct"] if row else None
+        return float(avg_pct) if avg_pct is not None else None
+    except Exception:
+        return None
+
+
 def _mid_weak_market_ok(scan_date=None) -> bool:
     """中线弱市闸门：指定交易日全市场平均涨幅 > mid_weak_market_gate（默认 -0.5%）
     才放行中线信号（2026-08-19 三过滤入场的第四重过滤，口径见
@@ -1307,7 +1367,9 @@ def _mid_weak_market_ok(scan_date=None) -> bool:
 def _build_signal_records(df, code, name, total_shares, sig_threshold,
                           stop_loss_sc, take_profit_sc, lhb_row=None,
                           scan_date=None, reuse_scores=False,
-                          surge_ok=False, mid_weak_ok=True) -> list:
+                          surge_ok=False, mid_weak_ok=True,
+                          circ_shares=None, first_rev_ok=False,
+                          first_rev_market_pct=None) -> list:
     """
     对单只股票的日线 df 生成 stock_signal 记录列表（与 recalc_all_scores 同口径）。
 
@@ -1318,6 +1380,9 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
 
     :param reuse_scores: True 时短线复用 daily_price 已算好的分数列（仅限单日评估，
         须在 sync_strategy_score 写库之后调用，否则回退全量重算）。
+    :param circ_shares: 流通股本（股），用于筹码因子的换手率回退。
+        ⚠ 与 total_shares 是同一份数据的副本（见 docs/chip-peak-mktcap-verification.md §13：
+        两列都是**流通股本**），单独传参只是为了日后命名修正时不踩坑；缺失回退 total_shares。
     :return: list[dict]（stock_signal 行），可能为空
     """
     import json as _json
@@ -1339,6 +1404,116 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
         if m and m > 0 and close_val:
             return round(float(close_val) / m - 1.0, 4)
         return 0.0
+
+    # ── 筹码集中度 chip_conc（2026-09-16，步骤②影子列）────────────────────
+    # 只写列、不改排序（排序开关 short_chip_sort_prioritize 默认 0）；任何异常记
+    # NULL，绝不崩链路（NULL 在排序时被 COALESCE 到 9.9 排最后，与历史行等价）。
+    #
+    # ⚠ 为什么这里要补读更长历史：筹码分布是**几何衰减的无限记忆**，不是滚动窗口
+    #   指标。decay_floor=0.003 使低换手股的记忆期约 330 个交易日，warmup 需 ~1300 行
+    #   才收敛到与回测缓存同值。而增量路径只读 scan_date 前 700 自然日（≈480 交易日）
+    #   —— 对换手 >2% 的票（记忆期 77 日）完全够，但低换手票不够。
+    #   证据 tests/_probe_chip_warmup.py（87 只 × 3 日）：
+    #     换手 >2%   → |差| 中位 0.000（≤1% 观测 >0.005）
+    #     换手 1-2%  → 0.000（11% 观测 >0.005）
+    #     换手 0.5-1%→ 0.005（60%）
+    #     换手 0.2-0.5% → 0.036（83%）
+    #     换手 <0.2% → 0.236（100%）  ← conc 量级才 0.1~0.5
+    #   而线上短线候选池换手 <1% 的信号占 **12.3%**
+    #   （tests/_probe_chip_pool_turnover.py，53,065 条 2026 年 short 记录）。
+    #   ⇒ 若不补读，这 12% 的行写的是"另一个因子"，且偏斜集中在低换手/大盘角落，
+    #     与前向 A/B 的判据相关 → 会污染结论。故必须保证 warmup。
+    #   补读只对**真正产出 short 记录**的股票触发（日均几十只），代价可忽略；
+    #   全量重算路径本就是全历史，不触发。
+    #
+    # ⚠ 窗口取**固定长度尾部**而非"读回来多少算多少"：筹码是无限记忆，warmup 只是
+    #   收敛而非确定 —— 实测同一票 1300 行与 1500 行仍差 ~1e-5 量级，会导致
+    #   "同样的库、同样的日期，两次跑出不同 chip_conc"，影子列不可复现。
+    #   故一律 `tail(_CHIP_WARMUP_ROWS)` ⇒ 与读取路径无关的确定值，且把单票计算量
+    #   上限钉死在 1500 行（全历史读取的票也不再变慢）。增量/全量两条路径**逐位一致**。
+    #   注：历史回测缓存用的是固定日历起点（PRICE_START=2021-06-01），对 2023 年样本
+    #   只有 ~400 行 warmup —— 那是回测自身的口径瑕疵（早期低换手股的 conc 未收敛）。
+    #   本列用更充分的 1500 行，属**更正确的口径**；前向测试验的就是它，故无冲突。
+    _CHIP_WARMUP_ROWS = 1500
+    _chip_state = {"done": False, "f": None}
+    _cs_chip = circ_shares if (circ_shares and circ_shares > 0) else total_shares
+
+    # ── 长线波动收敛度 vol_ratio（2026-09-19 落地，long 组排序键）──────────
+    # vol_ratio = 60 日年化波动 ÷ 250 日年化波动。与 chip_conc 不同，它是**有限
+    # 记忆滚动窗口**（最长 250 日），history 不足时补读即可，不存在 warmup 收敛问题。
+    # 需要 ≥250 个交易日；不足则补读 400 自然日窗口，仍不足记 NULL（排序 COALESCE
+    # 到 9.9 排最后，等价该键不生效）。整只股票只算一次。
+    _vr_state = {"done": False, "s": None}
+
+    def _vol_ratio_at(ts) -> float | None:
+        import math as _m
+        if not _vr_state["done"]:
+            _vr_state["done"] = True
+            try:
+                vdf = df
+                if len(vdf) < 260 and scan_date:
+                    _start = (pd.Timestamp(scan_date)
+                              - timedelta(days=520)).strftime("%Y-%m-%d")
+                    _long = get_daily_price(code, start_date=_start,
+                                            end_date=scan_date)
+                    if _long is not None and len(_long) > len(vdf):
+                        vdf = _long
+                _r = vdf["close"].astype(float).pct_change()
+                _v60 = _r.rolling(60).std() * _m.sqrt(252.0)
+                _v250 = _r.rolling(250).std() * _m.sqrt(252.0)
+                _vr_state["s"] = (_v60 / _v250).replace(
+                    [float("inf"), float("-inf")], float("nan"))
+            except Exception as _e:
+                _vr_state["s"] = None
+                print(f"  [WARN] {code} vol_ratio 计算失败（记 NULL）: {_e}")
+        s = _vr_state["s"]
+        if s is None or len(s) == 0:
+            return None
+        try:
+            v = s.get(ts)
+        except Exception:
+            return None
+        if v is None:
+            return None
+        try:
+            v = float(v)
+        except Exception:
+            return None
+        return v if _m.isfinite(v) and v > 0 else None
+
+    def _chip_conc_at(ts) -> float | None:
+        """ts（信号日）的筹码集中度 conc；失败/缺失返回 None。整只股票只算一次。"""
+        if not _chip_state["done"]:
+            _chip_state["done"] = True
+            try:
+                from strategy.chip import compute_chip_factors
+                cdf = df
+                if len(cdf) < _CHIP_WARMUP_ROWS and scan_date:
+                    _start = (pd.Timestamp(scan_date)
+                              - timedelta(days=2600)).strftime("%Y-%m-%d")
+                    _long = get_daily_price(code, start_date=_start,
+                                            end_date=scan_date)
+                    if _long is not None and len(_long) > len(cdf):
+                        cdf = _long
+                cdf = cdf.tail(_CHIP_WARMUP_ROWS)
+                _chip_state["f"] = compute_chip_factors(cdf, _cs_chip)
+            except Exception as _e:
+                _chip_state["f"] = None
+                print(f"  [WARN] {code} 筹码因子计算失败（chip_conc 记 NULL）: {_e}")
+        f = _chip_state["f"]
+        if f is None or len(f) == 0:
+            return None
+        try:
+            v = f["conc"].get(ts)
+        except Exception:
+            return None
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        if v != v:                      # NaN
+            return None
+        return round(v, 4)
 
     # ── 短线 ATR 自适应止损（2026-09-14 落地，用户决策采纳）──────────────
     # 短线信号自带止损价 = 信号日收盘价 × (1 − clamp(k×ATR14%, floor, cap))，
@@ -1571,6 +1746,10 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             "horizon": sig["horizon"],
             "strategy": sig["strategy"],
             "pct_above_ma20": _pct_above_ma20(pd.Timestamp(sig["trade_date"]), sig["buy_price"]),
+            # 长线票池 bitmask + 连续排序特征（只有 scan_long_term 返回，mid 为 None）
+            "long_mask": sig.get("long_mask"),
+            "vol60": sig.get("vol60"),
+            "dd250": sig.get("dd250"),
         })
 
     # ── 缩量回踩低吸（2026-08-22 独立信号线，short horizon 优先占名额）──
@@ -1671,7 +1850,134 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                     pd.Timestamp(sb_sig["trade_date"]), sb_sig["buy_price"]),
             })
 
+    # ── 反转首日（首页「反转首日观察」栏目专用，2026-09-24）：仅最新交易日 ──
+    # 与今日推荐短线组隔离：strategy='反转首日' 由 /today 与 outcome_tracker 显式剔除
+    # （它不占 Top-N 名额，也不计入推荐复盘胜率）；追加在强势突破之后：同 horizon 同票
+    # 冲突时本线胜出——它给出的是「首日位置」这一最具体的信息。
+    # ⚠ 观察池已上线（FIRST_REVERSAL["enabled"]=True）：实测市场中性超额 +0.174pp
+    #    t=+2.80 三年一致，但胜率 49.5% 未过 §6C 的 52% 门槛，定位为观察池而非推荐线。
+    #    置 enabled=False 可一键下线，不影响任何现有短线链路。
+    if first_rev_ok:
+        fr_sig = scan_first_reversal(
+            df, name, total_shares, params=FIRST_REVERSAL,
+            market_pct=first_rev_market_pct, code=code)
+        if fr_sig and passes_quality(name, df, total_shares):
+            records.append({
+                "scan_date": fr_sig["trade_date"],
+                "trade_date": fr_sig["trade_date"],
+                "code": code,
+                "name": name or code,
+                "price": fr_sig["buy_price"],
+                "fusion_score": fr_sig["fusion_score"],
+                "vol_score": 0,
+                "ma_score": 0,
+                "diverge_score": 0,
+                "bottom_score": 0,
+                "whale_score": 0,
+                "trigger_list": _json.dumps(fr_sig["triggers"], ensure_ascii=False),
+                "buy_price": fr_sig["buy_price"],
+                "stop_loss": fr_sig["stop_loss"],
+                "take_profit": fr_sig["take_profit"],
+                "buy_volume": 0,
+                "buy_money": 0,
+                "sent_wechat": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "horizon": fr_sig["horizon"],
+                "strategy": fr_sig["strategy"],
+                "pct_above_ma20": _pct_above_ma20(
+                    pd.Timestamp(fr_sig["trade_date"]), fr_sig["buy_price"]),
+            })
+
+    # ── 筹码集中度影子列统一回填（2026-09-16）─────────────────────────────
+    # 放在末尾统一回填、不改上面 6 处 records.append 的键集合：INSERT 用命名参数
+    # （_SIGNAL_INSERT_SQL 的 :chip_conc），少一个键会直接报绑定错误。
+    # 只有 short 组写值；mid/long/动量/回踩/强势突破的筹码有效性未验证
+    # （筹码只在短线 T+5 上验过）→ 一律 NULL，勿擅自扩用。
+    for _r in records:
+        _r["chip_conc"] = (_chip_conc_at(_r["trade_date"])
+                           if _r.get("horizon") == "short" else None)
+        # vol_ratio：只写 long 组（只在长线 T+60 上验过；short/mid 一律 NULL）
+        _r["vol_ratio"] = (_vol_ratio_at(_r["trade_date"])
+                           if _r.get("horizon") == "long" else None)
+        # ── 长线选股重设计（2026-09-20）：票池 bitmask + 连续排序特征 ──
+        # long_mask / vol60 / dd250 由 scan_long_term 直接给出（只 long 组有值）。
+        # long_rank_key 是**横截面**百分位加权，必须等当日全部 long 信号写完才能算，
+        # 由 recompute_long_rank_key(scan_date) 在 INSERT 之后统一回填。
+        if _r.get("horizon") == "long":
+            _r["long_mask"] = _r.get("long_mask")
+            _r["vol60"] = _r.get("vol60")
+            _r["dd250"] = _r.get("dd250")
+        else:
+            _r["long_mask"] = None
+            _r["vol60"] = None
+            _r["dd250"] = None
+        _r.setdefault("long_rank_key", None)
+
     return records
+
+
+def recompute_long_rank_key(scan_date: str | None = None) -> int:
+    """回填 long 组的横截面排序键 `long_rank_key`（幂等，可重复执行）。
+
+    long_rank_key = (w_vol × pctile(vol60) + w_dd × pctile(dd250))，升序取 topN，
+    其中 pctile 是**当日票池内**的百分位排名（0~1）。
+
+    ⚠ 为什么必须预计算而不能写成 SQL 字典序或窗口函数嵌套：
+      1. vol60 / dd250 都是连续值，几乎无并列 ⇒ `ORDER BY vol60, dd250` 会退化成
+         vol60 单键（项目铁律：连续值多键不能靠字典序）。
+      2. 百分位的分母是「当日票池大小」，随票池过滤条件变化；写入时逐只扫描
+         还看不到横截面，只能事后统一算。
+      3. 预计算成普通列后，三处出口（今日推荐 / 出场跟踪 / recommend_outcome 导入）
+         只换 ORDER BY 字符串，SQL 骨架无需改动。
+
+    ⚠ 票池必须与回测口径一致：只在对 `(long_mask & 7) = 7` 的票内排名
+      （趋势+斜率+低波）。池外的票 long_rank_key 保持 NULL，排序时 COALESCE
+      到大值排最后。
+
+    Args:
+        scan_date: 只算该信号日；None = 全表按日重算（回填历史用）。
+
+    Returns:
+        更新的行数。
+    """
+    from config.strategy_params import get_param
+    w_vol = float(get_param("long_rank_w_vol"))
+    w_dd = float(get_param("long_rank_w_dd"))
+
+    from core.db import get_conn
+    with get_conn() as conn:
+        if scan_date:
+            days = [scan_date]
+        else:
+            days = [r[0] for r in conn.execute(
+                "SELECT DISTINCT scan_date FROM stock_signal "
+                "WHERE COALESCE(horizon,'short')='long' ORDER BY scan_date")]
+        n = 0
+        for d in days:
+            n += conn.execute(f"""
+                UPDATE stock_signal
+                SET long_rank_key = (
+                    SELECT ({w_vol} * p.r_vol + {w_dd} * p.r_dd) / MAX(1, p.n - 1)
+                    FROM (
+                        SELECT code,
+                               (ROW_NUMBER() OVER (ORDER BY vol60 ASC) - 1.0) AS r_vol,
+                               (ROW_NUMBER() OVER (ORDER BY dd250 ASC) - 1.0) AS r_dd,
+                               COUNT(*) OVER () AS n
+                        FROM stock_signal
+                        WHERE scan_date = ?
+                          AND COALESCE(horizon, 'short') = 'long'
+                          AND (long_mask & 7) = 7
+                          AND vol60 IS NOT NULL AND dd250 IS NOT NULL
+                    ) p
+                    WHERE p.code = stock_signal.code
+                )
+                WHERE scan_date = ?
+                  AND COALESCE(horizon, 'short') = 'long'
+                  AND (long_mask & 7) = 7
+                  AND vol60 IS NOT NULL AND dd250 IS NOT NULL
+            """, (d, d)).rowcount
+        conn.commit()
+    return n
 
 
 def _run_post_recalc_hooks() -> dict:
@@ -1795,6 +2101,12 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
     if verbose and SURGE_BREAKOUT.get("enabled"):
         print(f"  [强势突破] 大盘门控: {'放行' if _surge_ok else '拦截（全市场过热）'}")
 
+    # 反转首日（2026-09-24）：观察池已上线（enabled=True）；门控 max_market_pct 为 None 时不查库
+    _first_rev_ok = bool(FIRST_REVERSAL.get("enabled"))
+    _first_rev_pct = _first_rev_market_pct(scan_date)
+    if verbose and _first_rev_ok:
+        print(f"  [反转首日] 启用中（当日全市场均涨 {_first_rev_pct if _first_rev_pct is not None else 'n/a'}%）")
+
     # 中线弱市闸门（全市场一次性判定，弱市日不产生中线信号）
     _mid_weak_ok = _mid_weak_market_ok(scan_date)
     if verbose:
@@ -1824,13 +2136,16 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
                 df = get_daily_price(code, end_date=scan_date)
                 if df is None or len(df) < 30:
                     continue
-            _ts = (_mktcap_map.get(code) or {}).get("total_shares")
+            _mk = _mktcap_map.get(code) or {}
+            _ts, _cs = _mk.get("total_shares"), _mk.get("circ_shares")
             _recs = _build_signal_records(
                 df, code, name_map.get(code) or code, _ts,
                 SIG_THRESHOLD, STOP_LOSS_SC, TAKE_PROFIT_SC,
                 lhb_row=_lhb_map.get(code), scan_date=scan_date,
                 reuse_scores=True, surge_ok=_surge_ok,
-                mid_weak_ok=_mid_weak_ok)
+                mid_weak_ok=_mid_weak_ok, circ_shares=_cs,
+                first_rev_ok=_first_rev_ok,
+                first_rev_market_pct=_first_rev_pct)
             sig_records.extend(_recs)
             n_success += 1
         except Exception as e:
@@ -1852,6 +2167,13 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
         if sig_records:
             conn.executemany(_SIGNAL_INSERT_SQL, sig_records)
         conn.commit()
+    # long 排序键是**横截面**百分位，必须等当日全部 long 信号写完才能算
+    try:
+        _n = recompute_long_rank_key(scan_date)
+        if verbose and _n:
+            print(f"  long 排序键回填 {_n} 条（{scan_date}）")
+    except Exception as _e:
+        print(f"  [WARN] long 排序键回填失败（不影响主流程）: {_e}")
 
     elapsed = time.time() - start
     if verbose:
@@ -1971,6 +2293,12 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     if SURGE_BREAKOUT.get("enabled"):
         print(f"  [强势突破] 大盘门控: {'放行' if _surge_ok else '拦截（全市场过热）'}")
 
+    # 反转首日（2026-09-24）：观察池已上线（enabled=True）
+    _first_rev_ok = bool(FIRST_REVERSAL.get("enabled"))
+    _first_rev_pct = _first_rev_market_pct(None)
+    if _first_rev_ok:
+        print(f"  [反转首日] 启用中（当日全市场均涨 {_first_rev_pct if _first_rev_pct is not None else 'n/a'}%）")
+
     # 中线弱市闸门（全量重算只评最新交易日，scan_date=None 取最新日）
     _mid_weak_ok = _mid_weak_market_ok(None)
     print(f"  [中线] 弱市闸门: {'放行' if _mid_weak_ok else '拦截（全市场弱势）'}")
@@ -1993,14 +2321,17 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
             df = get_daily_price(code)
             if df is None or len(df) < 30:
                 continue
-            _ts = (_mktcap_map.get(code) or {}).get("total_shares")
+            _mk = _mktcap_map.get(code) or {}
+            _ts, _cs = _mk.get("total_shares"), _mk.get("circ_shares")
             # 信号生成与写库口径完全复用增量路径的 _build_signal_records
             # （全量：短线逐历史日 + 中/长线/动量只评最新日）
             _recs = _build_signal_records(
                 df, code, name, _ts, SIG_THRESHOLD,
                 STOP_LOSS_SC, TAKE_PROFIT_SC,
                 lhb_row=_lhb_map.get(code), surge_ok=_surge_ok,
-                mid_weak_ok=_mid_weak_ok)
+                mid_weak_ok=_mid_weak_ok, circ_shares=_cs,
+                first_rev_ok=_first_rev_ok,
+                first_rev_market_pct=_first_rev_pct)
             sig_records.extend(_recs)
             total_days += len(df)
         except Exception as e:
@@ -2020,6 +2351,13 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
         if sig_records:
             conn.executemany(_SIGNAL_INSERT_SQL, sig_records)
         conn.commit()
+    # long 排序键（横截面百分位，需整日信号齐了才能算）
+    try:
+        _n = recompute_long_rank_key()
+        if _n:
+            print(f"  long 排序键回填 {_n} 条")
+    except Exception as _e:
+        print(f"  [WARN] long 排序键回填失败（不影响主流程）: {_e}")
     print(f"  stock_signal 写入完成: {len(sig_records)} 条记录（已清理重算范围内旧短线信号）")
 
     elapsed = time.time() - start
@@ -2178,6 +2516,10 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         except Exception as e:
             if verbose:
                 print(f"  [WARN] 龙虎榜同步失败（不阻断同步主流程）: {e}")
+
+    # 同步龙虎榜机构专用席位统计（机构建仓跟踪数据轨道），与上同区间
+    if total_rows > 0:
+        sync_lhb_jg(min(trade_dates), max(trade_dates), verbose)
 
     # 同步主要指数（供市场速览 / 大盘择时）—— 与个股快路径同源（东财直连），
     # 避免 index_daily 滞后于个股行情造成「市场速览」指数与涨跌家数日期不一致；
