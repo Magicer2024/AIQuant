@@ -45,6 +45,23 @@ COOLDOWN_DAYS = 3               # 同一股票卖出后冷却期（天）
 POSITION_PLAN_ACCOUNT = 10000    # 建仓计划参考账户规模（元，实际资金约 1 万）
 POSITION_PLAN_MAX_PCT = 0.20     # 单股最大仓位占比（max_amount = 账户×占比）
 
+# ── 研究回测资金（与个人建仓计划账户分离，方案 E2）──────────────
+# 研究回测默认资金单独命名与展示，不把所有研究回测强制改成 1 万元；
+# 个人推荐建仓计划仍读 POSITION_PLAN_ACCOUNT（约 1 万），两者互不覆盖。
+RESEARCH_CAPITAL = 1_000_000     # 研究回测默认初始资金（元）
+RESEARCH_CAPITAL_LABEL = "研究资金（默认，非个人账户）"
+
+# ── 交易约束（整手 / 分批 / 涨跌停，方案 E2）──────────────
+LOT_SIZE = 100                   # A 股最小交易单位（1 手 = 100 股）
+PLAN_BATCH_WEIGHTS = (0.5, 0.3, 0.2)  # 建仓分批目标权重（试仓/回踩加仓/深度回踩）
+# 涨跌停幅度（用于保守成交判定）：主板 ±10%，科创/创业 ±20%，ST ±5%。
+MAIN_BOARD_LIMIT_PCT = 0.10
+GEM_STAR_LIMIT_PCT = 0.20        # 创业板 30x / 科创板 68x
+ST_LIMIT_PCT = 0.05
+# 主板白名单前缀：沪市主板 60x（600/601/603/605），深市主板 00x（000/001/002/003）。
+# 明确白名单而非黑名单：北交所 8x/4x、B 股 9x/2x、科创 68x、创业 30x 一律默认不可交易。
+MAIN_BOARD_PREFIXES = ("60", "00")
+
 # ── 板块限制（小资金，未开通科创/创业板权限）──────
 MAIN_BOARD_ONLY = True           # 每日推荐仅保留主板（沪 60x / 深 00x）
 # 创业板 300/301/302… 与科创板 688/689… 各自占满 30x / 68x 整段，
@@ -53,21 +70,29 @@ EXCLUDED_BOARD_PREFIXES = ("30", "68")
 
 
 def is_main_board(code) -> bool:
-    """代码是否属于可交易主板（MAIN_BOARD_ONLY=False 时恒为 True）。"""
+    """代码是否属于可交易主板（MAIN_BOARD_ONLY=False 时恒为 True）。
+
+    采用明确白名单（沪 60x / 深 00x，见 MAIN_BOARD_PREFIXES）而非黑名单：
+    异常代码（非 6 位 / 含非数字）与未支持板块（北交所 8x/4x、B 股 9x/2x、
+    科创 68x、创业 30x）一律默认不可交易，新号段不会漏进个人推荐池（方案 E2）。
+    """
     if not MAIN_BOARD_ONLY:
         return True
-    c = str(code or "")
-    return not c.startswith(EXCLUDED_BOARD_PREFIXES)
+    c = str(code or "").strip()
+    if len(c) != 6 or not c.isdigit():
+        return False
+    return c.startswith(MAIN_BOARD_PREFIXES)
 
 
 def main_board_filter(column: str = "code") -> str:
-    """SQL 片段：追加到 WHERE 后用于排除不可交易板块。
+    """SQL 片段：追加到 WHERE 后，仅保留可交易主板（白名单，与 is_main_board 同口径）。
 
-    前缀来自上面的常量、非用户输入，可直接拼接。
+    前缀来自上面的常量、非用户输入，可直接拼接。column 允许带表别名（如 s.code）。
     """
     if not MAIN_BOARD_ONLY:
         return ""
-    return "".join(f" AND {column} NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    likes = " OR ".join(f"{column} LIKE '{p}%'" for p in MAIN_BOARD_PREFIXES)
+    return f" AND ({likes})"
 
 
 def get_personal_config() -> dict:
@@ -98,4 +123,12 @@ def get_personal_config() -> dict:
         "position_plan_account": POSITION_PLAN_ACCOUNT,
         "position_plan_max_pct": POSITION_PLAN_MAX_PCT,
         "main_board_only": MAIN_BOARD_ONLY,
+        # 研究资金（与个人建仓账户分离，单独命名与展示，方案 E2）
+        "research_capital": RESEARCH_CAPITAL,
+        "research_capital_label": RESEARCH_CAPITAL_LABEL,
+        # 交易约束（整手 / 分批 / 涨跌停 / 主板白名单）
+        "lot_size": LOT_SIZE,
+        "plan_batch_weights": list(PLAN_BATCH_WEIGHTS),
+        "main_board_limit_pct": MAIN_BOARD_LIMIT_PCT,
+        "main_board_prefixes": list(MAIN_BOARD_PREFIXES),
     }

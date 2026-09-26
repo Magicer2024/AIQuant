@@ -21,7 +21,7 @@ echo [1/2] Upgrading pip...
 python -m pip install --upgrade pip
 
 echo [2/2] Installing dependencies...
-pip install -r requirements.txt flask flask-cors schedule requests pandas plotly
+pip install -r requirements.txt -c constraints.txt
 
 echo.
 echo ========================================

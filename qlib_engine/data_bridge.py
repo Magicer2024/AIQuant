@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict
 
-from qlib_engine import PROVIDER_URI
+from qlib_engine import PROVIDER_URI, QLIB_ENABLED
 
 
 def append_daily_data(code: str, df_new: pd.DataFrame) -> int:
@@ -29,7 +29,7 @@ def append_daily_data(code: str, df_new: pd.DataFrame) -> int:
     Returns:
         Number of new rows appended.
     """
-    if df_new.empty:
+    if not QLIB_ENABLED or df_new.empty:
         return 0
 
     df = df_new.copy()
@@ -112,6 +112,8 @@ def append_calendar_dates(new_dates: List[str]) -> int:
 
     Returns count of new dates added.
     """
+    if not QLIB_ENABLED:
+        return 0
     cal_path = os.path.join(PROVIDER_URI, "calendars", "day.txt")
     os.makedirs(os.path.dirname(cal_path), exist_ok=True)
 

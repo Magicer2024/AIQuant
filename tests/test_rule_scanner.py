@@ -14,8 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core", "quant.db")
-pytestmark = pytest.mark.skipif(not os.path.exists(_DB), reason="需要本地 quant.db 真实数据")
+# 数据库由 conftest 隔离，测试不依赖本地生产数据。
 
 _TEST_DATE = "2099-12-31"
 
@@ -28,6 +27,9 @@ def _cleanup_signals():
 
 def _install_fakes(monkeypatch):
     """注入合成的启用规则 / 流式行情 / 因子，命中一只股票。"""
+    from core.db import get_conn
+    with get_conn() as conn:
+        conn.execute("INSERT INTO strategy_rules(id,rule_name,rule_type,encoding) VALUES (-99,'单测规则_扫描','test','test')")
     def fake_active_rules():
         return [{
             "id": -99, "rule_name": "单测规则_扫描",

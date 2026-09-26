@@ -198,6 +198,17 @@ def main():
     prog = Progress(prog_path)
     t_start = time.time()
 
+    from config.settings import SIGNAL_MODEL_MODE, require_signal_model_ready
+    require_signal_model_ready()
+    if SIGNAL_MODEL_MODE != "legacy":
+        # 统一模型下历史扫描写 replay，不投影旧表；跟踪单闭环属 C，重放不得建立前向成绩。
+        from core.signal_runtime import replay_signal_range
+        result = replay_signal_range(args.start, args.end, source="stock_deep_signal",
+                                     dry_run=args.dry_run)
+        prog.done(result)
+        _log(f"统一模型历史重放完成（未建跟踪单）：{result.get('run_type')}")
+        return 0
+
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:

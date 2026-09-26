@@ -27,6 +27,8 @@ import pandas as pd
 from core.db import get_conn
 from strategy.factor_lib import compute_all_factors
 from backtest.engine import BacktestParams
+# ── E2c：保守成交约束（一字板/开盘封板/停牌/涨跌停），与 engine.py、建仓计划共用口径 ──
+from utils.trade_constraints import classify_fill_bar, can_fill, board_limit_pct
 
 
 # ─────────────── 条件向量化评估 ───────────────
@@ -178,8 +180,11 @@ def run_rule_backtest(rule: Dict[str, Any],
         hit = ev[ev["passed"] & ev.index.isin(date_set)]
         if hit.empty:
             continue
-        # 收盘价也进 price_data（模拟买卖用）
-        price_data[code] = df[df.index.isin(date_set)][["open", "close"]]
+        # OHLC + 量 + 前收盘进 price_data（模拟买卖 + E2c 保守成交判定用）。
+        # prev_close 在切片前用全历史 shift(1) 计算，回测首日也有有效前收（来自 warmup）。
+        df["prev_close"] = df["close"].shift(1)
+        price_data[code] = df[df.index.isin(date_set)][
+            ["open", "high", "low", "close", "volume", "prev_close"]]
         for dt, row in hit.iterrows():
             signals.setdefault(dt, []).append((code, float(row["strength"])))
 
@@ -200,12 +205,24 @@ def run_rule_backtest(rule: Dict[str, Any],
     equity_curve: List[Dict[str, Any]] = []
     last_close: Dict[str, float] = {}
 
-    def _price(code: str, dt: str, col: str) -> Optional[float]:
+    def _bar(code: str, dt: str) -> Optional[Dict[str, Any]]:
+        """取某股某日原始 bar（open/high/low/close/volume/prev_close）。
+
+        返回 None 表示当日无行情（停牌/未入选/缺数据）；价格字段无效时置 None，
+        volume 保留 0（停牌信号），供 classify_fill_bar 保守判定。
+        """
         pdf = price_data.get(code)
         if pdf is None or dt not in pdf.index:
             return None
-        v = pdf.loc[dt, col]
-        return float(v) if pd.notna(v) and v > 0 else None
+        r = pdf.loc[dt]
+
+        def _f(col: str) -> Optional[float]:
+            v = r.get(col)
+            return float(v) if pd.notna(v) else None
+
+        return {"open": _f("open"), "high": _f("high"), "low": _f("low"),
+                "close": _f("close"), "volume": _f("volume"),
+                "prev_close": _f("prev_close")}
 
     fee_buy = params.commission_rate + params.slippage_rate
     fee_sell = params.commission_rate + params.stamp_tax_rate + params.slippage_rate
@@ -225,8 +242,9 @@ def run_rule_backtest(rule: Dict[str, Any],
         # ── 卖出检查（先卖后买）──
         for code in list(positions.keys()):
             pos = positions[code]
-            close = _price(code, dt, "close")
-            if close is None:
+            bar = _bar(code, dt)
+            close = bar["close"] if bar else None
+            if close is None or close <= 0:
                 continue
             pos["hold_days"] += 1
             reason = None
@@ -239,6 +257,13 @@ def run_rule_backtest(rule: Dict[str, Any],
             elif i == len(trade_dates) - 1:
                 reason = "end_of_data"
             if reason:
+                # E2c 保守成交：一字跌停 / 开盘封跌停 / 停牌 → 卖不出，持仓保留到下一日
+                fill_status, _fr = classify_fill_bar(
+                    "sell", open_=bar["open"], high=bar["high"], low=bar["low"],
+                    close=close, volume=bar["volume"], prev_close=bar["prev_close"],
+                    limit_pct=board_limit_pct(code), price_basis="close")
+                if not can_fill(fill_status):
+                    continue
                 proceeds = pos["shares"] * close * (1 - fee_sell)
                 cash += proceeds
                 pnl = proceeds - pos["cost"]
@@ -269,8 +294,17 @@ def run_rule_backtest(rule: Dict[str, Any],
                     break
                 if code in positions:
                     continue
-                open_p = _price(code, dt, "open")
-                if open_p is None:
+                bar = _bar(code, dt)
+                open_p = bar["open"] if bar else None
+                if open_p is None or open_p <= 0:
+                    continue
+                # E2c 保守成交：一字涨停 / 开盘封涨停 / 停牌 → 开盘买不进，跳过该候选
+                fill_status, _fr = classify_fill_bar(
+                    "buy", open_=open_p, high=bar["high"], low=bar["low"],
+                    close=bar["close"], volume=bar["volume"],
+                    prev_close=bar["prev_close"],
+                    limit_pct=board_limit_pct(code), price_basis="open")
+                if not can_fill(fill_status):
                     continue
                 shares = int(slot_cash / (open_p * (1 + fee_buy)) // 100) * 100
                 if shares < 100:

@@ -17,12 +17,11 @@
 """
 import os
 import sys
-import sqlite3
 import json
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.stdout.reconfigure(encoding="utf-8")
+
 
 import pandas as pd
 
@@ -30,8 +29,6 @@ from core.db import get_conn
 from config.strategy_params import NEXT_DAY_MOMENTUM, QUALITY_FILTER
 from strategy.rec_filters import quality_series, _is_st_name
 
-DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                  "core", "quant.db")
 _SIGNAL_INSERT_SQL = """
     INSERT OR REPLACE INTO stock_signal
       (scan_date, trade_date, code, name, price, fusion_score,
@@ -57,6 +54,14 @@ def main():
     if "--dry-run" in args:
         dry_run = True
 
+    from config.settings import SIGNAL_MODEL_MODE, require_signal_model_ready
+    require_signal_model_ready()
+    if SIGNAL_MODEL_MODE != "legacy":
+        from core.signal_runtime import replay_signal_range
+        result = replay_signal_range(since, strategy_keys=["next_day_momentum"], dry_run=dry_run)
+        print(result)
+        return result
+
     p = NEXT_DAY_MOMENTUM
     min_ratio = float(p.get("min_net_buy_ratio", 10.0))
     stop_pct = float(p.get("stop_loss_pct", -0.04))
@@ -64,8 +69,8 @@ def main():
     # 大跌/跌停剔除（与 strategy/next_day_momentum.py 同口径，默认 -7%）
     max_down = float(p.get("max_down_pct") or 0)
 
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
+    from core.db import connect_db
+    conn = connect_db(readonly=True)
 
     # 1) 动量候选：净买>=阈值 且 非涨停 且 非大跌/跌停（全市场，含创业板）
     where = "WHERE net_buy_ratio >= ? AND pct_change < 9.8"

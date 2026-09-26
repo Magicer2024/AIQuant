@@ -9,37 +9,40 @@ AIQuant 是一套 A 股量化选股与个人评分系统，涵盖数据同步、
 ## Development commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt        # runtime
-pip install -r requirements-dev.txt    # + pytest, pytest-timeout
+# Install dependencies（constraints.txt 锁定可复现版本；基础安装不含 Qlib）
+pip install -r requirements.txt -c constraints.txt         # runtime 基础依赖
+pip install -r requirements-dev.txt -c constraints.txt     # + pytest, pytest-timeout
+pip install -r requirements-qlib.txt -c constraints.txt    # 可选 Qlib（另设 AIQUANT_QLIB_ENABLED=1）
+pip install -r requirements-browser.txt -c constraints.txt # 可选 Playwright（浏览器冒烟测试）
 
 # Run the system
 python app.py                     # Flask API + dashboard (port 5000)
 start.bat                         # Windows 一键启动（检查依赖/杀旧进程/起服务）
 
 # Tests
-python -m pytest tests/ -q        # 全部测试（网络基准类默认 skip）
+python -m pytest tests/ -q -m "not browser"   # 核心测试（浏览器作业单独跑，网络基准类默认 skip）
+AIQUANT_BROWSER_TESTS=1 python -m pytest tests/test_frontend.py -m browser  # 独立浏览器作业（需 Playwright）
 python tests/test_em_speed.py     # 手动跑东财接口测速
 ```
 
 ## Architecture
 
-单进程 Flask 应用，`app.py` 注册 6 个 Blueprint，前端是单文件 `dashboard.html`。
+单进程 Flask 应用，`app.py` 注册 7 个 Blueprint，前端是单文件 `dashboard.html`。
 
 ### Core modules
 
 | Dir | Purpose |
 |-----|---------|
 | `core/` | SQLite 数据层：`db.py`（~12 表，get_conn 上下文管理器）、`sync.py`（行情同步主流程）、`data_fetcher.py`（baostock/AkShare 多源）、`data_cleaner.py`（L1-L6 脏数据过滤）、`em_realtime.py`/`em_kline.py`（东财接口，`fetch_klines_by_date` 降级链：东财直连 → 腾讯 qt.gtimg.cn 批量（500 只/次，全 A ≈10s）→ AkShare）、`em_guard.py`（缓存+频控+配额三道防线）、`task_queue.py` |
-| `core/repository/` | 11 个领域 Repository（stock/price/signal/position/trade/sync/margin/north/futures/lhb/mgmt），db.py 中旧函数正逐步迁移至此 |
+| `core/repository/` | 15 个领域 Repository（stock/price/signal/position/trade/sync/margin/north/futures/lhb/mgmt/outcome/recommendation/rule/task），db.py 中旧函数正逐步迁移至此 |
 | `strategy/` | `scorer.py`（回测/因子流式行情加载工具，仅供 backtest 复用）、`factor_lib.py`、`indicators.py`、`rules_store.py`（含 derive_horizon）、`strategies.py`（短线 5 信号融合）、`mid_long.py`（中线综合/长线趋势扫描）、`strategy.py`（中线综合评分库，被 mid_long 调用）、`intent/parser.py`（自然语言选股）、`stock_deep.py`（个股深度分析：量价关系 + 涨跌节奏 + 买卖建议，供首页「个股深度」面板；含 NaN 安全 KDJ 与 `run_full_market_scan`/`get_market_signal_latest` 全市场深析扫描，结果落库 `stock_deep_signal` 表） |
 | `backtest/` | `engine.py`（可视化回测引擎，BacktestParams 含 risk_free_rate）、`rule_engine.py`（策略规则一键回测+沪深300基准）、`service.py`（任务封装，rule_id 分发 + fitness 回写）、`conditions.py`（条件构建）、`nl_parser.py`（自然语言策略→条件+参数，LLM 主路径+本地正则兑底） |
-| `routes/` | Flask Blueprint：`system` / `sync` / `scoring` / `screen` / `backtest` / `investor` |
-| `scheduler/` | `runner.py` 每日 18:00 盘后自动同步+重算分，`state.py` 共享状态 |
-| `qlib_engine/` | 可选 Qlib 集成；`app.py` 启动时 try/except 初始化，失败自动降级不影响主流程 |
+| `routes/` | Flask Blueprint：`system` / `sync` / `scoring` / `screen` / `backtest` / `optimizer` / `investor` |
+| `scheduler/` | `runner.py` 每日 **19:00** 盘后自动同步+重算分（东财龙虎榜通常 18:30 后才齐全，强势突破硬过滤/隔日动量依赖当日龙虎榜，故 19 点宁晚勿缺）；用独立 Scheduler 实例（不碰全局 schedule）+ 持久化每日安排 + 启动回收中断任务（方案 D），`state.py` 共享状态 |
+| `qlib_engine/` | 可选 Qlib 集成（依赖见 `requirements-qlib.txt`，基础安装不强装、不自动初始化）；`config.settings.QLIB_ENABLED` 默认 False，`init_qlib()` 受其守卫且 `import qlib` 只在函数体内发生，未装/未启用时应用照常启动、同步与打分 |
 | `ai/` | `features.py` 特征工程 + `predictor.py`（RandomForest，模型存 `ai/models/`） |
 | `config/` | `settings.py`（同步/回测/挖掘参数）、`strategy_params.py`、`thresholds.py`、`personal_config.py` |
-| `utils/` | `api.py`（ok/fail 响应封装）、`serialization.py`（NaN/枚举安全 JSON）、`llm_client.py`（OpenAI 兼容 LLM 调用，env 覆盖 yaml）、`cache.py`、`timing.py`、`finance_data.py` |
+| `utils/` | `api.py`（ok/fail 响应封装 + `identity_meta` 身份链元数据：cohort/data_as_of/param_version/signal_model_mode）、`serialization.py`（NaN/枚举安全 JSON）、`trade_constraints.py`（整手/最低佣金/最大余数分批/主板白名单，方案 E2）、`llm_client.py`（OpenAI 兼容 LLM 调用，env 覆盖 yaml）、`cache.py`、`timing.py`、`finance_data.py` |
 
 ### Data flow
 
@@ -71,6 +74,8 @@ python tests/test_em_speed.py     # 手动跑东财接口测速
 
 ## Key architectural notes
 
+- **统一信号模型与模式开关（方案 B–F）**：`SIGNAL_MODEL_MODE=legacy|shadow|v2`（env，默认 `legacy`）。`legacy` 走既有 `stock_signal`/`recommend_outcome` 推荐路径；`shadow` 旁路把计算结果写入新模型（`signal_run`/`signal_event`/`recommendation_batch`/`recommendation_item`/`simulated_trade`）并生成对照批次（cohort=shadow），用户仍读旧接口结果，新批次明确为旁路验证、不冒充已发布；`v2` 以新模型为唯一事实来源。`signal_run`/`signal_event` 受触发器保护**不可改删**（只增审计留痕）。切 v2 需 `config.settings.require_signal_model_ready` 放行（完成闭环 + ≥5 交易日旁路验收），否则除 `/api/health`、`/api/ready` 外的 `/api/*` 返回 503。推荐/复盘响应经 `utils/api.py::identity_meta` 携带身份链（cohort/data_as_of/param_version/signal_model_mode + batch/signal/recommendation/trade ID；legacy 下稳定 ID 为空、绝不伪造）。参数寻优 `strategy/optimizer.py` 在 legacy 无冻结回放条件时降级为「仅诊断」（不再用 OC/CC 代理产建议），采纳前校验基线参数哈希、每次采纳/回滚生成新 `param_version`（旧记录不回写）。
+- **性能测量协议（方案 F2「先测量，再优化」）**：`utils/timing.py` 提供测量原语——`StageTimer`（命名阶段计时）、`percentiles`（P50/P95 最近秩，空样本返回 None 不杜撰）、`peak_memory`（tracemalloc 峰值）、`SqlCounter`+`counting_connection_class`+`trace_sql`（真实 SQL 语句数/游标读取行数观测，Python 3.11 无 `cursor_factory`，故用 Connection 子类重写 `cursor()`/`execute()`）。`tools/bench_endpoints.py` 承载固定协议：同库快照（`--db`）、默认关网（socket 守卫）、冷启动+预热、每接口 ≥30 采样，对今日推荐/出场跟踪/个股深度/历史列表记录墙钟 P50-P95、SQL 数、读行数、峰值内存，结果原样落 `reports/bench_<ts>.json`。**无运行服务+真实数据就没有数字，绝不用猜测冒充提速**；验收门槛（已稳定接口 P95 不回退 >10%、重复查询目标降 30%）以该 JSON 前后对照为准。
 - **db.py 函数迁移中**：`upsert_daily_price`/`get_daily_price` 等已标 deprecated，新代码优先用 `core/repository/` 对应模块；deprecated 函数仍可工作。
 - **写库路径**：行情写入统一走 `core/sync.py::_batch_write_daily_price`（含 data_cleaner 行级校验 + 成交量手→股换算），不要绕过。
 - **追高否决过滤（chase filter）**：短线写库前（`recalc_all_scores` 纯抄底分支）除趋势闸门/质量过滤外，还须过 `strategy/rec_filters.py::chase_filter_series`（config `CHASE_FILTER`）：连续涨停≥3 当日、近 5 日内出现 3 连板冷却期、当日涨停打开（盘中触板未封住）、近 3 日涨幅≥25%，任一命中即不写 stock_signal。背景：000815 三连板启动期被趋势闸门挡掉、涨停打开放量日反而高分进推荐；持仓口径回测被过滤信号胜率 27.9%/均值-2.6%/止损率 64%（远差于保留信号），过滤后信号池均值由负转正。改阈值在 config/strategy_params.py，勿把连板阈值调 >3。

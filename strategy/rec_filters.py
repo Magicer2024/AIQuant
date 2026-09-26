@@ -15,7 +15,8 @@ import math
 import pandas as pd
 
 from config.strategy_params import (SHORT_TREND_GATE, QUALITY_FILTER, CHASE_FILTER,
-                                    EXTENSION_FILTER, RSI_SWEET_SPOT, get_param)
+                                    EXTENSION_FILTER, RSI_SWEET_SPOT, get_param,
+                                    get_strategy_config)
 
 # ST/退市名称关键词（大写归一后匹配，"退" 为中文不受 upper 影响）
 _ST_KEYWORDS = ("ST", "退")
@@ -45,13 +46,14 @@ def trend_gate_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
     逐日趋势闸门布尔序列：收盘价 > MA(ma) 且 MA(ma)_今日 >= MA(ma)_{slope_lookback}日前。
     禁用时全 True；样本不足或数据异常处为 False。
     """
-    cfg = cfg or SHORT_TREND_GATE
+    use_effective = not cfg or cfg is SHORT_TREND_GATE
+    cfg = cfg or get_strategy_config("SHORT_TREND_GATE", SHORT_TREND_GATE)
     if df is None or len(df) == 0:
         return pd.Series(dtype=bool)
     if not cfg.get("enabled", True):
         return pd.Series(True, index=df.index)
 
-    if cfg is SHORT_TREND_GATE:
+    if use_effective:
         # 默认配置走参数覆盖层（优化器采纳建议后即时生效）
         ma_n = int(get_param("trend_gate_ma"))
         slope_lb = int(get_param("trend_gate_slope_lookback"))
@@ -84,7 +86,7 @@ def quality_series(name, df: pd.DataFrame, total_shares: float = None,
         缺 total_shares 时跳过市值项（优雅降级）
     禁用时全 True。
     """
-    cfg = cfg or QUALITY_FILTER
+    cfg = cfg or get_strategy_config("QUALITY_FILTER", QUALITY_FILTER)
     if df is None or len(df) == 0:
         return pd.Series(dtype=bool)
     if not cfg.get("enabled", True):
@@ -141,7 +143,7 @@ def chase_filter_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
     追高否决宁可漏杀不可误杀——它防的是高位接盘，缺数据时不臆断。
     禁用时全 True。仅支持单股票 df（与 trend_gate_series 同约定）。
     """
-    cfg = cfg or CHASE_FILTER
+    cfg = cfg or get_strategy_config("CHASE_FILTER", CHASE_FILTER)
     if df is None or len(df) == 0:
         return pd.Series(dtype=bool)
     if not cfg.get("enabled", True):
@@ -213,7 +215,7 @@ def extension_filter_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
     MA20 样本不足（<20 行）或 close/MA20 缺失时按"不否决"处理（缺数据不臆断，
     与追高否决的降级方向一致——宁可漏杀不可误杀）。
     """
-    cfg = cfg or EXTENSION_FILTER
+    cfg = cfg or get_strategy_config("EXTENSION_FILTER", EXTENSION_FILTER)
     if df is None or len(df) == 0:
         return pd.Series(dtype=bool)
     if not cfg.get("enabled", True):
@@ -255,7 +257,7 @@ def rsi_sweet_spot_series(df: pd.DataFrame, cfg: dict = None) -> pd.Series:
     （简单 rolling(14) 均值，非 Wilder ewm），勿改用 strategy/indicators.calc_rsi，
     否则回测/推荐口径分裂会污染 diag 复验。
     """
-    cfg = cfg or RSI_SWEET_SPOT
+    cfg = cfg or get_strategy_config("RSI_SWEET_SPOT", RSI_SWEET_SPOT)
     if df is None or len(df) == 0:
         return pd.Series(dtype=bool)
     if not cfg.get("enabled", True):

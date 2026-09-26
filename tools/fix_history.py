@@ -750,35 +750,63 @@ def main():
         run_scheduled(args.time, args.source, args.threads, args.rate, args.verbose)
         return
 
-    run_fix_history(
-        codes=args.codes, source=args.source,
-        threads=args.threads, dry_run=args.dry_run,
-        verbose=args.verbose, rate_limit=args.rate,
-    )
+    # 一次性 CLI 修正同样获取 pipeline_write 租约，避免与 web 同步并发改主数据。
+    status, _detail = _run_with_lease(
+        lambda: run_fix_history(
+            codes=args.codes, source=args.source,
+            threads=args.threads, dry_run=args.dry_run,
+            verbose=args.verbose, rate_limit=args.rate,
+        ),
+        source=args.source, dry_run=args.dry_run)
+    if status == "conflict":
+        logger.warning("[CLI] 已有主数据写任务在处理，本次修正未执行；请稍后重试。")
+
+
+def _run_with_lease(run_fn, *, task_type="fix_history", source=None, dry_run=False):
+    """CLI/回补入口获取 pipeline_write 资源租约后再执行，避免与 web 同步并发改主数据。
+
+    至多执行一次 run_fn（不做失败回退重跑，防止重复历史修正）。dry_run 不写主数据，
+    不占租约。任务表不可用时直接执行（无租约）并告警。返回 (status, detail)。
+    """
+    if dry_run:
+        run_fn()
+        return "dry_run", None
+    try:
+        from core import pipeline
+        from core.repository import task_repo
+        from core.db import init_db
+        init_db()
+    except Exception as e:
+        logger.warning(f"[CLI] 任务表不可用，直接执行（无租约）: {e}")
+        run_fn()
+        return "success_no_lease", None
+    r = pipeline.execute_pipeline_task(
+        stages=[pipeline.Stage(task_type, lambda ctx: {"report": str(run_fn())[:500]})],
+        task_type=task_type, resource_group=task_repo.RESOURCE_PIPELINE_WRITE,
+        input={"source": source, "entry": "cli"})
+    if r.get("submit", {}).get("conflict") or r.get("submit", {}).get("reused"):
+        logger.warning(f"[CLI] 已有主数据写任务在处理（task={r.get('task_id')}），本次不执行")
+        return "conflict", r.get("task_id")
+    return r.get("status"), r.get("summary")
 
 
 def run_scheduled(run_time: str, source: str, threads: int, rate: float, verbose: bool):
-    """定时调度模式：每天指定时间自动运行全量修正"""
+    """定时调度模式：每天指定时间自动运行全量修正（独立 Scheduler 实例 + 资源租约）"""
     import schedule
     import signal
-    
+
+    scheduler = schedule.Scheduler()
+
     def job():
         logger.info(f"[定时任务] 开始执行全量历史修正 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        try:
-            run_fix_history(
-                codes=None,
-                source=source,
-                threads=threads,
-                dry_run=False,
-                verbose=verbose,
-                rate_limit=rate,
-            )
-            logger.info(f"[定时任务] 执行完成 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        except Exception as e:
-            logger.error(f"[定时任务] 执行失败: {e}")
+        status, _detail = _run_with_lease(
+            lambda: run_fix_history(codes=None, source=source, threads=threads,
+                                    dry_run=False, verbose=verbose, rate_limit=rate),
+            source=source)
+        logger.info(f"[定时任务] 执行结束（{status}）@ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 设置定时任务
-    schedule.every().day.at(run_time).do(job)
+    # 设置定时任务（本进程独立实例）
+    scheduler.every().day.at(run_time).do(job)
     
     logger.info(f"定时调度模式已启动，每天 {run_time} 自动执行全量修正")
     logger.info("按 Ctrl+C 停止")
@@ -794,7 +822,7 @@ def run_scheduled(run_time: str, source: str, threads: int, rate: float, verbose
     # 主循环
     try:
         while True:
-            schedule.run_pending()
+            scheduler.run_pending()
             time.sleep(60)  # 每分钟检查一次
     except KeyboardInterrupt:
         logger.info("调度器已停止")

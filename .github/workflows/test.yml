@@ -7,9 +7,45 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
+  # 核心测试：Windows + Ubuntu 双平台矩阵，Python 3.11，基础依赖（不含可选 Qlib）。
+  # 浏览器冒烟测试用 -m "not browser" 显式排除，交由下方独立 browser 作业执行。
+  core:
+    name: Core tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+        python-version: [ "3.11" ]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: pip
+        cache-dependency-path: constraints.txt
+
+    # 只装基础 + 测试依赖（constraints.txt 锁定可复现版本）；不装 pyqlib，
+    # 借此在 CI 上持续验证「基础安装不强装 Qlib」时全套核心测试仍通过。
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt -c constraints.txt
+
+    - name: Run core tests
+      run: |
+        python -m pytest tests/ -q --tb=short --timeout=120 -m "not browser"
+
+  # 浏览器冒烟测试：明确执行的独立作业，安装 Playwright + Chromium，
+  # 通过 AIQUANT_BROWSER_TESTS=1 启用，不因未装 Playwright 而长期静默跳过。
+  browser:
+    name: Browser smoke (Playwright)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
     - uses: actions/checkout@v4
@@ -18,20 +54,17 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.11"
+        cache: pip
+        cache-dependency-path: constraints.txt
 
-    - name: Cache pip
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    - name: Install dependencies
+    - name: Install dependencies (browser job)
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements-dev.txt
+        pip install -r requirements-browser.txt -c constraints.txt
+        python -m playwright install --with-deps chromium
 
-    - name: Run tests
+    - name: Run browser smoke tests
+      env:
+        AIQUANT_BROWSER_TESTS: "1"
       run: |
-        python -m pytest tests/ -v --tb=short --timeout=60
+        python -m pytest tests/test_frontend.py -q --tb=short --timeout=120 -m browser

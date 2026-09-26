@@ -32,7 +32,10 @@ class TestSyncProgressAPI(unittest.TestCase):
     def test_concurrent_sync_returns_409(self):
         from routes.sync import _sync_progress
         _sync_progress["running"] = True
-        resp = self.client.post("/api/sync")
+        # 仅验证并发拒绝分支；显式绕过应用测试写屏障，不启动执行器。
+        from unittest.mock import patch
+        with patch.dict(app.config, {"TESTING": False}):
+            resp = self.client.post("/api/sync")
         self.assertEqual(resp.status_code, 409)
         _sync_progress["running"] = False
 

@@ -17,12 +17,11 @@ pullback_dip_series 向量化扫全主板历史（与生产扫描共用同一实
 """
 import os
 import sys
-import sqlite3
 import json
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.stdout.reconfigure(encoding="utf-8")
+
 
 import pandas as pd
 
@@ -31,8 +30,6 @@ from config.strategy_params import PULLBACK_DIP, QUALITY_FILTER
 from strategy.pullback_dip import pullback_dip_series
 from strategy.rec_filters import quality_series, _is_st_name
 
-DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                  "core", "quant.db")
 _SIGNAL_INSERT_SQL = """
     INSERT OR REPLACE INTO stock_signal
       (scan_date, trade_date, code, name, price, fusion_score,
@@ -58,6 +55,14 @@ def main():
     if "--dry-run" in args:
         dry_run = True
 
+    from config.settings import SIGNAL_MODEL_MODE, require_signal_model_ready
+    require_signal_model_ready()
+    if SIGNAL_MODEL_MODE != "legacy":
+        from core.signal_runtime import replay_signal_range
+        result = replay_signal_range(since, strategy_keys=["pullback_dip"], dry_run=dry_run)
+        print(result)
+        return result
+
     if not PULLBACK_DIP.get("enabled"):
         print("[回填] PULLBACK_DIP.enabled=False，跳过（一键下线状态）")
         return
@@ -69,8 +74,8 @@ def main():
     take_pct = float(p.get("take_profit_pct", 0.08))
     rally_min = float(p.get("rally_min", 0.10))
 
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
+    from core.db import connect_db
+    conn = connect_db(readonly=True)
 
     # 主板 only：与今日推荐/复盘入库同口径（personal_config 排除前缀）
     from config.personal_config import MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES

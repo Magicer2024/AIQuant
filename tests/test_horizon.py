@@ -225,12 +225,9 @@ def test_scan_mid_term_insufficient_rows():
 
 
 # ─────────────────────────────────────────────
-# 5. /api/investor/today 三周期分组结构（依赖本地真实库，CI 跳过）
+# 5. /api/investor/today 三周期分组结构（隔离数据库，CI 执行）
 # ─────────────────────────────────────────────
-_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core", "quant.db")
-
-
-@pytest.mark.skipif(not os.path.exists(_DB), reason="需要本地 quant.db 真实数据")
+# 使用 conftest 提供的隔离空库验证 API 合同。
 def test_today_groups_structure():
     init_db()  # 模拟服务启动时的迁移（app.py __main__ 分支同样调用）
     from app import app

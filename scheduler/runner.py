@@ -10,13 +10,20 @@ scheduler/runner.py -- background sync task and scheduler
 import threading
 import schedule
 import time
+import uuid
 from datetime import datetime, date
 
 from scheduler.state import SYNC_STATUS, SCHEDULER_RUNNING, SCHEDULER_THREAD
 
+# 独立 Scheduler 实例：不使用全局 schedule 模块，避免 start_scheduler 的 schedule.clear()
+# 清掉 routes/sync.py 等其他模块注册的定时任务（方案 D2）。清空只作用于本实例。
+_SCHEDULER = schedule.Scheduler()
+
 _retry_count = 0
 _MAX_RETRIES = 3
 _BASE_RETRY_DELAY = 30 * 60  # 30 分钟
+_DAILY_SYNC_TIME = "19:00"
+_DAILY_SYNC_JOB_ID = "daily_sync_1900"
 
 
 def _evaluate_holdings():
@@ -115,7 +122,29 @@ def _evaluate_holdings():
             "count": 0, "summary": f"持仓诊断失败: {e}", "items": []}
 
 
-def run_sync_blocking():
+def _task_set_status(task_id, owner_token, status, *, result=None, error=None):
+    """把同步结果回写统一任务表（best-effort，失败不影响同步本身）。"""
+    if not task_id:
+        return
+    try:
+        from core.repository import task_repo
+        task_repo.set_status(task_id, status, owner_token=owner_token, result=result, error=error)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def _task_release(task_id, owner_token):
+    if not (task_id and owner_token):
+        return
+    try:
+        from core.repository import task_repo
+        task_repo.release_lease(task_id, owner_token)
+    except Exception:
+        pass
+
+
+def run_sync_blocking(task_id=None, owner_token=None):
     """Background thread: 盘后全市场同步
 
     流程：
@@ -123,6 +152,9 @@ def run_sync_blocking():
       2) daily_sync_by_date(target="all") —— 东财一次 HTTP 拉全 A 当日行情
          写入 daily_price 并触发策略分重算 + latest_price 刷新
       3) 失败时指数退避重试
+
+    task_id/owner_token 给定时（定时/手动/CLI 经 task_repo 提交），把执行结果回写统一
+    任务表并在结束时释放租约；不给定时保持旧行为（仅更新进程内 SYNC_STATUS）。
     """
     global _retry_count
     try:
@@ -137,6 +169,7 @@ def run_sync_blocking():
             SYNC_STATUS["last_result"] = "非交易日，跳过数据拉取"
             SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             SYNC_STATUS["running"] = False
+            _task_set_status(task_id, owner_token, "success", result={"skipped": "non_trading_day"})
             return
 
         # 0) 先同步股票列表全集
@@ -226,8 +259,12 @@ def run_sync_blocking():
         except Exception:
             import traceback
             traceback.print_exc()
+        # 主同步 + 持仓诊断 + 深析扫描 + 跟踪全部完成（各 best-effort 阶段自吞异常）。
+        _task_set_status(task_id, owner_token, "success",
+                         result={"last_result": SYNC_STATUS.get("last_result", "")})
     except Exception as e:
         SYNC_STATUS["last_result"] = f"错误: {e}"
+        _task_set_status(task_id, owner_token, "error", error=str(e))
         # 指数退避重试
         if _retry_count < _MAX_RETRIES:
             delay = _BASE_RETRY_DELAY * (2 ** _retry_count)
@@ -241,6 +278,7 @@ def run_sync_blocking():
         traceback.print_exc()
     finally:
         SYNC_STATUS["running"] = False
+        _task_release(task_id, owner_token)
 
 
 def _schedule_retry(delay_seconds: int):
@@ -252,16 +290,47 @@ def _schedule_retry(delay_seconds: int):
     run_sync_blocking()
 
 
+def _recover_and_persist():
+    """启动引导（纯 DB，可测试）：回收上次进程中断遗留的 running 任务，持久化每日 19:00 安排。
+
+    回收依据租约是否失效（无法验证存活即标 interrupted），不自动重复历史修正/迁移/参数采纳。
+    """
+    from core.repository import task_repo
+    recovered = task_repo.recover_interrupted()
+    task_repo.upsert_scheduled_job(job_type="daily_sync", schedule_kind="daily",
+                                   at_time=_DAILY_SYNC_TIME, input={"target": "all"},
+                                   job_id=_DAILY_SYNC_JOB_ID)
+    return recovered
+
+
 def start_scheduler():
-    """启动定时同步调度器（每日 19:00 盘后同步 + 龙虎榜 + 策略分重算）"""
+    """启动定时同步调度器（每日 19:00 盘后同步 + 龙虎榜 + 策略分重算）。
+
+    使用独立 Scheduler 实例（不碰全局 schedule，避免清掉其他模块任务）；
+    启动即回收中断任务并持久化每日安排。
+    """
+    from config.settings import SCHEDULER_ENABLED
+    if not SCHEDULER_ENABLED:
+        return
+    SCHEDULER_RUNNING["enabled"] = True
+
+    try:
+        recovered = _recover_and_persist()
+        if recovered:
+            print(f"[Scheduler] 回收中断任务 {len(recovered)} 个（标记 interrupted）")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
     def _sched_loop():
         while SCHEDULER_RUNNING["enabled"]:
-            schedule.run_pending()
+            _SCHEDULER.run_pending()
             time.sleep(60)
 
-    schedule.clear()
-    schedule.every().day.at("19:00").do(_job_sync)
-    print("[Scheduler] 每日 19:00 盘后自动数据同步（含龙虎榜）")
+    # 只清空并注册本模块的独立实例，不影响 routes/sync.py 等其他模块的定时任务。
+    _SCHEDULER.clear()
+    _SCHEDULER.every().day.at(_DAILY_SYNC_TIME).do(_job_sync)
+    print(f"[Scheduler] 每日 {_DAILY_SYNC_TIME} 盘后自动数据同步（含龙虎榜）")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)
@@ -269,9 +338,53 @@ def start_scheduler():
         SCHEDULER_RUNNING["enabled"] = True
 
 
+def _submit_daily_sync_task(source):
+    """经 task_repo 幂等提交并认领每日同步写任务（手动/定时/CLI 共用，保证单一有效写任务）。
+
+    返回 (task_id, owner_token)：
+      - owner_token 非空：认领成功，调用方执行同步并持令牌回写状态。
+      - task_id 非空但 owner_token 为空：已有同日/同资源组任务在处理，调用方跳过重复触发。
+    任务表不可用时抛异常，由调用方回退旧的无跟踪同步。
+    """
+    from core.repository import task_repo
+    today = date.today().strftime("%Y-%m-%d")
+    sub = task_repo.submit_task(task_type="daily_sync", idempotency_key=f"daily_sync:{today}",
+                                resource_group=task_repo.RESOURCE_PIPELINE_WRITE,
+                                input={"target": "all", "source": source})
+    if sub.get("reused") or sub.get("conflict"):
+        return sub.get("task_id"), None
+    token = uuid.uuid4().hex
+    if not task_repo.claim_task(sub["task_id"], token).get("claimed"):
+        return sub["task_id"], None
+    return sub["task_id"], token
+
+
 def _job_sync():
-    if not SYNC_STATUS["running"]:
-        SYNC_STATUS["running"] = True
-        SYNC_STATUS["last_result"] = "定时同步中..."
-        t = threading.Thread(target=run_sync_blocking, daemon=True)
-        t.start()
+    if SYNC_STATUS["running"]:
+        return
+    task_id = owner_token = None
+    try:
+        task_id, owner_token = _submit_daily_sync_task("scheduler")
+        if task_id and owner_token is None:
+            # 已有同日写任务在处理（手动/CLI/上次定时）→ 不重复触发。
+            print("[Scheduler] 已有同步任务在处理，跳过本次定时触发")
+            try:
+                from core.repository import task_repo
+                task_repo.record_job_run(_DAILY_SYNC_JOB_ID, task_id=task_id,
+                                         status="skipped_duplicate")
+            except Exception:
+                pass
+            return
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        task_id = owner_token = None   # 回退：任务表不可用也照常同步
+    SYNC_STATUS["running"] = True
+    SYNC_STATUS["last_result"] = "定时同步中..."
+    threading.Thread(target=run_sync_blocking, args=(task_id, owner_token), daemon=True).start()
+    if task_id:
+        try:
+            from core.repository import task_repo
+            task_repo.record_job_run(_DAILY_SYNC_JOB_ID, task_id=task_id, status="started")
+        except Exception:
+            pass

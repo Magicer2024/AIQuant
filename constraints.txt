@@ -1,0 +1,27 @@
+# 可复现约束（constraints）：锁定经验证的确切版本。
+#
+# requirements*.txt 声明兼容范围（>=），本文件锁定确切版本（==），二者配合使用：
+#   pip install -r requirements-dev.txt -c constraints.txt        # 核心测试
+#   pip install -r requirements-browser.txt -c constraints.txt    # 浏览器作业
+#   pip install -r requirements-qlib.txt -c constraints.txt       # 可选 Qlib
+#
+# 下列版本由「全套测试通过（365 passed, 6 skipped）」的本地环境捕获，勿随意手改；
+# 升级依赖时应同步重跑测试并更新本文件。pyqlib 为可选依赖，不在此基础约束内。
+Flask==3.1.3
+flask-cors==6.0.2
+Werkzeug==3.1.8
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+click==8.3.3
+itsdangerous==2.2.0
+blinker==1.9.0
+schedule==1.2.2
+akshare==1.18.59
+baostock==0.9.1
+requests==2.33.1
+pandas==2.3.3
+numpy==2.4.4
+scikit-learn==1.8.0
+joblib==1.5.3
+pytest==9.0.3
+pytest-timeout==2.4.0

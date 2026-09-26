@@ -41,14 +41,15 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # 护栏数据库（独立 SQLite，避免与业务库耦合）
 # ─────────────────────────────────────────────
-_DB_PATH = Path(__file__).parent.parent / "data_cache" / "em_guard.db"
-_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+from config.settings import TESTING, DB_PATH, BASE_DIR
+_DB_PATH = (Path(DB_PATH).parent if TESTING else Path(BASE_DIR) / "data_cache") / "em_guard.db"
 
 _guard_lock = threading.RLock()  # 保护护栏内存状态
 
 
 def _ensure_db() -> None:
     """建表（首次调用时）"""
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(_DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS em_cache (

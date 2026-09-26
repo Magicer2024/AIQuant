@@ -10,8 +10,7 @@ qlib_engine/__init__.py —— Qlib 引擎初始化模块
 
 import os
 import functools
-import qlib
-from qlib.constant import REG_CN
+from config.settings import QLIB_ENABLED
 
 _initialized = False
 PROVIDER_URI = os.path.expanduser("~/.qlib/qlib_data/cn_data")
@@ -39,8 +38,10 @@ def init_qlib(provider_uri: str = None) -> None:
     Idempotent — safe to call multiple times.
     """
     global _initialized
-    if _initialized:
+    if _initialized or not QLIB_ENABLED:
         return
+    import qlib
+    from qlib.constant import REG_CN
 
     uri = provider_uri or PROVIDER_URI
     os.makedirs(uri, exist_ok=True)

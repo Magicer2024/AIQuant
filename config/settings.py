@@ -13,7 +13,56 @@ SYNC_RETRY_COUNT = 2
 SYNC_TIMEOUT = 30
 
 # ── 数据库 ──
-DB_PATH = os.path.join(BASE_DIR, "core", "quant.db")
+PRODUCTION_DB_PATH = os.path.join(BASE_DIR, "core", "quant.db")
+DB_PATH = os.path.abspath(os.getenv("AIQUANT_DB_PATH", PRODUCTION_DB_PATH))
+TESTING = os.getenv("AIQUANT_TESTING", "0") == "1"
+SCHEDULER_ENABLED = not TESTING and os.getenv("AIQUANT_SCHEDULER_ENABLED", "1") == "1"
+AUTO_SYNC_ENABLED = not TESTING and os.getenv("AIQUANT_AUTO_SYNC_ENABLED", "1") == "1"
+QLIB_ENABLED = not TESTING and os.getenv("AIQUANT_QLIB_ENABLED", "0") == "1"
+SIGNAL_MODEL_MODE = os.getenv("SIGNAL_MODEL_MODE", "legacy")
+if SIGNAL_MODEL_MODE not in {"legacy", "shadow", "v2"}:
+    raise ValueError("SIGNAL_MODEL_MODE 必须为 legacy、shadow 或 v2")
+
+
+def require_signal_model_ready(mode=None):
+    """正式切换须完成闭环与旁路验收；开发期间拒绝半接线的 v2 运行。"""
+    if (mode or SIGNAL_MODEL_MODE) == "v2":
+        raise RuntimeError("v2 尚未完成发布、交易与任务闭环验收，请保持 legacy 或 shadow")
+
+
+def install_test_guards():
+    """测试进程及其子进程禁止生产库连接和外网访问，覆盖直接 sqlite/socket 调用。"""
+    import sys
+    from pathlib import Path
+    from urllib.parse import unquote, urlsplit
+
+    if not TESTING or getattr(sys, "_aiquant_test_guards", False):
+        return
+    sys._aiquant_test_guards = True
+
+    def guard(event, args):
+        if event == "sqlite3.connect":
+            target = str(args[0])
+            if target == ":memory:" or target.startswith("file::memory:"):
+                return
+            if target.startswith("file:"):
+                target = unquote(urlsplit(target).path)
+                if os.name == "nt" and target.startswith("/"):
+                    target = target[1:]
+            path = Path(target).resolve()
+            root = os.getenv("AIQUANT_TEST_ROOT")
+            if path == Path(PRODUCTION_DB_PATH).resolve() or not root or not path.is_relative_to(Path(root).resolve()):
+                raise RuntimeError(f"测试禁止连接非隔离数据库：{path}")
+        elif event in {"socket.connect", "socket.getaddrinfo"}:
+            address = args[1] if event == "socket.connect" else args[0]
+            host = address[0] if isinstance(address, tuple) else address
+            if host not in {"localhost", "127.0.0.1", "::1", None}:
+                raise RuntimeError(f"测试禁止外网请求：{host}")
+
+    sys.addaudithook(guard)
+
+
+install_test_guards()
 
 # ── Flask ──
 FLASK_HOST = "0.0.0.0"

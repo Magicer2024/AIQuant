@@ -22,11 +22,11 @@ from typing import Optional
 from flask import Blueprint, request
 
 from core.db import get_conn, _safe_add_column, init_db
-from utils.api import ok, fail
+from utils.api import ok, fail, identity_meta
 from utils.serialization import sanitize_numeric as _sanitize
 from config.personal_config import (
     POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT,
-    MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES,
+    MAIN_BOARD_ONLY, main_board_filter,
     EXIT_TRACK_START_DATE,
 )
 from config.strategy_params import (T1_GAP_GUARD, RECO_REGIME_CAP, get_param,
@@ -34,6 +34,17 @@ from config.strategy_params import (T1_GAP_GUARD, RECO_REGIME_CAP, get_param,
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
+
+
+@investor_bp.route("/account_config", methods=["GET"])
+def account_config():
+    from config.personal_config import get_personal_config
+    config = get_personal_config()
+    return ok({"reference_account": config["position_plan_account"],
+               "max_position_pct": config["position_plan_max_pct"],
+               "max_position_amount": config["position_plan_account"] * config["position_plan_max_pct"],
+               "main_board_only": config["main_board_only"],
+               "budget_kind": "reference_budget", "available_cash": None})
 
 
 # ─────────────────────────────────────────────
@@ -519,6 +530,7 @@ def today_recommendations():
                 "date": None, "count": 0, "items": [],
                 "groups": {"short": [], "mid": [], "long": []},
                 "market_regime": "unknown",
+                "meta": identity_meta(cohort="production", data_as_of=None, conn=conn),
             })
 
         # stock_info.pe_ttm 可能不存在（老库）—— 降级：有才启用长线估值过滤
@@ -530,11 +542,8 @@ def today_recommendations():
             has_pe_ttm = False
 
         horizons = [horizon_filter] if horizon_filter else ["short", "mid", "long"]
-        # 板块限制：小资金未开通科创/创业板权限，仅推主板（前缀来自配置常量，非用户输入）
-        board_filter = ""
-        if MAIN_BOARD_ONLY:
-            board_filter = "".join(
-                f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+        # 板块限制：仅推主板（白名单沪 60x / 深 00x，与 is_main_board 同口径，方案 E2）
+        board_filter = main_board_filter("s.code")
         rows_by_horizon: dict = {}
         # 短线置信门控（S4 口径，默认 22，可 DB 覆盖）：低于门控不推荐，弱日自然出 0
         gate = float(get_param("short_conf_gate"))
@@ -759,55 +768,78 @@ def today_recommendations():
                     "recommend_hint": recommend_hint,
                 }
 
-            # ── 建仓分批建议（账户规模/占比见 config.personal_config） ──
+            # ── 建仓分批建议（账户规模/占比见 config.personal_config；约束口径见 utils.trade_constraints）──
+            # 静态参考预算，非账户可用现金：budget_kind=reference_budget、available_cash=None。
             position_plan = None
             if entry > 0:
-                # 总金额上限：账户 × 仓位占比（A 股最小 1 手 = 100 股，按 100 整手）
+                from utils import trade_constraints as _tc
+                from config.personal_config import PLAN_BATCH_WEIGHTS as _BW
+                # 总金额上限：账户 × 仓位占比
                 max_amount = int(POSITION_PLAN_ACCOUNT * POSITION_PLAN_MAX_PCT)
-                # 用激进价估算总股数（向下取整到 100 股一手）
-                total_shares_100 = int(max_amount / max(aggressive if entry_strategy else entry, 0.01) // 100) * 100
-                if total_shares_100 < 100:
-                    total_shares_100 = 0
-                if total_shares_100 > 0 and entry_strategy:
-                    b1 = total_shares_100 // 2  # 50% 试仓
-                    b2 = (total_shares_100 - b1) // 2  # 30% 加仓
-                    b3 = total_shares_100 - b1 - b2  # 剩余 20%
-                    p_a = entry_strategy["aggressive"]
-                    p_s = entry_strategy["stable"]
-                    p_c = entry_strategy["conservative"]
+                # 用激进价（最保守可成交价）估算最大可买，计入 100 股整手与最低佣金
+                est_price = aggressive if entry_strategy else entry
+                afford = _tc.max_affordable_shares(max_amount, est_price)
+                _notes = ("试仓", "回踩加仓", "深度回踩加仓")
+                _triggers = ("现价附近直接买入 {n} 股", "回踩 -3% 买入 {n} 股",
+                             "深度回踩 -6% 买入 {n} 股")
+                _warning = ("静态参考预算，非账户可用现金；"
+                            "分批为 50/30/20 最大余数法整手分配")
+                if not afford["executable"] or not entry_strategy:
+                    # 1 手也买不起（或缺挂单价）：明确标记不可执行 + 原因，不生成虚构仓位
                     position_plan = {
                         "account_size": POSITION_PLAN_ACCOUNT,
                         "max_position_pct": int(POSITION_PLAN_MAX_PCT * 100),
                         "max_amount": max_amount,
-                        "total_shares": total_shares_100,
-                        "total_cost_est": round(total_shares_100 * p_s, 0),  # 用稳健价估算
-                        "batches": [
-                            {
-                                "ratio": 0.5,
-                                "shares": b1,
-                                "price": p_a,
-                                "amount": round(b1 * p_a, 0),
-                                "note": "试仓",
-                                "trigger": f"现价附近直接买入 {b1} 股",
-                            },
-                            {
-                                "ratio": 0.3,
-                                "shares": b2,
-                                "price": p_s,
-                                "amount": round(b2 * p_s, 0),
-                                "note": "回踩加仓",
-                                "trigger": f"回踩 -3% 买入 {b2} 股",
-                            },
-                            {
-                                "ratio": 0.2,
-                                "shares": b3,
-                                "price": p_c,
-                                "amount": round(b3 * p_c, 0),
-                                "note": "深度回踩加仓",
-                                "trigger": f"深度回踩 -6% 买入 {b3} 股",
-                            },
-                        ],
-                        "warning": "若资金不足一手（100 股），整张卡片跳过",
+                        "executable": False,
+                        "reason": afford["reason"] or "资金不足 1 手（100 股）",
+                        "budget_kind": "reference_budget",
+                        "available_cash": None,
+                        "total_shares": 0,
+                        "total_cost_est": 0,
+                        "batches": [],
+                        "warning": _warning,
+                    }
+                else:
+                    total_shares = afford["shares"]
+                    # 50/30/20 最大余数法分配整手；keep_zeros 保证价格/备注按原始权重索引对齐
+                    per_batch = _tc.allocate_batches(total_shares, _BW, keep_zeros=True)
+                    prices = (entry_strategy["aggressive"], entry_strategy["stable"],
+                              entry_strategy["conservative"])
+                    batches = []
+                    total_cost = 0.0
+                    total_commission = 0.0
+                    for i, sh in enumerate(per_batch):
+                        if sh <= 0:
+                            continue  # 删除 0 股批次
+                        price = prices[i] if i < len(prices) else prices[-1]
+                        amount = sh * price
+                        commission = _tc.buy_commission(amount)
+                        total_cost += amount
+                        total_commission += commission
+                        batches.append({
+                            "ratio": _BW[i] if i < len(_BW) else 0,
+                            "shares": sh,
+                            "price": price,
+                            "amount": round(amount, 0),
+                            "commission": round(commission, 2),
+                            "total": round(amount + commission, 2),
+                            "note": _notes[i] if i < len(_notes) else "",
+                            "trigger": (_triggers[i] if i < len(_triggers)
+                                        else "买入 {n} 股").format(n=sh),
+                        })
+                    position_plan = {
+                        "account_size": POSITION_PLAN_ACCOUNT,
+                        "max_position_pct": int(POSITION_PLAN_MAX_PCT * 100),
+                        "max_amount": max_amount,
+                        "executable": True,
+                        "budget_kind": "reference_budget",
+                        "available_cash": None,
+                        "total_shares": total_shares,
+                        # 重新检查各批最低佣金后的总金额
+                        "total_cost_est": round(total_cost + total_commission, 0),
+                        "total_commission_est": round(total_commission, 2),
+                        "batches": batches,
+                        "warning": _warning,
                     }
 
             # ── 突破确认买点（回放验证：推荐后等收盘突破推荐日以来最高价再入场，
@@ -924,6 +956,8 @@ def today_recommendations():
             "groups": _sanitize(groups),
             "items": _sanitize(short_items),   # 兼容旧前端：items = short 组
             "market_regime": market_regime,  # 让前端知道当前大盘冷热
+            # 身份链元数据（方案 F1）：正式主榜、数据日期、参数版本、信号模型模式
+            "meta": identity_meta(cohort="production", data_as_of=scan_date, conn=conn),
         })
 
 
@@ -1126,10 +1160,7 @@ def surge_picks():
     days = max(1, min(days, 180))
     target_date = request.args.get("date")
 
-    board_filter = ""
-    if MAIN_BOARD_ONLY:
-        board_filter = "".join(
-            f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    board_filter = main_board_filter("s.code")
 
     with get_conn() as conn:
         if target_date:
@@ -1153,6 +1184,8 @@ def surge_picks():
                 "days": days,
                 "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
                         "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
+                "meta": identity_meta(cohort="observation", list_key="observe_surge",
+                                      data_as_of=scan_date, conn=conn),
             })
 
         rows = conn.execute(
@@ -1236,6 +1269,8 @@ def surge_picks():
             "days": days,
             "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
                     "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
+            "meta": identity_meta(cohort="observation", list_key="observe_surge",
+                                  data_as_of=scan_date, conn=conn),
         })
 
 
@@ -1283,10 +1318,7 @@ def reversal_picks():
     target_date = request.args.get("date")
 
     # 板块过滤作用在 UNION 合并后的外层别名 r 上（实时/历史统一口径）
-    board_filter = ""
-    if MAIN_BOARD_ONLY:
-        board_filter = "".join(
-            f" AND r.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    board_filter = main_board_filter("r.code")
 
     _stats_note = ("观察池，非买入推荐：实测市场中性超额 +0.174pp(t=+2.80)、"
                    "分年 +0.23/+0.14/+0.18pp 三年一致，但胜率 49.5% 未达 52% 门槛，"
@@ -1365,6 +1397,9 @@ def reversal_picks():
                 "note": _stats_note + ("（信号线当前为关闭状态，"
                                        "上线需将 FIRST_REVERSAL['enabled'] 置 True）"
                                        if not FIRST_REVERSAL.get("enabled") else ""),
+                "meta": identity_meta(cohort="observation",
+                                      list_key="observe_first_reversal",
+                                      data_as_of=scan_date, conn=conn),
             })
 
         rows = conn.execute(
@@ -1486,6 +1521,9 @@ def reversal_picks():
             "stats": _stats,
             "tracked": _tracked,
             "note": _stats_note,
+            "meta": identity_meta(cohort="observation",
+                                  list_key="observe_first_reversal",
+                                  data_as_of=scan_date, conn=conn),
         })
 
 
@@ -1631,7 +1669,11 @@ def reversal_history():
             "exit_tone": tone,
             "hit_stop": bool(it.get("hit_stop")),
             "hit_tp": bool(it.get("hit_tp")),
-            "settled": bool(reason),
+            "settled": bool(it.get("exit_date") and reason and it.get("exit_return") is not None),
+            "signal_reference_price": _r2(it.get("entry_price")),
+            "reference_kind": "legacy_signal_reference",
+            "exec_entry_price": None,
+            "data_source": "legacy_snapshot",
         })
 
     # 出场原因分布。空 reason = 未结算（持仓中/待建仓），恒排最后。
@@ -1857,10 +1899,7 @@ def exit_advice():
         import pandas as pd
 
         # 板块限制：与「今日推荐」口径一致
-        board_filter = ""
-        if MAIN_BOARD_ONLY:
-            board_filter = "".join(
-                f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+        board_filter = main_board_filter("s.code")
 
         # 选股口径与「推荐复盘（recommend_outcome）/ 今日推荐」完全一致（2026-08 短线 8→4 改造）：
         #   short = 隔日动量信号优先占名额 + 低扩展度（pct_above_ma20 升序）补足 +
@@ -3046,10 +3085,7 @@ def recommendations_history():
     from core.outcome_tracker import _merge_continuous_segments
 
     # 板块限制：与今日推荐同口径（小资金仅推主板）
-    board_filter = ""
-    if MAIN_BOARD_ONLY:
-        board_filter = "".join(
-            f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    board_filter = main_board_filter("s.code")
 
     with get_conn() as conn:
         # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的；

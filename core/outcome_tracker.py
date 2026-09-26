@@ -18,7 +18,7 @@ from typing import Optional
 
 from core.db import get_conn
 from config.personal_config import (
-    MAIN_BOARD_ONLY, EXCLUDED_BOARD_PREFIXES, EXIT_TRACK_START_DATE,
+    main_board_filter, EXIT_TRACK_START_DATE,
 )
 
 
@@ -59,7 +59,10 @@ def short_t1_filter_sql(conn, start_date: str, end_date: str | None = None,
     parts: list = []
     params: list = []
     if mkt_gate < 99:
-        parts.append(f"(SELECT AVG(pct_change) FROM daily_price "
+        market_table = "market_breadth" if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='market_breadth' AND type='table'"
+        ).fetchone() else "daily_price"
+        parts.append(f"(SELECT AVG(pct_change) FROM {market_table} "
                      f"WHERE trade_date = {alias}.scan_date) < ?")
         params.append(mkt_gate)
     if dev < 99:
@@ -327,19 +330,13 @@ def insert_new_outcomes(days_back: int = 60):
         (date.today() - timedelta(days=days_back)).isoformat(),
         EXIT_TRACK_START_DATE,
     )
-    # 板块限制：与 routes/investor.py 的今日推荐同口径（小资金仅推主板）
-    board_filter = ""
-    if MAIN_BOARD_ONLY:
-        board_filter = "".join(
-            f" AND s.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    # 板块限制：与 routes/investor.py 的今日推荐同口径（白名单主板沪 60x / 深 00x）
+    board_filter = main_board_filter("s.code")
     # 同一约束的别名版：反转首日 INSERT 的历史回填分支别名为 h。
     # ⚠ 2026-09-24 修复：此前该分支漏了板块过滤 ⇒ 跟踪组混入创业板（未开通权限、
     #   不可交易），且把「创业板贡献绝大部分收益」的失真读数写进了复盘表头
     #   （实测：创业板 n=466 胜率 58.9%/均 +2.38% vs 主板 n=485 胜率 ~49%/均 ~+0.93%）。
-    board_filter_hist = ""
-    if MAIN_BOARD_ONLY:
-        board_filter_hist = "".join(
-            f" AND h.code NOT LIKE '{p}%'" for p in EXCLUDED_BOARD_PREFIXES)
+    board_filter_hist = main_board_filter("h.code")
     # short 组与今日推荐同口径：fusion 门控 + 低扩展度排序 + 止盈离场剔除
     from config.strategy_params import get_param, T1_GAP_GUARD, FIRST_REVERSAL
     gate = float(get_param("short_conf_gate"))
@@ -871,23 +868,31 @@ def _evaluate_short(conn, row, now_str: str,
 
 
 def _short_exit_sim(hold_prices, exec_entry: float, stop, tp,
-                    trail_pct, max_hold: int) -> tuple:
+                    trail_pct, max_hold: int, *,
+                    launch_ratio=None, stop_loss_pct=None) -> tuple:
     """短线出场状态机（建仓日起逐日，收盘判定口径）。
 
     hold_prices[0] 必须是建仓日（j=1，T+1 只累计不判出场）。
     返回 (exit_reason, exit_date, exit_return, hit_stop, launched, done)：
     done=False 表示数据未走完且未触发出场（非终态，等后续交易日）。
+
+    launch_ratio / stop_loss_pct 为可选的冻结参数注入点（方案 C2 适配器化）：
+    传入时用注入值（模拟交易按运行冻结参数推进），为 None 时回退读取当前 get_param
+    （保持 legacy evaluate_outcomes 调用方行为完全不变）。
     """
     launch_price = None
     from config.strategy_params import get_param
-    launch_ratio = get_param("short_take_profit")
+    if launch_ratio is None:
+        launch_ratio = get_param("short_take_profit")
     if launch_ratio and 0 < launch_ratio < 1.0 and exec_entry > 0:
         launch_price = exec_entry * (1 + launch_ratio)
     elif tp and tp > 0:
         launch_price = tp
     # 止损价：推荐自带优先，缺失回退参数比例（基于 exec_entry）
     if (stop is None or stop <= 0) and exec_entry > 0:
-        stop = exec_entry * (1 + float(get_param("short_stop_loss")))
+        if stop_loss_pct is None:
+            stop_loss_pct = get_param("short_stop_loss")
+        stop = exec_entry * (1 + float(stop_loss_pct))
 
     trail_ok = trail_pct is not None and 0.01 <= trail_pct < 1.0
     highest = None
@@ -1038,19 +1043,56 @@ def _evaluate_mid_long(conn, row, horizon: str, now_str: str,
 # 3. 汇总统计
 # ─────────────────────────────────────────────
 
-def get_summary(days: int = 30) -> dict:
-    """返回近 N 日推荐的胜率/平均收益/盈亏比等汇总。
+LEGACY_PRODUCTION_FILTER = "COALESCE(strategy, '') NOT IN ('反转首日', '强势突破', '缩量回踩')"
 
-    以 t5_return 作为主要评判标准（短线 5 个交易日）。
-    若 t5_return 为空则用 t3 或 t1 代替。
-    """
+
+def settled_return(row):
+    """旧表仅确认已出场且收益有效的记录；诊断收益绝不补齐成交收益。"""
+    import math
+    r = dict(row)
+    if not r.get("exit_date") or not r.get("exit_reason") or r["exit_reason"] in {
+        "no_fill", "expired", "holding", "watching", "data_pending", "cancelled"
+    }:
+        return None
+    value = r.get("exit_return")
+    return float(value) if value is not None and math.isfinite(float(value)) else None
+
+
+def settlement_stats(items):
+    """结算指标与未结算样本分开；没有亏损样本时比值保持未知。"""
+    rows = [dict(r) for r in items]
+    closed = [(r, settled_return(r)) for r in rows]
+    closed = [(r, v) for r, v in closed if v is not None]
+    values = [v for _, v in closed]
+    wins = [v for v in values if v > 0]
+    losses = [v for v in values if v < 0]
+    loss_sum = abs(sum(losses))
+    return {
+        "settled_count": len(values),
+        "unsettled_count": len(rows) - len(values),
+        "win_count": len(wins), "loss_count": len(losses),
+        "win_rate": round(len(wins) / len(values) * 100, 1) if values else None,
+        "avg_return": round(sum(values) / len(values), 2) if values else None,
+        "profit_factor": round(sum(wins) / loss_sum, 2) if loss_sum else None,
+        "average_win_loss_ratio": round((sum(wins) / len(wins) if wins else 0) / (loss_sum / len(losses)), 2) if losses else None,
+        "ratio_note": None if losses else "无亏损样本，盈亏比不可计算",
+        "best_return": max(values) if values else None,
+        "worst_return": min(values) if values else None,
+        "stop_loss_count": sum(bool(r.get("hit_stop")) for r, _ in closed),
+        "take_profit_count": sum(bool(r.get("hit_tp")) for r, _ in closed),
+        "statistics_basis": "有效已出场记录；不使用 T+n 补齐；平均单笔收益非账户收益",
+    }
+
+
+def get_summary(days: int = 30) -> dict:
+    """返回近 N 日已出场且收益有效的旧推荐统计；历史原值不重算。"""
     cutoff = f"-{days} days"
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT code, scan_date, horizon, strategy, entry_price,
                    fusion_score, t1_return, t3_return, t5_return, t10_return,
                    max_return, min_return, hit_stop, hit_tp,
-                   exit_reason, exit_return
+                   exit_reason, exit_date, exit_return
             FROM recommend_outcome
             WHERE scan_date >= date('now', ?)
               AND entry_price > 0
@@ -1059,58 +1101,8 @@ def get_summary(days: int = 30) -> dict:
             ORDER BY scan_date DESC
         """, (cutoff,)).fetchall()
 
-    # 回踩确认入场（2026-09-05）：no_fill = 窗口内未回踩买点，未建仓，
-    # 不构成交易，从胜率/收益统计中剔除（明细接口仍保留展示）
-    rows = [r for r in rows if (r["exit_reason"] or "") != "no_fill"]
-
-    if not rows:
-        return {"total": 0, "win_rate": 0, "avg_return": 0,
-                "profit_factor": 0, "best_return": 0, "worst_return": 0,
-                "stop_loss_count": 0, "take_profit_count": 0}
-
-    # 用 exit_return 作为最终收益（若有），否则用 t5 > t3 > t1
-    returns = []
-    for r in rows:
-        ret = r["exit_return"]
-        if ret is None:
-            ret = r["t5_return"]
-        if ret is None:
-            ret = r["t3_return"]
-        if ret is None:
-            ret = r["t1_return"]
-        if ret is not None:
-            returns.append(ret)
-
-    if not returns:
-        return {"total": len(rows), "win_rate": 0, "avg_return": 0,
-                "profit_factor": 0, "best_return": 0, "worst_return": 0,
-                "stop_loss_count": 0, "take_profit_count": 0}
-
-    wins = [r for r in returns if r > 0]
-    losses = [r for r in returns if r <= 0]
-    avg_return = sum(returns) / len(returns)
-    win_rate = len(wins) / len(returns) * 100
-
-    # 盈亏比 = 平均盈利 / 平均亏损绝对值
-    avg_win = sum(wins) / len(wins) if wins else 0
-    avg_loss = abs(sum(losses) / len(losses)) if losses else 1
-    profit_factor = round(avg_win / avg_loss, 2) if avg_loss > 0 else 99.0
-
-    stop_count = sum(1 for r in rows if r["hit_stop"])
-    tp_count = sum(1 for r in rows if r["hit_tp"])
-
-    return {
-        "total": len(returns),
-        "win_count": len(wins),
-        "loss_count": len(losses),
-        "win_rate": round(win_rate, 1),
-        "avg_return": round(avg_return, 2),
-        "profit_factor": profit_factor,
-        "best_return": round(max(returns), 2),
-        "worst_return": round(min(returns), 2),
-        "stop_loss_count": stop_count,
-        "take_profit_count": tp_count,
-    }
+    stats = settlement_stats(rows)
+    return {"total": stats["settled_count"], "signal_count": len(rows), **stats}
 
 
 # ─────────────────────────────────────────────
@@ -1296,50 +1288,12 @@ def get_merged_summary(days: int = 30, horizon: str = "short",
                 "win_rate": round(win / len(vals) * 100, 1),
                 "avg_return": round(avg, 2)}
 
-    # 最终收益口径：exit_return > t5 > t3 > t2 > t1
-    returns = []
-    for it in items:
-        ret = it.get("exit_return")
-        if ret is None:
-            ret = it.get("t5_return")
-        if ret is None:
-            ret = it.get("t3_return")
-        if ret is None:
-            ret = it.get("t2_return")
-        if ret is None:
-            ret = it.get("t1_return")
-        if ret is not None:
-            returns.append(ret)
-
-    base = {
+    return {
         "total": len(items),
         "t1": _win_stat("t1_return"),
         "t2": _win_stat("t2_return"),
         "t3": _win_stat("t3_return"),
         "t5": _win_stat("t5_return"),
-    }
-    if not returns:
-        return {**base, "win_rate": 0, "avg_return": 0, "profit_factor": 0,
-                "best_return": 0, "worst_return": 0,
-                "stop_loss_count": 0, "take_profit_count": 0}
-
-    wins = [r for r in returns if r > 0]
-    losses = [r for r in returns if r <= 0]
-    avg_return = sum(returns) / len(returns)
-    win_rate = len(wins) / len(returns) * 100
-    avg_win = sum(wins) / len(wins) if wins else 0
-    avg_loss = abs(sum(losses) / len(losses)) if losses else 1
-    profit_factor = round(avg_win / avg_loss, 2) if avg_loss > 0 else 99.0
-
-    return {
-        **base,
-        "win_count": len(wins),
-        "loss_count": len(losses),
-        "win_rate": round(win_rate, 1),
-        "avg_return": round(avg_return, 2),
-        "profit_factor": profit_factor,
-        "best_return": round(max(returns), 2),
-        "worst_return": round(min(returns), 2),
-        "stop_loss_count": sum(1 for it in items if it.get("hit_stop")),
-        "take_profit_count": sum(1 for it in items if it.get("hit_tp")),
+        "t10": _win_stat("t10_return"),
+        **settlement_stats(items),
     }

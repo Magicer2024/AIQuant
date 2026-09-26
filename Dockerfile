@@ -7,10 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
-COPY requirements.txt .
+# Install Python deps（constraints.txt 锁定可复现版本；Qlib 为可选依赖，
+# 基础镜像不强装 —— 需要时另装 requirements-qlib.txt 并设 AIQUANT_QLIB_ENABLED=1）
+COPY requirements.txt constraints.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Copy app source
 COPY . .

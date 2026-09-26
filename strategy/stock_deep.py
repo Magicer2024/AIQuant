@@ -25,7 +25,7 @@ from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
 from config.personal_config import is_main_board, main_board_filter
 from config.strategy_params import DEEP_EMA20_AUX as _EMA20_AUX_CFG
 from config.strategy_params import DEEP_TRACK, DEEP_TP_AMP_RATIO, DEEP_LOOKBACK
-from config.strategy_params import get_param as _get_param
+from config.strategy_params import get_param as _get_param, get_strategy_config
 
 # 环境变量支持 A/B 验证（tools/_eval_deep_buypoints.py）：DEEP_EMA20_AUX=1 强制开启、
 # 0 强制关闭，否则用配置默认（enabled=False = 基线）。模块加载时读取一次即可。
@@ -523,18 +523,19 @@ def _signal_at(df: pd.DataFrame, i: int):
     # 位置（近期价格加权强于/弱于等权=动能增强/衰减），而非重复"价相对均线"。
     # 分数影响设小，避免扰动既有追高守卫与区间位置守卫。enabled 默认关；转正前必须用
     # tools/_eval_deep_buypoints.py 做 before/after（同口径 T+1/T+3/T+5 胜率与均值）。
-    if _EMA20_AUX["enabled"]:
+    ema20_aux = get_strategy_config("DEEP_EMA20_AUX", _EMA20_AUX)
+    if ema20_aux["enabled"]:
         ema20 = float(row["EMA20"]) if ("EMA20" in df.columns and not np.isnan(row["EMA20"])) else np.nan
         if not np.isnan(ema20) and ema20 > 0:
             if close > ema20:
-                score += _EMA20_AUX.get("score_above", 1); reasons.append("价站上 EMA20，短端动能偏多")
+                score += ema20_aux.get("score_above", 1); reasons.append("价站上 EMA20，短端动能偏多")
             else:
-                score += _EMA20_AUX.get("score_below", -1); risks.append("价跌破 EMA20，短端动能转弱")
+                score += ema20_aux.get("score_below", -1); risks.append("价跌破 EMA20，短端动能转弱")
             # EMA20 vs MA20 动能差（新增动量信息）
-            cw = _EMA20_AUX.get("cross_weight", 0)
+            cw = ema20_aux.get("cross_weight", 0)
             if cw and not np.isnan(ma20) and ma20 > 0:
                 rel = (ema20 - ma20) / ma20 * 100
-                band = _EMA20_AUX.get("cross_band_pct", 3.0)
+                band = ema20_aux.get("cross_band_pct", 3.0)
                 if rel > band:
                     score += cw; reasons.append(f"EMA20 高于 MA20 {rel:.1f}%，短线动能增强")
                 elif rel < -band:
@@ -664,7 +665,7 @@ def _reachable_take(close: float, stop_l: float, rhythm: dict, rr_target: float)
     """
     up_amp = (rhythm or {}).get("up_amp_avg")
     if up_amp is not None and np.isfinite(up_amp) and up_amp > 0:
-        return round(close * (1 + DEEP_TP_AMP_RATIO * float(up_amp) / 100.0), 2)
+        return round(close * (1 + get_strategy_config("DEEP_TP_AMP_RATIO", DEEP_TP_AMP_RATIO) * float(up_amp) / 100.0), 2)
     risk = (close - stop_l) / close if close > 0 else 0
     return round(close + risk * rr_target * close, 2) if risk > 0 else None
 
@@ -1451,10 +1452,10 @@ def _scan_conn():
     return c
 
 
-def _scan_one(code: str, lookback: int, as_of: Optional[str]) -> Optional[dict]:
-    """单股深析 + 候选筛选（在工作线程内跑）。失败一律返回 None，与串行版吞异常的行为一致。"""
+def _scan_one(code: str, lookback: int, as_of: Optional[str], *, conn=None, strict=False) -> Optional[dict]:
+    """单股深析；冻结运行显式传只读连接，strict 模式保留失败身份。"""
     try:
-        res = analyze_stock(_scan_conn(), code, lookback=lookback, recent_days=0,
+        res = analyze_stock(conn if conn is not None else _scan_conn(), code, lookback=lookback, recent_days=0,
                             light=True, as_of=as_of)
         if res.get("insufficient"):
             return None
@@ -1498,6 +1499,8 @@ def _scan_one(code: str, lookback: int, as_of: Optional[str]) -> Optional[dict]:
             "reasons": (sig.get("reasons") or [])[:2],
         }
     except Exception:
+        if strict:
+            raise
         return None
 
 
@@ -1545,12 +1548,25 @@ def run_full_market_scan(conn, max_stocks: Optional[int] = None,
         """
         SELECT DISTINCT d.code FROM daily_price d
         JOIN stock_info i ON i.code = d.code
-        WHERE i.is_active = 1
+        WHERE i.is_active = 1 AND d.trade_date <= ?
         ORDER BY d.code
-        """
+        """, (as_of,)
     ).fetchall()]
     if max_stocks:
         codes = codes[:max_stocks]
+    from config.settings import SIGNAL_MODEL_MODE
+    if SIGNAL_MODEL_MODE != "legacy":
+        if as_of != scan_date:
+            raise ValueError("冻结扫描的信号日期必须等于输入截至日")
+        from core.signal_runtime import prepare_signal_run, execute_signal_run
+        from core.repository.signal_repo import write_legacy_projection
+        context = prepare_signal_run(scan_date, scope="single" if max_stocks else "all",
+                                     codes=codes, source="stock_deep_signal", runtime={"lookback": lookback})
+        result = execute_signal_run(context, progress_callback=progress_callback)
+        if SIGNAL_MODEL_MODE == "shadow" and result["status"] == "complete":
+            write_legacy_projection(result["run_id"])
+        result.update(as_of=as_of, scanned=len(codes), candidates=result["signals"], workers=0)
+        return result
     # 清掉当日旧结果（重扫覆盖）
     conn.execute("DELETE FROM stock_deep_signal WHERE scan_date = ?", (scan_date,))
     conn.commit()

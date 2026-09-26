@@ -27,10 +27,10 @@ echo [2/5] Checking dependencies...
 python -c "import flask" >nul
 if %errorlevel% neq 0 (
     echo         Flask missing. Installing dependencies...
-    pip install -r requirements.txt
+    pip install -r requirements.txt -c constraints.txt
     if %errorlevel% neq 0 (
         echo [ERROR] Failed to install dependencies.
-        echo         Run manually: pip install -r requirements.txt
+        echo         Run manually: pip install -r requirements.txt -c constraints.txt
         pause
         exit /b 1
     )

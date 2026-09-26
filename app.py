@@ -1,100 +1,144 @@
-"""
-AIQuant —— 个人股票评分系统
-Flask 入口
-"""
+"""AIQuant Flask 入口：应用构造无数据库、网络及后台线程副作用。"""
 import os
-from flask import Flask, jsonify, request, send_from_directory, make_response
+import uuid
+
+from flask import Flask, g, request, send_from_directory, make_response
 from flask_cors import CORS
-from utils.logger import setup_logging
-from utils.timing import init_app as init_timing
+from config import settings
 from utils.api import ok, fail
+from utils.timing import init_app as init_timing
 
-# 初始化统一日志（控制台 INFO + 文件 DEBUG 按日轮转）
-setup_logging()
 
-from routes.system import system_bp
-from routes.sync import sync_bp
-from routes.scoring import scoring_bp
-from routes.screen import screen_bp
-from routes.backtest import backtest_bp
-from routes.optimizer import optimizer_bp
+def create_app(config=None):
+    app = Flask(__name__)
+    app.config.from_mapping(
+        TESTING=settings.TESTING,
+        SCHEDULER_ENABLED=settings.SCHEDULER_ENABLED,
+        AUTO_SYNC_ENABLED=settings.AUTO_SYNC_ENABLED,
+        QLIB_ENABLED=settings.QLIB_ENABLED,
+        SIGNAL_MODEL_MODE=settings.SIGNAL_MODEL_MODE,
+    )
+    app.config.update(config or {})
+    if app.config["TESTING"]:
+        app.config.update(SCHEDULER_ENABLED=False, AUTO_SYNC_ENABLED=False, QLIB_ENABLED=False)
+    CORS(app)
 
-from routes.investor import investor_bp, init_investor_tables
+    from routes.system import system_bp
+    from routes.sync import sync_bp
+    from routes.scoring import scoring_bp
+    from routes.screen import screen_bp
+    from routes.backtest import backtest_bp
+    from routes.optimizer import optimizer_bp
+    from routes.investor import investor_bp
+    for bp in (system_bp, sync_bp, scoring_bp, screen_bp, backtest_bp, optimizer_bp, investor_bp):
+        app.register_blueprint(bp)
+    init_timing(app)
 
-# ── Qlib engine initialization ──────────────────────
-try:
-    from qlib_engine import init_qlib
-    init_qlib()
-    print("[Qlib] Engine initialized")
-except Exception as e:
-    print(f"[Qlib] Initialization skipped: {e}")
+    @app.before_request
+    def request_context():
+        g.request_id = uuid.uuid4().hex
+        if request.path not in {"/api/health", "/api/ready"}:
+            try:
+                settings.require_signal_model_ready(app.config["SIGNAL_MODEL_MODE"])
+            except RuntimeError as exc:
+                return fail(str(exc), 503)
+        # 测试浏览器可以读数据，但不能因为首页加载隐式发起同步或调度。
+        if app.config["TESTING"] and request.method == "POST" and (
+            request.path.startswith("/api/sync") or "scheduler" in request.path
+        ):
+            return fail("测试模式禁止同步与调度", 403)
 
-app = Flask(__name__)
-CORS(app)
+    @app.after_request
+    def response_context(response):
+        response.headers["X-Request-ID"] = g.request_id
+        response.headers["X-Signal-Model-Mode"] = app.config["SIGNAL_MODEL_MODE"]
+        return response
 
-# 注册核心 Blueprint
-app.register_blueprint(system_bp)
-app.register_blueprint(sync_bp)
-app.register_blueprint(scoring_bp)
-app.register_blueprint(screen_bp)
-app.register_blueprint(backtest_bp)
-app.register_blueprint(optimizer_bp)
+    @app.route("/")
+    @app.route("/dashboard")
+    def dashboard():
+        response = make_response(send_from_directory(app.root_path, "dashboard.html"))
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
-app.register_blueprint(investor_bp)
+    @app.route("/reports/<path:filename>")
+    def serve_report(filename):
+        return send_from_directory(os.path.join(app.root_path, "reports"), filename)
 
-init_timing(app)
+    @app.route("/api/health")
+    def health():
+        return ok({"status": "ok", "message": "AIQuant 个人股票评分系统"})
 
-# 个人投资者表（轻量、自动迁移）
-try:
+    @app.route("/api/ready")
+    def ready():
+        from core.db import get_conn
+        try:
+            with get_conn(readonly=True) as conn:
+                versions = [r[0] for r in conn.execute("SELECT version FROM schema_migration ORDER BY version")]
+            required = {"001_safe_baseline"}
+            if app.config["SIGNAL_MODEL_MODE"] != "legacy":
+                required.add("002_unified_signal_model")
+            if not required.issubset(versions):
+                return fail("数据库迁移未完成", 503)
+            try:
+                settings.require_signal_model_ready(app.config["SIGNAL_MODEL_MODE"])
+            except RuntimeError as exc:
+                return fail(str(exc), 503)
+            return ok({"status": "ready", "migrations": versions,
+                       "signal_model_mode": app.config["SIGNAL_MODEL_MODE"],
+                       "auto_sync_enabled": app.config["AUTO_SYNC_ENABLED"]})
+        except Exception:
+            return fail("数据库尚未就绪，请显式初始化", 503)
+
+    @app.errorhandler(404)
+    def not_found(error):
+        return fail(f"未找到接口：{request.path}", 404)
+
+    @app.errorhandler(500)
+    def server_error(error):
+        return fail("服务器内部错误", 500)
+
+    return app
+
+
+def initialize_runtime(app):
+    """仅服务启动显式调用；导入 app 或创建测试客户端不会执行。"""
+    settings.require_signal_model_ready(app.config["SIGNAL_MODEL_MODE"])
+    from core.db import init_db
+    from routes.investor import init_investor_tables
+    from utils.logger import setup_logging
+    setup_logging()
+    init_db()
     init_investor_tables()
-except Exception as e:
-    print(f"[investor] 表初始化跳过: {e}")
+    # 进程重启时回收上次中断遗留的 running 任务（标记 interrupted），
+    # 无条件执行以覆盖调度器关闭的场景（方案 D：进程中断不留永久 running）。
+    try:
+        from core.repository import task_repo
+        recovered = task_repo.recover_interrupted()
+        if recovered:
+            app.logger.info(f"回收中断任务 {len(recovered)} 个（标记 interrupted）")
+    except Exception:
+        app.logger.exception("任务中断回收失败，继续启动")
+    if app.config["QLIB_ENABLED"]:
+        try:
+            from qlib_engine import init_qlib
+            init_qlib()
+        except Exception:
+            app.logger.exception("Qlib 初始化失败，基础功能继续可用")
+    if app.config["SCHEDULER_ENABLED"]:
+        from scheduler.runner import start_scheduler
+        from scheduler.state import SCHEDULER_RUNNING
+        if not SCHEDULER_RUNNING["enabled"]:
+            start_scheduler()
+            SCHEDULER_RUNNING["enabled"] = True
+            app.logger.info("每日 19:00 盘后自动数据同步已启动")
 
 
-@app.route("/")
-@app.route("/dashboard")
-def dashboard():
-    # 不缓存 HTML：前端改动（尤其实时重算/图表）需立即生效，避免浏览器用旧缓存
-    resp = make_response(send_from_directory(".", "dashboard.html"))
-    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
-
-
-@app.route("/reports/<path:filename>")
-def serve_report(filename):
-    return send_from_directory(os.path.join(os.path.dirname(__file__), "reports"), filename)
-
-
-@app.route("/api/health", methods=["GET"])
-def health():
-    return ok({"status": "ok", "message": "AIQuant 个人股票评分系统"})
-
-
-@app.errorhandler(404)
-def not_found(e):
-    return fail(f"404: {request.path} not found", 404)
-
-
-@app.errorhandler(500)
-def server_error(e):
-    return fail(f"500: {str(e)}", 500)
-
+app = create_app()
 
 if __name__ == "__main__":
-    from core.db import init_db
-    from scheduler.runner import start_scheduler
-    from scheduler.state import SCHEDULER_RUNNING
-
-    init_db()
-
-    # Auto-start daily sync scheduler (runs at 18:00 every trading day)
-    if not SCHEDULER_RUNNING["enabled"]:
-        SCHEDULER_RUNNING["enabled"] = True
-        start_scheduler()
-        print("[Scheduler] 每日 18:00 盘后自动数据同步已启动")
-
-    print("AIQuant 个人股票评分系统启动...")
-    print("访问 http://localhost:5000/ 打开仪表盘")
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
+    initialize_runtime(app)
+    app.run(host=settings.FLASK_HOST, port=int(os.getenv("FLASK_PORT", settings.FLASK_PORT)),
+            debug=False, use_reloader=False, threaded=True)

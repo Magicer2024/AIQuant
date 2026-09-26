@@ -12,26 +12,65 @@ import sqlite3
 import os
 import pandas as pd
 from contextlib import contextmanager
+from contextvars import ContextVar
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quant.db")
+_input_connection = ContextVar("frozen_input_connection", default=None)
+
+
+@contextmanager
+def input_connection(conn):
+    """计算器借用只读快照连接；上下文内不得另连当前库或提交写入。"""
+    if not conn.execute("PRAGMA query_only").fetchone()[0]:
+        raise ValueError("冻结输入连接必须为只读")
+    token = _input_connection.set(conn)
+    try:
+        yield conn
+    finally:
+        _input_connection.reset(token)
+
+from pathlib import Path
+from config.settings import DB_PATH  # 兼容别名，测试可 monkeypatch；配置只有一个来源
 
 
 # ─────────────────────────────────────────────
 # 连接管理
 # ─────────────────────────────────────────────
 
+def connect_db(*, readonly=False, path=None):
+    """统一连接配置；只读连接不创建文件、不设置 WAL、不迁移。"""
+    target = Path(path or DB_PATH).resolve()
+    conn = sqlite3.connect(target.as_uri() + "?mode=ro", uri=True, timeout=30) if readonly else sqlite3.connect(str(target), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        if readonly:
+            conn.execute("PRAGMA query_only=ON")
+        else:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
 @contextmanager
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")   # 写时复制，提升并发
-    conn.execute("PRAGMA synchronous=NORMAL") # 性能与安全平衡
-    conn.execute("PRAGMA busy_timeout=5000")  # 等待锁释放而非立即报错
-    conn.row_factory = sqlite3.Row
+def get_conn(*, readonly=False, path=None):
+    frozen = _input_connection.get()
+    if frozen is not None:
+        if path is not None:
+            raise ValueError("冻结计算禁止绕过输入快照连接")
+        yield frozen
+        return
+    conn = connect_db(readonly=readonly, path=path)
     try:
         yield conn
-        conn.commit()
+        if not readonly:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if not readonly:
+            conn.rollback()
         raise
     finally:
         conn.close()
@@ -42,21 +81,275 @@ def get_conn():
 # ─────────────────────────────────────────────
 def _safe_add_column(conn, table: str, column: str, col_type: str):
     """给表添加列，如果列已存在则什么都不做（SQLite 不支持 IF NOT EXISTS for columns）"""
-    try:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-    except sqlite3.OperationalError:
-        pass  # 列已存在
+    import re
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", s) for s in (table, column)):
+        raise ValueError("非法表名或列名")
+    columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+    if column not in columns:
+        conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {col_type}')
 
 
 # ─────────────────────────────────────────────
 # 建表（首次运行自动创建）
 # ─────────────────────────────────────────────
 
+def _apply_versioned_migration(conn, version, sql):
+    """在调用方事务内逐条执行；包括触发器，不使用隐式提交的 executescript。"""
+    if conn.execute("SELECT 1 FROM schema_migration WHERE version=?", (version,)).fetchone():
+        return
+    statement = ""
+    for line in sql.splitlines():
+        statement += line + "\n"
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise ValueError(f"迁移 {version} 包含不完整 SQL")
+    conn.execute("INSERT INTO schema_migration(version) VALUES (?)", (version,))
+
+
+_UNIFIED_MODEL_SQL = """
+CREATE TABLE signal_run (
+    id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+    scan_date TEXT NOT NULL, as_of TEXT NOT NULL,
+    run_type TEXT NOT NULL CHECK(run_type IN ('live','replay','legacy_import')),
+    scope TEXT NOT NULL, scope_json TEXT NOT NULL,
+    code_version_json TEXT NOT NULL, params_json TEXT NOT NULL,
+    params_hash TEXT NOT NULL, input_manifest_json TEXT NOT NULL,
+    input_hash TEXT NOT NULL, quality_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running','complete','partial','failed')),
+    content_hash TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+CREATE INDEX idx_run_date_scope ON signal_run(scan_date,scope,status);
+CREATE TABLE signal_event (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES signal_run(id),
+    scan_date TEXT NOT NULL, code TEXT NOT NULL, horizon TEXT NOT NULL,
+    strategy_key TEXT NOT NULL, strategy TEXT, signal_kind TEXT NOT NULL,
+    signal_reference_price REAL, reference_kind TEXT NOT NULL,
+    entry_target REAL, stop_loss REAL, take_profit REAL,
+    raw_score REAL, score_scale TEXT NOT NULL,
+    payload_json TEXT NOT NULL, content_hash TEXT NOT NULL,
+    UNIQUE(run_id,code,horizon,strategy_key,signal_kind)
+);
+CREATE INDEX idx_event_date_code_strategy ON signal_event(scan_date,code,strategy_key);
+CREATE TABLE recommendation_batch (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES signal_run(id),
+    scan_date TEXT NOT NULL, list_key TEXT NOT NULL,
+    cohort TEXT NOT NULL CHECK(cohort IN ('production','observation','shadow')),
+    experiment_id TEXT NOT NULL DEFAULT '', policy_json TEXT NOT NULL,
+    policy_hash TEXT NOT NULL, market_state TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1, published_at TEXT,
+    status TEXT NOT NULL CHECK(status IN ('draft','published','superseded','comparison')),
+    source TEXT NOT NULL, exclusions_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    UNIQUE(run_id,list_key,cohort,experiment_id,policy_hash)
+);
+CREATE UNIQUE INDEX idx_batch_active ON recommendation_batch(scan_date,list_key,cohort,experiment_id)
+    WHERE status='published';
+CREATE INDEX idx_batch_status ON recommendation_batch(status,scan_date,list_key);
+CREATE TABLE recommendation_item (
+    id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES recommendation_batch(id),
+    signal_id TEXT NOT NULL REFERENCES signal_event(id), code TEXT NOT NULL,
+    horizon TEXT NOT NULL, rank INTEGER NOT NULL CHECK(rank>0),
+    reason_json TEXT NOT NULL, plan_json TEXT NOT NULL, support_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL, UNIQUE(batch_id,code,horizon), UNIQUE(batch_id,rank)
+);
+CREATE TABLE signal_outcome (
+    signal_id TEXT NOT NULL REFERENCES signal_event(id), definition_version TEXT NOT NULL,
+    reference_price REAL, t1_return REAL, t2_return REAL, t3_return REAL,
+    t5_return REAL, t10_return REAL, evaluated_as_of TEXT,
+    status TEXT NOT NULL DEFAULT 'data_pending',
+    PRIMARY KEY(signal_id,definition_version)
+);
+CREATE TABLE simulated_trade (
+    id TEXT PRIMARY KEY, first_recommendation_id TEXT NOT NULL UNIQUE REFERENCES recommendation_item(id),
+    code TEXT NOT NULL, horizon TEXT NOT NULL, list_key TEXT NOT NULL,
+    cohort TEXT NOT NULL CHECK(cohort IN ('production','observation','shadow')),
+    experiment_id TEXT NOT NULL DEFAULT '', execution_json TEXT NOT NULL,
+    merge_policy TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('watching','holding','closed','expired','cancelled','data_pending')),
+    exec_entry_date TEXT, exec_entry_price REAL, exec_exit_date TEXT, exec_exit_price REAL,
+    gross_return REAL, net_return REAL, last_evaluated_as_of TEXT, evaluation_version TEXT,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    CHECK(exec_entry_price IS NOT NULL OR (gross_return IS NULL AND net_return IS NULL)),
+    CHECK(status NOT IN ('holding','closed') OR
+          (exec_entry_date IS NOT NULL AND exec_entry_price IS NOT NULL AND exec_entry_price>0)),
+    CHECK(status!='closed' OR
+          (exec_exit_date IS NOT NULL AND exec_exit_price IS NOT NULL
+           AND exec_exit_price>0 AND exec_exit_date>exec_entry_date))
+);
+CREATE INDEX idx_simulated_status_asof ON simulated_trade(status,last_evaluated_as_of);
+CREATE TABLE simulated_trade_event (
+    id TEXT PRIMARY KEY, trade_id TEXT NOT NULL REFERENCES simulated_trade(id),
+    recommendation_id TEXT REFERENCES recommendation_item(id),
+    event_date TEXT NOT NULL, event_key TEXT NOT NULL UNIQUE,
+    event_kind TEXT NOT NULL, payload_json TEXT NOT NULL, content_hash TEXT NOT NULL
+);
+CREATE INDEX idx_trade_event_date ON simulated_trade_event(trade_id,event_date);
+CREATE TRIGGER protect_finished_run_update BEFORE UPDATE ON signal_run
+WHEN OLD.status!='running'
+BEGIN SELECT RAISE(ABORT,'已结束运行不可修改'); END;
+CREATE TRIGGER protect_run_delete BEFORE DELETE ON signal_run
+BEGIN SELECT RAISE(ABORT,'运行记录不可删除'); END;
+CREATE TRIGGER protect_signal_insert BEFORE INSERT ON signal_event
+WHEN (SELECT status FROM signal_run WHERE id=NEW.run_id)!='running'
+BEGIN SELECT RAISE(ABORT,'已结束运行不可追加信号'); END;
+CREATE TRIGGER protect_signal_update BEFORE UPDATE ON signal_event
+BEGIN SELECT RAISE(ABORT,'信号不可修改'); END;
+CREATE TRIGGER protect_signal_delete BEFORE DELETE ON signal_event
+BEGIN SELECT RAISE(ABORT,'信号不可删除'); END;
+CREATE TRIGGER protect_item_insert BEFORE INSERT ON recommendation_item
+WHEN (SELECT status FROM recommendation_batch WHERE id=NEW.batch_id)!='draft'
+BEGIN SELECT RAISE(ABORT,'冻结批次不可追加推荐'); END;
+CREATE TRIGGER protect_item_update BEFORE UPDATE ON recommendation_item
+BEGIN SELECT RAISE(ABORT,'推荐条目不可修改'); END;
+CREATE TRIGGER protect_item_delete BEFORE DELETE ON recommendation_item
+BEGIN SELECT RAISE(ABORT,'推荐条目不可删除'); END;
+CREATE TRIGGER protect_batch_delete BEFORE DELETE ON recommendation_batch
+BEGIN SELECT RAISE(ABORT,'批次不可删除'); END;
+CREATE TRIGGER protect_batch_content BEFORE UPDATE ON recommendation_batch
+WHEN NEW.run_id IS NOT OLD.run_id OR NEW.scan_date IS NOT OLD.scan_date
+ OR NEW.list_key IS NOT OLD.list_key OR NEW.cohort IS NOT OLD.cohort
+ OR NEW.experiment_id IS NOT OLD.experiment_id OR NEW.policy_json IS NOT OLD.policy_json
+ OR NEW.policy_hash IS NOT OLD.policy_hash OR NEW.content_hash IS NOT OLD.content_hash
+ OR NEW.market_state IS NOT OLD.market_state OR NEW.source IS NOT OLD.source
+ OR NEW.exclusions_json IS NOT OLD.exclusions_json OR NEW.revision IS NOT OLD.revision
+ OR NOT ((OLD.status='draft' AND NEW.status IN ('published','comparison'))
+         OR (OLD.status='published' AND NEW.status='superseded'))
+BEGIN SELECT RAISE(ABORT,'批次内容或状态变更不合法'); END;
+CREATE TRIGGER validate_signal_scope BEFORE INSERT ON signal_event
+WHEN NEW.scan_date IS NOT (SELECT scan_date FROM signal_run WHERE id=NEW.run_id)
+BEGIN SELECT RAISE(ABORT,'信号日期与运行不一致'); END;
+CREATE TRIGGER validate_batch_scope BEFORE INSERT ON recommendation_batch
+WHEN NEW.scan_date IS NOT (SELECT scan_date FROM signal_run WHERE id=NEW.run_id)
+BEGIN SELECT RAISE(ABORT,'批次日期与运行不一致'); END;
+CREATE TRIGGER validate_item_identity BEFORE INSERT ON recommendation_item
+WHEN NOT EXISTS (
+    SELECT 1 FROM signal_event s JOIN recommendation_batch b ON b.run_id=s.run_id
+    WHERE s.id=NEW.signal_id AND b.id=NEW.batch_id
+      AND s.code=NEW.code AND s.horizon=NEW.horizon)
+BEGIN SELECT RAISE(ABORT,'推荐与信号身份不一致'); END;
+CREATE TRIGGER protect_trade_event_update BEFORE UPDATE ON simulated_trade_event
+BEGIN SELECT RAISE(ABORT,'交易事件不可修改'); END;
+CREATE TRIGGER protect_trade_event_delete BEFORE DELETE ON simulated_trade_event
+BEGIN SELECT RAISE(ABORT,'交易事件不可删除'); END;
+"""
+
+
+# 003 —— 任务持久化、租约与流水线阶段编排（方案 D）。
+# 设计不变式：
+#   - background_task 是所有异步/定时/CLI 任务的唯一状态来源；旧内存 _tasks 仅作轻量线程池缓存。
+#   - 状态固定枚举；已结束任务不可复活（重试创建新任务并以 retry_of 关联，不改旧任务）。
+#   - resource_group='pipeline_write' 串行化对主数据的并发修改；租约用心跳续期、过期阈值回收，
+#     owner_token 防止失去租约的旧执行器继续写入。
+#   - task_stage 记录每阶段状态/耗时/输入输出数量/数据日期/失败原因，支撑 partial_success 与
+#     「仅重跑失败阶段及下游」。阶段可更新（重试），但不可删除（审计留痕）。
+_TASK_ORCHESTRATION_SQL = """
+CREATE TABLE background_task (
+    id TEXT PRIMARY KEY,
+    idempotency_key TEXT UNIQUE,
+    task_type TEXT NOT NULL,
+    parent_id TEXT REFERENCES background_task(id),
+    resource_group TEXT,
+    input_json TEXT NOT NULL DEFAULT '{}',
+    input_version TEXT,
+    status TEXT NOT NULL CHECK(status IN
+        ('pending','running','cancel_requested','success','partial_success',
+         'error','cancelled','interrupted')),
+    stage TEXT,
+    progress REAL NOT NULL DEFAULT 0,
+    message TEXT,
+    owner_token TEXT,
+    lease_expires_at TEXT,
+    heartbeat_at TEXT,
+    result_json TEXT,
+    error TEXT,
+    retry_of TEXT REFERENCES background_task(id),
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX idx_task_status ON background_task(status);
+CREATE INDEX idx_task_resource ON background_task(resource_group,status);
+CREATE INDEX idx_task_type_status ON background_task(task_type,status);
+CREATE TABLE scheduled_job (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('daily','interval','once')),
+    at_time TEXT,
+    interval_seconds INTEGER,
+    input_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    last_status TEXT,
+    last_task_id TEXT REFERENCES background_task(id),
+    next_run_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT,
+    UNIQUE(job_type,at_time)
+);
+CREATE INDEX idx_job_enabled ON scheduled_job(enabled,schedule_kind);
+CREATE TABLE task_stage (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES background_task(id),
+    stage_key TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','running','success','skipped','error')),
+    input_hash TEXT,
+    output_count INTEGER,
+    data_date TEXT,
+    error TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT,
+    finished_at TEXT,
+    elapsed_ms INTEGER,
+    UNIQUE(task_id,stage_key)
+);
+CREATE INDEX idx_stage_task ON task_stage(task_id,seq);
+CREATE TRIGGER protect_finished_task_update BEFORE UPDATE ON background_task
+WHEN OLD.status IN ('success','partial_success','error','cancelled','interrupted')
+ AND NEW.status IN ('pending','running','cancel_requested')
+BEGIN SELECT RAISE(ABORT,'已结束任务不可复活'); END;
+CREATE TRIGGER protect_stage_delete BEFORE DELETE ON task_stage
+BEGIN SELECT RAISE(ABORT,'阶段记录不可删除'); END;
+"""
+
+
 def init_db():
     """初始化数据库，创建所有表"""
     with get_conn() as conn:
         # ── 1. 所有建表/建索引 SQL（纯 SQL，无 Python 代码）──────────
         conn.executescript("""
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS schema_migration (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- 个人持仓、自选及真实交易独立保留。
+CREATE TABLE IF NOT EXISTS personal_position (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, name TEXT,
+    shares INTEGER NOT NULL, cost_price REAL NOT NULL, stop_loss REAL,
+    take_profit REAL, note TEXT, opened_at TEXT, closed_at TEXT,
+    status TEXT DEFAULT 'holding', created_at TEXT, updated_at TEXT,
+    UNIQUE(code, opened_at)
+);
+CREATE INDEX IF NOT EXISTS idx_pp_code ON personal_position(code);
+CREATE INDEX IF NOT EXISTS idx_pp_status ON personal_position(status);
+CREATE TABLE IF NOT EXISTS personal_watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE,
+    note TEXT, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS personal_trade (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, position_id INTEGER,
+    code TEXT NOT NULL, name TEXT, action TEXT NOT NULL,
+    shares INTEGER NOT NULL, price REAL NOT NULL, cost_price REAL NOT NULL,
+    pnl REAL NOT NULL, pnl_pct REAL NOT NULL, traded_at TEXT, created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pt_code ON personal_trade(code);
+CREATE INDEX IF NOT EXISTS idx_pt_traded_at ON personal_trade(traded_at);
 -- 股票基本信息
 CREATE TABLE IF NOT EXISTS stock_info (
     code        TEXT PRIMARY KEY,
@@ -683,12 +976,27 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
         # ── 3. 迁移：为 positions 补充 commission 列 ─────────────
         _safe_add_column(conn, "positions", "commission", "REAL DEFAULT 0")
 
+        _safe_add_column(conn, "stock_info", "industry", "TEXT")
+        _safe_add_column(conn, "personal_watchlist", "target_price", "REAL")
+        _safe_add_column(conn, "personal_watchlist", "alert_dir", "TEXT")
+        _safe_add_column(conn, "personal_trade", "position_id", "INTEGER")
         # stock_info 增加市值相关字段
         _safe_add_column(conn, "stock_info", "total_shares",  "REAL")   # 总股本
         _safe_add_column(conn, "stock_info", "circ_shares",   "REAL")   # 流通股本
 
         # recommend_outcome 补充 T+2 收益列
         _safe_add_column(conn, "recommend_outcome", "t2_return", "REAL")
+
+        # ── 3b. 迁移：优化器建议/调参追溯列（方案 E3）─────────────
+        # param_suggestion 记录「建议生成时」的基线参数哈希与版本，采纳前校验：
+        #   基线已变化 ⇒ 建议过期，防止用旧寻优结论覆盖新参数（方案 E3 bullet 7）。
+        #   list_key 记录该建议面向的正式信号线；sample_n 记录评估样本数（可追溯）。
+        _safe_add_column(conn, "param_suggestion", "baseline_hash", "TEXT")
+        _safe_add_column(conn, "param_suggestion", "baseline_version", "INTEGER")
+        _safe_add_column(conn, "param_suggestion", "list_key", "TEXT")
+        _safe_add_column(conn, "param_suggestion", "sample_n", "INTEGER")
+        # param_tune_log 记录每次采纳/回滚生成的新参数版本（单调递增，供诊断按版本分组）。
+        _safe_add_column(conn, "param_tune_log", "new_version", "INTEGER")
 
         # ── 4. 迁移：三周期（horizon）维度 ────────────────────
         # strategy_rules 加 horizon；stock_signal 加 horizon/strategy
@@ -745,45 +1053,54 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
         _safe_add_column(conn, "stock_signal", "vol60", "REAL")
         _safe_add_column(conn, "stock_signal", "dd250", "REAL")
         _safe_add_column(conn, "stock_signal", "long_rank_key", "REAL")
+        # ── E1：回测结果可恢复（方案 E1，2026-09-25）──────────────────────────
+        # backtest_results 原本把 task_id 混写进 rule_id 列，且只存汇总指标；
+        # 内存 _TASKS 清空或进程重启后，权益曲线/参数/条件/未平仓记录全部丢失，
+        # 详情/分页/导出/存为规则都无法恢复。新增独立列做完整持久化：
+        #   task_id             独立任务 ID（新写入口，rule_id 旧混合用途仅兼容读取）
+        #   actual_rule_id      规则回测时的真实 strategy_rules.id（可视化回测为 NULL）
+        #   params_json         完整回测参数（BacktestParams 全字段）
+        #   conditions_json     完整选股条件
+        #   execution_config_json 执行配置（T+1/入场方式/止损判定时点/费用/滑点/整手规则）
+        #   data_version        数据版本（行情快照标识，缺省 NULL 明确标记未知）
+        #   result_json         结果 JSON（权益曲线/月度收益/指标/未平仓记录）
+        #   status              done/failed/cancelled —— 仅持久化成功才写 done
+        # 旧结果没有保存的权益曲线/参数不凭空补出：读取时字段缺失即标记 None。
+        _safe_add_column(conn, "backtest_results", "task_id", "TEXT")
+        _safe_add_column(conn, "backtest_results", "actual_rule_id", "INTEGER")
+        _safe_add_column(conn, "backtest_results", "params_json", "TEXT")
+        _safe_add_column(conn, "backtest_results", "conditions_json", "TEXT")
+        _safe_add_column(conn, "backtest_results", "execution_config_json", "TEXT")
+        _safe_add_column(conn, "backtest_results", "data_version", "TEXT")
+        _safe_add_column(conn, "backtest_results", "result_json", "TEXT")
+        _safe_add_column(conn, "backtest_results", "status", "TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_results_task "
+                     "ON backtest_results(task_id)")
+        # backtest_trades 补 shares/pnl：导出 CSV 与盈亏统计需要成交量与绝对盈亏，
+        # 原表只存 pnl_pct，重启后无法完整恢复交易明细（E1 可恢复要求）。
+        _safe_add_column(conn, "backtest_trades", "shares", "INTEGER")
+        _safe_add_column(conn, "backtest_trades", "pnl", "REAL")
         # 一次性回填 strategy_rules.horizon（按持仓期推导：<=10 短期，<=60 中期，否则长期）
-        try:
-            conn.execute("""
-                UPDATE strategy_rules SET horizon = CASE
-                    WHEN COALESCE(holding_max, 20) <= 10 THEN 'short'
-                    WHEN COALESCE(holding_max, 20) <= 60 THEN 'mid'
-                    ELSE 'long'
-                END
-                WHERE horizon IS NULL OR horizon = ''
-            """)
-        except Exception:
-            pass
-
-        # ── 5. 迁移：stock_signal 唯一索引升级为 (scan_date, code, horizon)，
-        #    允许同一交易日同一股票同时存在短/中/长三条信号 ────────
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_sig_scan_trade_code")
-        except Exception:
-            pass
-        try:
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sig_scan_code_horizon "
-                "ON stock_signal(scan_date, code, horizon)")
-        except Exception:
-            pass
-
-        # ── 5. 建唯一索引（重复建表后补充）────────────────────────
-        try:
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_code_date_uniq "
-                "ON daily_price(code, trade_date)")
-        except Exception:
-            pass
-
-        # ── 6. 迁移：下线「每日打分」，清除残留 stock_score 表 ──────
-        try:
-            conn.execute("DROP TABLE IF EXISTS stock_score")
-        except Exception:
-            pass
+        conn.execute("""
+            UPDATE strategy_rules SET horizon = CASE
+                WHEN COALESCE(holding_max, 20) <= 10 THEN 'short'
+                WHEN COALESCE(holding_max, 20) <= 60 THEN 'mid'
+                ELSE 'long'
+            END
+            WHERE horizon IS NULL OR horizon = ''
+        """)
+        conn.execute("DROP INDEX IF EXISTS idx_sig_scan_trade_code")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sig_scan_code_horizon "
+            "ON stock_signal(scan_date, code, horizon)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_code_date_uniq "
+            "ON daily_price(code, trade_date)")
+        # 旧表保留作历史证据；所有步骤成功后才记录迁移完成。
+        conn.execute("INSERT INTO schema_migration(version) VALUES ('001_safe_baseline') "
+                     "ON CONFLICT(version) DO NOTHING")
+        _apply_versioned_migration(conn, "002_unified_signal_model", _UNIFIED_MODEL_SQL)
+        _apply_versioned_migration(conn, "003_task_orchestration", _TASK_ORCHESTRATION_SQL)
 
     print(f"[DB] 数据库初始化完成: {DB_PATH}")
 

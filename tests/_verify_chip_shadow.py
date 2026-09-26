@@ -14,7 +14,7 @@ G. 前向记录旁路表：写入后与线上基线组群体对齐
 用法
 ----
     python tests/_verify_chip_shadow.py          # 只读校验（A~F）
-    python tests/_verify_chip_shadow.py --write  # 额外跑 insert_new_outcomes 验证 G（会重写近 60 天 recommend_outcome，与每日调度同行为）
+    python tests/_verify_chip_shadow.py --write  # 额外在临时副本跑验证 G；不会修改源库
 """
 from __future__ import annotations
 
@@ -26,6 +26,24 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+
+if __name__ == "__main__":
+    # 所有迁移和 --write 验证只在一致性副本执行，源库始终只读。
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    source = Path(os.getenv("AIQUANT_DB_PATH", str(Path(ROOT) / "core" / "quant.db")))
+    work = Path(ROOT) / ".pytest_cache" / "isolated"
+    work.mkdir(parents=True, exist_ok=True)
+    target = Path(tempfile.mkdtemp(prefix="chip-", dir=work)) / "verify.db"
+    if source.exists():
+        with sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True) as src:
+            with sqlite3.connect(target) as dst:
+                src.backup(dst)
+    os.environ["AIQUANT_DB_PATH"] = str(target)
+    os.environ["AIQUANT_TEST_ROOT"] = str(work)
+    os.environ["AIQUANT_TESTING"] = "1"
+    print(f"验证仅操作隔离副本：{target}")
 
 # core/sync.py 顶层 `from qlib_engine.data_bridge import ...`，而 qlib_engine/__init__
 # 顶层 `import qlib` —— 本测试只用 _build_signal_records（纯计算，不碰 qlib 数据层），

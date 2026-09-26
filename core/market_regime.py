@@ -53,13 +53,17 @@ def compute_regime_series(conn, start_date: str,
     窗口与 0.5 兜底），异常时整体回退单日均值口径。
     """
     end_filter = " AND trade_date <= ?" if end_date else ""
+    # 冻结输入库保留独立的全市场宽度，局部运行仍使用同一大盘口径。
+    price_table = "market_breadth" if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_breadth'"
+    ).fetchone() else "daily_price"
     try:
         # 1) 涨跌家数比（近 5 个交易日滑动均值，含当日）
         rows = conn.execute(f"""
             SELECT trade_date,
                    SUM(CASE WHEN pct_change > 0 THEN 1 ELSE 0 END) AS up,
                    COUNT(*) AS total
-            FROM daily_price
+            FROM {price_table}
             WHERE trade_date >= date(?, '-12 days'){end_filter}
             GROUP BY trade_date ORDER BY trade_date
         """, (start_date, end_date) if end_date else (start_date,)).fetchall()
@@ -80,7 +84,7 @@ def compute_regime_series(conn, start_date: str,
                            PARTITION BY code ORDER BY trade_date
                            ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
                        ) AS ma20
-                FROM daily_price
+                FROM {price_table}
                 WHERE trade_date >= date(?, '-30 days'){end_filter}
             ) d
             GROUP BY d.trade_date ORDER BY d.trade_date
@@ -126,7 +130,7 @@ def compute_regime_series(conn, start_date: str,
         # composite 计算失败（表结构/数据异常）→ 回退单日均值口径
         rows = conn.execute(f"""
             SELECT trade_date, AVG(pct_change) AS avg_pct
-            FROM daily_price
+            FROM {price_table}
             WHERE trade_date >= ?{end_filter}
             GROUP BY trade_date
         """, (start_date, end_date) if end_date else (start_date,)).fetchall()

@@ -41,8 +41,8 @@ from strategy.rec_filters import passes_quality  # noqa: E402
 
 
 def _load_window(start: str, end: str) -> pd.DataFrame:
-    import sqlite3
-    con = sqlite3.connect("core/quant.db")
+    from core.db import connect_db
+    con = connect_db(readonly=True)
     try:
         df = pd.read_sql(
             "SELECT code, trade_date, open, high, low, close, volume, amount "
@@ -95,8 +95,18 @@ def main() -> None:
     ap.add_argument("--start", default=EXIT_TRACK_START_DATE)
     ap.add_argument("--end", default=None)
     args = ap.parse_args()
+    from config.settings import SIGNAL_MODEL_MODE, require_signal_model_ready
+    require_signal_model_ready()
+    if SIGNAL_MODEL_MODE != "legacy":
+        if args.refresh:
+            ap.error("统一模型历史重放不能重建前向推荐或交易成绩")
+        from core.signal_runtime import replay_signal_range
+        result = replay_signal_range(args.start, args.end,
+                                     strategy_keys=["first_reversal"], dry_run=not args.apply)
+        print(result)
+        return result
 
-    with get_conn() as conn:
+    with get_conn(readonly=True) as conn:
         end = args.end or conn.execute(
             "SELECT MAX(trade_date) FROM daily_price").fetchone()[0]
     print("=" * 78)

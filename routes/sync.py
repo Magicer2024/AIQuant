@@ -18,54 +18,100 @@ from scheduler.state import SYNC_STATUS
 _scheduled_jobs = {}  # job_id -> job info
 _schedule_thread = None
 _schedule_running = False
+# 独立 Scheduler 实例：不使用全局 schedule，避免与 scheduler/runner.py 互相 clear（方案 D2）。
+_FIX_SCHEDULER = schedule.Scheduler()
 
 def _run_scheduler_loop():
-    """后台调度器循环，每分钟检查一次"""
+    """后台调度器循环，每分钟检查一次（仅本模块独立实例）"""
     global _schedule_running
     _schedule_running = True
     while _schedule_running:
-        schedule.run_pending()
+        _FIX_SCHEDULER.run_pending()
         time.sleep(60)
 
+def _reload_persisted_jobs():
+    """从 scheduled_job 表恢复用户历史修正安排（重启后不丢失），注册到本模块实例。"""
+    try:
+        from core.repository import task_repo
+        for job in task_repo.list_scheduled_jobs(enabled_only=True):
+            if job["job_type"] != "fix_history" or not job.get("at_time"):
+                continue
+            inp = job.get("input") or {}
+            job_id = job["id"]
+            if job_id in _scheduled_jobs:
+                continue
+            sched_job = _FIX_SCHEDULER.every().day.at(job["at_time"]).do(
+                _job_fix_history, job_id=job_id, source=inp.get("source", "tx"),
+                threads=int(inp.get("threads", 2)), rate_limit=float(inp.get("rate_limit", 1.0)))
+            _scheduled_jobs[job_id] = {
+                "id": job_id, "time": job["at_time"], "source": inp.get("source", "tx"),
+                "threads": inp.get("threads", 2), "rate_limit": inp.get("rate_limit", 1.0),
+                "schedule_job": sched_job, "created_at": job.get("created_at"),
+                "last_run": job.get("last_run_at"), "last_status": job.get("last_status"),
+                "last_report": None, "last_error": None}
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
 def _start_scheduler_if_needed():
-    """启动调度器线程（如果未启动）"""
+    """启动调度器线程（如果未启动），并恢复持久化的历史修正安排"""
     global _schedule_thread
+    from config.settings import SCHEDULER_ENABLED
+    if not SCHEDULER_ENABLED:
+        raise RuntimeError("当前配置禁止启动调度器")
     if _schedule_thread is None or not _schedule_thread.is_alive():
+        _reload_persisted_jobs()
         _schedule_thread = threading.Thread(target=_run_scheduler_loop, daemon=True)
         _schedule_thread.start()
 
 def _job_fix_history(job_id: str, source: str, threads: int, rate_limit: float):
-    """执行历史修正的任务函数"""
+    """执行历史修正：经统一流水线执行器提交（pipeline_write 资源组互斥 + 任务跟踪）。
+
+    与同步/重算/深度扫描共享 pipeline_write 租约，保证对主数据的并发修改串行化；
+    已有写任务在跑时本次触发被去重跳过，不并行改主数据。
+    """
     print(f"[Schedule] 开始执行定时任务 {job_id}: source={source}, threads={threads}")
+    status = "error"
+    result_detail = None
     try:
-        # 导入并执行
-        import sys
-        sys.path.insert(0, '.')
-        from tools.fix_history import run_fix_history
-        
-        # 执行修正（非 dry-run）
-        report = run_fix_history(
-            codes=None,  # 全部股票
-            source=source,
-            threads=threads,
-            rate_limit=rate_limit,
-            dry_run=False,
-            verbose=False,
-        )
-        
-        # 更新任务状态
-        if job_id in _scheduled_jobs:
-            _scheduled_jobs[job_id]["last_run"] = datetime.now().isoformat()
-            _scheduled_jobs[job_id]["last_status"] = "success"
-            _scheduled_jobs[job_id]["last_report"] = report
-            
-        print(f"[Schedule] 任务 {job_id} 执行完成")
+        from core import pipeline
+        from core.repository import task_repo
+
+        def _run(ctx):
+            from tools.fix_history import run_fix_history
+            report = run_fix_history(codes=None, source=source, threads=threads,
+                                     rate_limit=rate_limit, dry_run=False, verbose=False)
+            return {"report": str(report)[:500]}
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        r = pipeline.execute_pipeline_task(
+            stages=[pipeline.Stage("fix_history", _run)], task_type="fix_history",
+            idempotency_key=f"fix_history:{job_id}:{today}",
+            resource_group=task_repo.RESOURCE_PIPELINE_WRITE,
+            input={"source": source, "threads": threads, "rate_limit": rate_limit})
+        status = r.get("status") or "error"
+        if r.get("submit", {}).get("conflict") or r.get("submit", {}).get("reused"):
+            print(f"[Schedule] 任务 {job_id} 跳过：已有主数据写任务在处理（{status}）")
+            status = "skipped_duplicate"
+        else:
+            result_detail = (r.get("summary") or {})
+            print(f"[Schedule] 任务 {job_id} 执行完成（{status}）")
     except Exception as e:
         print(f"[Schedule] 任务 {job_id} 执行失败: {e}")
-        if job_id in _scheduled_jobs:
-            _scheduled_jobs[job_id]["last_run"] = datetime.now().isoformat()
-            _scheduled_jobs[job_id]["last_status"] = "failed"
-            _scheduled_jobs[job_id]["last_error"] = str(e)
+        status = "failed"
+        result_detail = {"error": str(e)}
+    if job_id in _scheduled_jobs:
+        _scheduled_jobs[job_id]["last_run"] = datetime.now().isoformat()
+        _scheduled_jobs[job_id]["last_status"] = status
+        if isinstance(result_detail, dict) and result_detail.get("error"):
+            _scheduled_jobs[job_id]["last_error"] = result_detail["error"]
+        else:
+            _scheduled_jobs[job_id]["last_report"] = result_detail
+    try:
+        from core.repository import task_repo
+        task_repo.record_job_run(job_id, status=status)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # 同步进度状态（模块级全局变量）
@@ -89,6 +135,42 @@ def _progress_callback(current, total, success, failed):
         "success": success,
         "failed": failed,
     })
+
+
+def _acquire_write_task(task_type, *, idempotency_key=None, input=None):
+    """手动写入口获取 pipeline_write 租约，纳入统一任务互斥（手动/定时/CLI 单一有效写任务）。
+
+    返回 (task_id, owner_token, conflict)：
+      - conflict=True：已有活跃写任务（返回其 task_id），调用方应回 409。
+      - task_id/owner_token 均为 None：任务表不可用，调用方回退旧的无跟踪执行。
+    """
+    try:
+        import uuid
+        from core.repository import task_repo
+        sub = task_repo.submit_task(task_type=task_type, idempotency_key=idempotency_key,
+                                    resource_group=task_repo.RESOURCE_PIPELINE_WRITE, input=input)
+        if sub.get("reused") or sub.get("conflict"):
+            return sub.get("task_id"), None, True
+        token = uuid.uuid4().hex
+        if not task_repo.claim_task(sub["task_id"], token).get("claimed"):
+            return sub["task_id"], None, True
+        return sub["task_id"], token, False
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return None, None, False
+
+
+def _finish_write_task(task_id, owner_token, status, *, result=None, error=None):
+    """回写手动任务终态并释放租约（best-effort，失败不影响接口）。"""
+    if not (task_id and owner_token):
+        return
+    try:
+        from core.repository import task_repo
+        task_repo.set_status(task_id, status, owner_token=owner_token, result=result, error=error)
+        task_repo.release_lease(task_id, owner_token)
+    except Exception:
+        pass
 
 
 @sync_bp.route("/progress", methods=["GET"])
@@ -182,6 +264,11 @@ def start_sync():
 
     if _sync_progress["running"]:
         return fail("同步正在进行中，请稍候", 409)
+    # 纳入统一写任务互斥：与定时/CLI 共享 pipeline_write 租约，只产生一个有效写任务。
+    task_id, owner_token, conflict = _acquire_write_task(
+        "daily_sync", input={"target": target, "source": "manual"})
+    if conflict:
+        return fail("已有主数据写任务在处理，请稍候", 409)
     _sync_progress.update({"running": True, "current": 0, "total": 0,
                             "success": 0, "failed": 0, "message": "",
                             "last_error": None, "target": target})
@@ -198,9 +285,12 @@ def start_sync():
                 f"同步完成 [target={target}]: 成功{_sync_stats['success']} 失败{_sync_stats['failed']} "
                 f"跳过(ST:{_sync_stats['skipped_st']} 北交所:{_sync_stats['skipped_bse']}){sig_txt}"
             )
+            _finish_write_task(task_id, owner_token, "success",
+                               result={"message": _sync_progress["message"]})
         except Exception as e:
             _sync_progress["last_error"] = str(e)
             _sync_progress["message"] = f"同步失败: {e}"
+            _finish_write_task(task_id, owner_token, "error", error=str(e))
         finally:
             _sync_progress["running"] = False
             # 回写进程内状态，保持与 sync_log 一致（scheduler/state 供定时任务与文档沿用）
@@ -210,7 +300,8 @@ def start_sync():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return ok({"status": "started", "message": f"数据同步已启动（target={target}）", "target": target})
+    return ok({"status": "started", "message": f"数据同步已启动（target={target}）",
+               "target": target, "task_id": task_id})
 
 
 @sync_bp.route("/fast", methods=["POST"])
@@ -231,6 +322,11 @@ def start_fast_sync():
     if target not in ("all", "watchlist"):
         target = "all"
 
+    # 纳入统一写任务互斥（与定时/CLI 共享 pipeline_write 租约）。
+    task_id, owner_token, conflict = _acquire_write_task(
+        "fast_sync", input={"target": target, "trade_dates": trade_dates, "source": "manual"})
+    if conflict:
+        return fail("已有主数据写任务在处理，请稍候", 409)
     _sync_progress.update({"running": True, "current": 0, "total": 0,
                             "success": 0, "failed": 0, "message": "",
                             "last_error": None, "target": target})
@@ -249,15 +345,19 @@ def start_fast_sync():
             except Exception:
                 import traceback
                 traceback.print_exc()
+            _finish_write_task(task_id, owner_token, "success",
+                               result={"message": _sync_progress["message"]})
         except Exception as e:
             _sync_progress["last_error"] = str(e)
             _sync_progress["message"] = f"按日同步失败: {e}"
+            _finish_write_task(task_id, owner_token, "error", error=str(e))
         finally:
             _sync_progress["running"] = False
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return ok({"status": "started", "message": f"按日批量同步已启动（target={target}）", "target": target})
+    return ok({"status": "started", "message": f"按日批量同步已启动（target={target}）",
+               "target": target, "task_id": task_id})
 
 
 @sync_bp.route("/pool", methods=["POST"])
@@ -440,11 +540,29 @@ def start_recalc_incremental():
     if cov is None or cov < 0.5:
         return fail(f"最新交易日({latest})策略分未重算（覆盖率 {cov:.0%}），请先执行同步或全量重算", 409)
 
-    task_id = submit_task(run_recalc_incremental, [latest.replace("-", "")],
+    # 纳入统一写任务互斥（重算属 pipeline_write 组）。租约只在入口获取，
+    # recalc_incremental_signals 内部不再申请，避免与同步流水线自锁。
+    repo_task_id, owner_token, conflict = _acquire_write_task(
+        "recalc", input={"target": target, "scan_date": latest, "source": "manual"})
+    if conflict:
+        return fail("已有主数据写任务在处理，请稍候", 409)
+
+    def _recalc_with_lease(scan_dates, **kw):
+        try:
+            res = run_recalc_incremental(scan_dates, **kw)
+            _finish_write_task(repo_task_id, owner_token, "success",
+                               result={"signals": (res or {}).get("signals")})
+            return res
+        except Exception as e:
+            _finish_write_task(repo_task_id, owner_token, "error", error=str(e))
+            raise
+
+    task_id = submit_task(_recalc_with_lease, [latest.replace("-", "")],
                           verbose=False, progress_callback=True, kind="recalc",
                           target=target)
-    return ok({"task_id": task_id, "target": target, "scan_date": latest,
-              "message": f"增量重算任务已启动（scan_date={latest}，target={target}）"})
+    return ok({"task_id": task_id, "pipeline_task_id": repo_task_id, "target": target,
+               "scan_date": latest,
+               "message": f"增量重算任务已启动（scan_date={latest}，target={target}）"})
 
 
 @sync_bp.route("/status/<task_id>", methods=["GET"])
@@ -504,16 +622,27 @@ def schedule_fix_history():
     # 检查是否已存在相同时间的任务
     if job_id in _scheduled_jobs:
         # 更新现有任务
-        schedule.cancel_job(_scheduled_jobs[job_id]["schedule_job"])
+        _FIX_SCHEDULER.cancel_job(_scheduled_jobs[job_id]["schedule_job"])
     
-    # 创建 schedule job
-    job = schedule.every().day.at(run_time).do(
+    # 创建 schedule job（本模块独立实例）
+    job = _FIX_SCHEDULER.every().day.at(run_time).do(
         _job_fix_history, 
         job_id=job_id,
         source=source,
         threads=threads,
         rate_limit=rate_limit
     )
+
+    # 持久化安排（重启后可恢复），失败不阻断本次注册
+    try:
+        from core.repository import task_repo
+        task_repo.upsert_scheduled_job(
+            job_type="fix_history", schedule_kind="daily", at_time=run_time,
+            input={"source": source, "threads": threads, "rate_limit": rate_limit},
+            enabled=True, job_id=job_id)
+    except Exception:
+        import traceback
+        traceback.print_exc()
     
     # 保存任务信息
     _scheduled_jobs[job_id] = {
@@ -565,11 +694,18 @@ def cancel_fix_history_job(job_id: str):
     if job_id not in _scheduled_jobs:
         return fail("任务不存在", 404)
     
-    # 取消 schedule job
-    schedule.cancel_job(_scheduled_jobs[job_id]["schedule_job"])
+    # 取消 schedule job（本模块独立实例）
+    _FIX_SCHEDULER.cancel_job(_scheduled_jobs[job_id]["schedule_job"])
     
     # 删除任务信息
     del _scheduled_jobs[job_id]
+
+    # 同步停用持久化安排（重启后不再恢复）
+    try:
+        from core.repository import task_repo
+        task_repo.set_job_enabled(job_id, False)
+    except Exception:
+        pass
     
     return ok({"job_id": job_id, "message": "定时任务已取消"})
 

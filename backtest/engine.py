@@ -22,6 +22,10 @@ import pandas as pd
 # ── 复用主项目已有的指标与数据库 ──
 from core.db import get_conn
 from strategy.indicators import calc_ma, calc_macd, calc_rsi, calc_kdj
+# ── E2c：保守成交约束（一字板/开盘封板/停牌/涨跌停），与建仓计划、rule_engine 共用口径 ──
+from utils.trade_constraints import classify_fill_bar, can_fill, board_limit_pct
+# ── E2：研究回测默认资金（与个人参考账户 1 万分离命名，不强制研究回测改 1 万）──
+from config.personal_config import RESEARCH_CAPITAL
 
 
 # ─────────────── 默认交易成本（A 股）───────────────
@@ -46,6 +50,10 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             out[col] = np.nan
         out[col] = out[col].astype(float)
+
+    # 前收盘价（涨跌停核定基准）：df 已按 trade_date 升序索引，shift(1) 即上一交易日收盘。
+    # 停牌缺口日的上一有效收盘恰好是正确的复牌涨跌停基准。
+    out["prev_close"] = out["close"].shift(1)
 
     # 移动平均
     ma = calc_ma(out["close"], periods=[5, 10, 20, 30, 60])
@@ -242,7 +250,9 @@ class BacktestParams:
     """可视化回测参数（与前端表单一一对应）"""
     start_date: str
     end_date: str
-    initial_cash: float = 1_000_000.0
+    # 研究回测默认资金（RESEARCH_CAPITAL，默认 100 万）——与个人参考账户（1 万）分离命名，
+    # 研究全市场回测不强制改成 1 万；个人建仓资格与预算另走 config.personal_config。
+    initial_cash: float = RESEARCH_CAPITAL
     max_holdings: int = 5
     max_buy_per_day: int = 3
     buy_timing: str = "next_day_open"     # next_day_open | current_close
@@ -489,8 +499,18 @@ class VisualBacktestEngine:
                     df = stock_data.get(code)
                     if df is None or dt not in df.index:
                         continue
-                    open_price = float(df.loc[dt, "open"])
+                    row = df.loc[dt]
+                    open_price = float(row["open"])
                     if open_price <= 0 or pd.isna(open_price):
+                        continue
+                    # E2c 保守成交：一字涨停 / 开盘封涨停 / 停牌 → 开盘买不进，放弃该挂单
+                    # （回测最大的乐观偏差来源：信号日次日一字涨停，实线根本买不到）
+                    fill_status, _fr = classify_fill_bar(
+                        "buy", open_=row.get("open"), high=row.get("high"),
+                        low=row.get("low"), close=row.get("close"),
+                        volume=row.get("volume"), prev_close=row.get("prev_close"),
+                        limit_pct=board_limit_pct(code), price_basis="open")
+                    if not can_fill(fill_status):
                         continue
                     fill_price = open_price * (1 + p.slippage_rate)
                     if len(positions) >= p.max_holdings:
@@ -538,6 +558,9 @@ class VisualBacktestEngine:
                 sell_price = close * (1 - p.slippage_rate)
                 ret_pct = sell_price / pos["entry_price"] - 1
                 hold_days = (dt.date() - pd.to_datetime(pos["entry_date"]).date()).days
+                # E2c T+1：当日买入（hold_days=0）不可当日卖出，最早次日才能离场
+                if hold_days < 1:
+                    continue
                 sell_reason = None
                 if p.stop_loss_pct is not None and ret_pct <= p.stop_loss_pct:
                     sell_reason = "stop_loss"
@@ -546,6 +569,14 @@ class VisualBacktestEngine:
                 elif p.max_hold_days is not None and hold_days >= p.max_hold_days:
                     sell_reason = "max_hold_days"
                 if sell_reason is None:
+                    continue
+                # E2c 保守成交：一字跌停 / 开盘封跌停 / 停牌 → 卖不出，持仓保留到下一日
+                fill_status, _fr = classify_fill_bar(
+                    "sell", open_=row.get("open"), high=row.get("high"),
+                    low=row.get("low"), close=close, volume=row.get("volume"),
+                    prev_close=row.get("prev_close"),
+                    limit_pct=board_limit_pct(code), price_basis="close")
+                if not can_fill(fill_status):
                     continue
 
                 proceeds = pos["shares"] * sell_price
@@ -596,8 +627,17 @@ class VisualBacktestEngine:
                     daily_buys += 1
                 else:  # current_close
                     df = stock_data[code]
-                    close = float(df.loc[dt, "close"])
+                    row = df.loc[dt]
+                    close = float(row["close"])
                     if close <= 0 or pd.isna(close):
+                        continue
+                    # E2c 保守成交：收盘涨停 / 一字涨停 / 停牌 → 收盘买不进
+                    fill_status, _fr = classify_fill_bar(
+                        "buy", open_=row.get("open"), high=row.get("high"),
+                        low=row.get("low"), close=close, volume=row.get("volume"),
+                        prev_close=row.get("prev_close"),
+                        limit_pct=board_limit_pct(code), price_basis="close")
+                    if not can_fill(fill_status):
                         continue
                     fill_price = close * (1 + p.slippage_rate)
                     if len(positions) >= p.max_holdings:

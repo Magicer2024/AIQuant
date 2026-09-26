@@ -1,0 +1,14 @@
+# 可选：Qlib 因子 / 模型引擎（qlib_engine）依赖。
+#
+# 基础安装不强装、不自动初始化 Qlib：
+#   - config.settings.QLIB_ENABLED 默认 False（仅在 AIQUANT_QLIB_ENABLED=1 时开启，
+#     且测试环境恒为 False）；
+#   - qlib_engine.init_qlib() 受 QLIB_ENABLED 守卫，`import qlib` 只在其函数体内发生，
+#     未安装 pyqlib 时应用照常启动、同步与打分（走 AkShare/baostock + SQLite 主路径）。
+#
+# 仅当确实需要 Qlib 二进制数据 / 模型回测时安装：
+#   pip install -r requirements-qlib.txt -c constraints.txt
+#   AIQUANT_QLIB_ENABLED=1
+#
+-r requirements.txt
+pyqlib>=0.9.0

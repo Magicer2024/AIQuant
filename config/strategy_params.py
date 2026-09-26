@@ -2,6 +2,36 @@
 config/strategy_params.py —— 各策略默认参数
 """
 from typing import Dict, Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_frozen_parameters = ContextVar("frozen_strategy_parameters", default=None)
+_frozen_config = ContextVar("frozen_strategy_config", default=None)
+
+
+@contextmanager
+def parameter_context(parameters):
+    """接受完整运行快照或有效参数字典；线程必须显式传入，退出后恢复。"""
+    import copy
+    frozen = copy.deepcopy(parameters)
+    token = _frozen_parameters.set(frozen.get("effective", frozen))
+    config_token = _frozen_config.set(frozen.get("strategy_config"))
+    try:
+        yield
+    finally:
+        _frozen_config.reset(config_token)
+        _frozen_parameters.reset(token)
+
+
+def get_strategy_config(name, fallback=None):
+    """静态开关和过滤配置也必须来自运行快照，返回副本防止计算器修改。"""
+    import copy
+    frozen = _frozen_config.get()
+    if frozen is not None:
+        if name not in frozen:
+            raise KeyError(f"冻结配置缺少策略配置：{name}")
+        return copy.deepcopy(frozen[name])
+    return globals()[name] if fallback is None else fallback
 
 # ── 5策略融合权重 ──────────────────────────────
 # 顺序：[放量突破, 均线粘合, 量价背离, 抄底, 主力建仓]
@@ -1041,9 +1071,18 @@ def invalidate_param_cache():
 
 def get_param(key: str, default: Any = None) -> Any:
     """读取可调参数：DB 覆盖值优先，越界截断，缺失回退代码默认值"""
+    frozen = _frozen_parameters.get()
+    if frozen is not None:
+        if key not in frozen:
+            raise KeyError(f"冻结配置缺少参数：{key}")
+        return frozen[key]
+    return _resolve_param(key, _load_overrides(), default)
+
+
+def _resolve_param(key, overrides, default=None):
     spec = TUNABLE_PARAMS.get(key)
     fallback = spec["default"] if spec else default
-    raw = _load_overrides().get(key)
+    raw = overrides.get(key)
     if raw is None:
         return fallback
     try:
@@ -1059,6 +1098,18 @@ def get_param(key: str, default: Any = None) -> Any:
     return val
 
 
+def freeze_effective_parameters(conn):
+    """从同一个数据库事务解析有效值，不读取可能过期的进程缓存。"""
+    import copy
+    overrides = {r["param_key"]: r["value"] for r in conn.execute(
+        "SELECT param_key,value FROM strategy_param_override")}
+    constants = {k: copy.deepcopy(v) for k, v in globals().items()
+                 if k.isupper() and not k.startswith("_") and k != "TUNABLE_PARAMS"}
+    from config.personal_config import get_personal_config
+    return {"effective": {k: _resolve_param(k, overrides) for k in TUNABLE_PARAMS},
+            "strategy_config": constants, "account": get_personal_config()}
+
+
 def get_tunable_params_state() -> Dict[str, Dict[str, Any]]:
     """返回全部可调参数的默认值/当前值/是否被覆盖（供优化器 API 展示）"""
     overrides = _load_overrides()
@@ -1071,3 +1122,16 @@ def get_tunable_params_state() -> Dict[str, Dict[str, Any]]:
         }
         for key, spec in TUNABLE_PARAMS.items()
     }
+
+
+def compute_params_baseline_hash() -> str:
+    """当前有效可调参数集合的稳定哈希（方案 E3：建议基线追溯）。
+
+    优化器生成建议时冻结该哈希；采纳前重新计算并比对——基线已变化则建议过期，
+    防止用旧寻优结论覆盖新参数。只覆盖 TUNABLE_PARAMS 的有效值（含覆盖层），
+    与 core.input_snapshot.content_hash 同口径：稳定排序、不序列化 NaN，
+    不受字典或数据库返回顺序影响。
+    """
+    from core.input_snapshot import content_hash
+    snapshot = {k: get_param(k) for k in sorted(TUNABLE_PARAMS)}
+    return content_hash(snapshot)

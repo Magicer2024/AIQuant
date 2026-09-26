@@ -485,7 +485,7 @@ async function loadHomeTab(container) {
                 <div class="hero-title">今天投资，看这一页就够了</div>
                 <div class="hero-sub" id="heroSub">正在加载市场状态…</div>
                 <div class="hero-fund-tip" style="margin-top:8px;padding:8px 12px;background:rgba(255,171,64,0.08);border-left:3px solid var(--warning);border-radius:4px;font-size:13px;color:var(--text-secondary)">
-                    💰 当前账户假设 1.5 万，今日新增投入 ≤ 3000 元（单票不超过 20% 仓位）
+                    <span id="accountBudgetHint">正在读取参考账户配置…</span>
                 </div>
             </div>
             <div class="hero-right">
@@ -665,6 +665,7 @@ async function loadHomeTab(container) {
 
     // 并行加载所有数据
     await Promise.all([
+        loadAccountBudget(),
         loadMarketOverview(),
         loadTodayPicks(),
         loadSurgePicks(),
@@ -684,6 +685,20 @@ async function loadHomeTab(container) {
 
     // 首次进入或今日尚未同步时，自动触发同步
     maybeAutoSync();
+}
+
+async function loadAccountBudget() {
+    const hint = document.getElementById('accountBudgetHint');
+    if (!hint) return;
+    try {
+        const response = await RequestManager.fetch('accountBudget', API + '/investor/account_config');
+        if (!response.success) throw new Error(response.error);
+        const d = response.data;
+        if (!hint.isConnected) return;
+        hint.textContent = `参考账户 ${Number(d.reference_account).toLocaleString()} 元；单股预算 ≤ ${Number(d.max_position_amount).toLocaleString()} 元（${Math.round(d.max_position_pct * 100)}%）。仅为静态预算，不代表可用现金。`;
+    } catch (error) {
+        if (hint.isConnected) hint.textContent = '账户配置暂不可用，预算未知';
+    }
 }
 
 function greetingByHour() {
@@ -1782,9 +1797,9 @@ function renderReversalHistory(d) {
         <div class="metrics-row" style="margin-bottom:10px">
             ${card(d.total, '跟踪样本', '', '近 ' + d.days + ' 天全部复盘记录（含未结算）')}
             ${card(settled, '已结算', '', '已触发出场的原因行；未结算不计入胜率')}
-            ${card(s.win_rate != null ? s.win_rate + '%' : '--', '结算胜率', wrCls, 'exit_return > t5 > t3 > t2 > t1 的最终收益口径，>0 记胜')}
+            ${card(s.win_rate != null ? s.win_rate + '%' : '--', '结算胜率', wrCls, '仅有效已出场收益，>0 记胜；不以 T+n 补齐未结算交易')}
             ${card(s.avg_return != null ? (s.avg_return >= 0 ? '+' : '') + s.avg_return + '%' : '--', '平均收益', avgCls)}
-            ${card(s.profit_factor != null ? Number(s.profit_factor).toFixed(2) : '--', '盈亏比', pfCls, '平均盈利 / 平均亏损')}
+            ${card(s.profit_factor != null ? Number(s.profit_factor).toFixed(2) : '--', 'Profit factor', pfCls, '总盈利 / 总亏损绝对值；无亏损样本时未知')}
             ${card(s.best_return != null ? '+' + s.best_return + '%' : '--', '最佳', 'positive')}
             ${card(s.worst_return != null ? s.worst_return + '%' : '--', '最差', 'negative')}
             ${card(s.stop_loss_count || 0, '触发止损', 'negative')}
@@ -1801,14 +1816,14 @@ function renderReversalHistory(d) {
                 <th title="信号日收盘相对 MA20 的偏离；越低＝入场位越低">首日位置</th>
                 <th title="信号日量比（≥1.5 为放量确认）">量比</th>
                 <th title="信号日 KDJ 的 K 值；本线只做提示，非过滤条件">KDJ K</th>
-                <th title="复盘口径的建仓价＝信号日次日开盘">建仓价</th>
+                <th title="旧记录的诊断收益基准，不代表模拟成交价">信号参考价</th>
                 <th>T+1</th><th>T+2</th><th>T+3</th><th>T+5</th><th>收益</th><th>出场</th>
             </tr></thead><tbody>${rows}</tbody></table>
             <div style="font-size:11.5px;color:var(--text-muted);margin-top:8px;line-height:1.7">
                 ⚠ 本线是<b>入场位置观察池，不是买入推荐</b>：实测市场中性超额 +0.174pp(t=+2.80)、
                 分年三年一致，但胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔，
                 且<b>出场纪律对本线为负贡献</b>（止损把胜率换上去、期望反而跑输「随便买一只持有 5 天」）。
-                T+n 为买入后第 n 个交易日收盘相对建仓价的<b>持有漂移</b>（非实际出场），
+                T+n 为信号后第 n 个交易日收盘相对信号参考价的<b>诊断收益</b>（非成交收益）；旧记录未保存模拟成交价时为未知，
                 仅已结算行进胜率/均值；「持仓中」= 未触发止损止盈、尚未出场。
                 板块只含<b>主板</b>（未开通创业板/科创板权限）；未过滤时创业板子样本胜率 58.9%、主板 47.1%，两者不可混读。
             </div>
@@ -3342,28 +3357,41 @@ function renderPickCard(it) {
                 </div>`;
             }
 
-            // ── 建仓分批 ──
+            // ── 建仓分批（静态参考预算，非账户可用现金；不可执行时明示原因）──
             let ppHtml = '';
-            if (pp.batches && pp.batches.length) {
-                const totalStr = pp.total_shares ? `${pp.total_shares} 股 · 约 ¥${pp.total_cost_est}` : '资金不足 1 手';
-                ppHtml = `
-                <div class="position-plan">
-                    <div class="position-plan-head">
-                        <span>💰 建仓分批 · 1.5万账户</span>
-                        <span class="position-plan-total">${totalStr}</span>
-                    </div>
-                    <div class="position-batches">
-                        ${pp.batches.map(b => `
-                            <div class="batch-row">
-                                <span class="batch-ratio">${(b.ratio*100).toFixed(0)}%</span>
-                                <span class="batch-note">${b.note}</span>
-                                <span class="batch-shares">${b.shares}股</span>
-                                <span class="batch-price">@${b.price.toFixed(2)}</span>
-                                <span class="batch-trigger">${b.trigger}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>`;
+            if (pp && (pp.executable === false || (pp.batches && pp.batches.length))) {
+                const acctLabel = pp.account_size ? (pp.account_size / 10000) + '万' : '参考';
+                const head = `<span>💰 建仓分批 · ${acctLabel}账户（参考预算）</span>`;
+                const budgetNote = (pp.budget_kind === 'reference_budget')
+                    ? `<div class="price-sub" style="margin-top:4px;color:var(--text-muted)" title="${pp.warning||''}">静态参考预算，非账户可用现金${pp.total_commission_est?` · 含佣金约 ¥${pp.total_commission_est}`:''}</div>`
+                    : '';
+                if (pp.executable === false) {
+                    // 1 手也买不起 / 缺挂单价：明示原因，不展示虚构仓位
+                    ppHtml = `
+                    <div class="position-plan">
+                        <div class="position-plan-head">${head}<span class="position-plan-total">暂不可执行</span></div>
+                        <div class="price-sub" style="color:var(--danger);margin-top:4px">⚠ ${pp.reason || '资金不足 1 手（100 股）'}</div>
+                        ${budgetNote}
+                    </div>`;
+                } else {
+                    const totalStr = pp.total_shares ? `${pp.total_shares} 股 · 约 ¥${pp.total_cost_est}` : '资金不足 1 手';
+                    ppHtml = `
+                    <div class="position-plan">
+                        <div class="position-plan-head">${head}<span class="position-plan-total">${totalStr}</span></div>
+                        <div class="position-batches">
+                            ${pp.batches.map(b => `
+                                <div class="batch-row">
+                                    <span class="batch-ratio">${(b.ratio*100).toFixed(0)}%</span>
+                                    <span class="batch-note">${b.note}</span>
+                                    <span class="batch-shares">${b.shares}股</span>
+                                    <span class="batch-price">@${b.price.toFixed(2)}</span>
+                                    <span class="batch-trigger">${b.trigger}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                        ${budgetNote}
+                    </div>`;
+                }
             }
 
             const hzKey = it.horizon || 'short';

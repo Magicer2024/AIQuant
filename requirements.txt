@@ -8,4 +8,5 @@ pandas>=2.0.0
 numpy>=1.26.0
 scikit-learn>=1.5.0
 joblib>=1.3.0
-pyqlib>=0.9.0
+# Qlib 为可选依赖，见 requirements-qlib.txt（基础安装不强装、不自动初始化）。
+# 可复现版本锁定见 constraints.txt：pip install -r requirements.txt -c constraints.txt

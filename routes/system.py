@@ -59,3 +59,56 @@ def system_scheduler():
     else:
         SCHEDULER_RUNNING["enabled"] = False
         return ok({"status": "disabled", "message": "定时任务已关闭"})
+
+
+# ─────────────────────────────────────────────
+# 统一任务 / 阶段 / 定时安排（方案 D）——只读查询 + 协作式取消
+# ─────────────────────────────────────────────
+
+@system_bp.route("/tasks", methods=["GET"])
+def list_background_tasks():
+    """列出后台任务（可按状态/类型/资源组/仅活跃过滤）。"""
+    from core.repository import task_repo
+    status = request.args.get("status")
+    task_type = request.args.get("task_type")
+    resource_group = request.args.get("resource_group")
+    active_only = request.args.get("active_only") in ("1", "true", "yes")
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+    except (TypeError, ValueError):
+        limit = 50
+    tasks = task_repo.list_tasks(status=status, task_type=task_type,
+                                 resource_group=resource_group, active_only=active_only,
+                                 limit=limit)
+    return ok({"tasks": tasks, "count": len(tasks)})
+
+
+@system_bp.route("/tasks/<task_id>", methods=["GET"])
+def get_background_task(task_id):
+    """任务详情 + 阶段明细（前端展示具体失败阶段，不笼统显示全部完成）。"""
+    from core.repository import task_repo
+    task = task_repo.get_task(task_id)
+    if task is None:
+        return fail("任务不存在或已过期", 404)
+    return ok({"task": task, "stages": task_repo.get_stages(task_id)})
+
+
+@system_bp.route("/tasks/<task_id>/cancel", methods=["POST"])
+def cancel_background_task(task_id):
+    """协作式取消：置取消请求，执行器在阶段/批次边界停止（不强杀写库线程）。"""
+    from core.repository import task_repo
+    if task_repo.get_task(task_id) is None:
+        return fail("任务不存在或已过期", 404)
+    changed = task_repo.request_cancel(task_id)
+    if not changed:
+        return fail("任务已结束，无法取消", 409)
+    return ok({"task_id": task_id, "status": "cancel_requested", "message": "已请求取消"})
+
+
+@system_bp.route("/scheduler/jobs", methods=["GET"])
+def list_scheduled_jobs():
+    """列出持久化的定时安排（每日同步 / 用户历史修正）。"""
+    from core.repository import task_repo
+    enabled_only = request.args.get("enabled_only") not in ("0", "false", "no")
+    jobs = task_repo.list_scheduled_jobs(enabled_only=enabled_only)
+    return ok({"jobs": jobs, "count": len(jobs)})

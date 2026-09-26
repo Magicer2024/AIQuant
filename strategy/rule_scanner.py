@@ -46,6 +46,22 @@ def scan_active_rules(trade_date: Optional[str] = None,
     :param lookback_rows: 因子计算保留的最近行数，需 > 252；<=0 表示不裁剪
     :return: {trade_date, rules, hits, elapsed_s}
     """
+    from config.settings import SIGNAL_MODEL_MODE
+    if SIGNAL_MODEL_MODE != "legacy":
+        from core.signal_runtime import prepare_signal_run, execute_signal_run
+        from core.repository.signal_repo import write_legacy_projection
+        if not trade_date:
+            with get_conn(readonly=True) as conn:
+                trade_date = conn.execute("SELECT MAX(trade_date) FROM daily_price").fetchone()[0]
+        if not trade_date:
+            return {"trade_date": None, "rules": 0, "hits": 0, "elapsed_s": 0}
+        context = prepare_signal_run(trade_date, scope="all", source="strategy_signals",
+                                     runtime={"max_rules": max_rules, "lookback": lookback_rows})
+        result = execute_signal_run(context)
+        if SIGNAL_MODEL_MODE == "shadow" and result["status"] == "complete":
+            write_legacy_projection(result["run_id"])
+        result.update(trade_date=trade_date, hits=result["signals"])
+        return result
     result: Dict[str, Any] = {"trade_date": trade_date, "rules": 0, "hits": 0, "elapsed_s": 0}
     start = time.time()
     try:

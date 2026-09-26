@@ -1,0 +1,13 @@
+# 独立浏览器作业依赖：Playwright 冒烟测试（tests/test_frontend.py）。
+#
+# 这些测试用 pytest.mark.browser 标记，且仅在 AIQUANT_BROWSER_TESTS=1 时启用；
+# 核心测试作业不安装本文件，浏览器作业作为 CI 中明确执行的独立作业运行，
+# 不因未安装 Playwright 而长期静默跳过。
+#
+# 安装（含浏览器二进制）：
+#   pip install -r requirements-browser.txt -c constraints.txt
+#   python -m playwright install chromium
+#   AIQUANT_BROWSER_TESTS=1 pytest tests/test_frontend.py
+#
+-r requirements-dev.txt
+playwright>=1.40.0

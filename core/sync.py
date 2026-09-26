@@ -1185,6 +1185,16 @@ def sync_single_stock_to_watchlist(code: str, verbose: bool = False) -> dict:
                 "message": f"异常: {e}"}
 
 
+def _calculate_strategy_scores(df):
+    """既有五分项研究分计算，允许调用方传入冻结参数上下文。"""
+    from config.strategy_params import get_strategy_config
+    engine = get_strategy_config("SHORT_ENGINE", SHORT_ENGINE)
+    bottom_fn = strategy_bottom_fishing_v2 if engine == "pure_bottom_v2" else strategy_bottom_fishing
+    signals = [strategy_volume_breakout(df), strategy_ma_convergence(df),
+               strategy_price_volume_divergence(df), bottom_fn(df), strategy_whale_accumulation(df)]
+    return fuse_signals(signals, weights=get_strategy_config("PURE_BOTTOM_WEIGHTS"), mode="weighted_avg")
+
+
 def sync_strategy_score(code: str, verbose: bool = False) -> bool:
     """
     对指定股票的全量历史计算5策略独立评分 + 融合分，
@@ -1195,16 +1205,7 @@ def sync_strategy_score(code: str, verbose: bool = False) -> bool:
         df = get_daily_price(code)
         if df is None or len(df) < 30:
             return False
-        s1 = strategy_volume_breakout(df)
-        s2 = strategy_ma_convergence(df)
-        s3 = strategy_price_volume_divergence(df)
-        s4 = _BOTTOM_FISH_FN(df)
-        s5 = strategy_whale_accumulation(df)
-        # daily_price.fusion_score 固定为纯抄底口径（回测验证过的基准，与市场状态无关），
-        # 供回测/研究脚本读取；短线推荐用的自适应口径写在 stock_signal 表。
-        from config.strategy_params import PURE_BOTTOM_WEIGHTS
-        fused = fuse_signals([s1, s2, s3, s4, s5],
-                             weights=PURE_BOTTOM_WEIGHTS, mode="weighted_avg")
+        fused = _calculate_strategy_scores(df)
         # 写入数据库（全量历史）
         update_strategy_scores_batch(code, fused)
         if verbose:
@@ -1386,6 +1387,12 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
     :return: list[dict]（stock_signal 行），可能为空
     """
     import json as _json
+    from config.strategy_params import get_strategy_config
+    SHORT_ENGINE = get_strategy_config("SHORT_ENGINE", globals()["SHORT_ENGINE"])
+    NEXT_DAY_MOMENTUM = get_strategy_config("NEXT_DAY_MOMENTUM", globals()["NEXT_DAY_MOMENTUM"])
+    SURGE_BREAKOUT = get_strategy_config("SURGE_BREAKOUT", globals()["SURGE_BREAKOUT"])
+    PULLBACK_DIP = get_strategy_config("PULLBACK_DIP", globals()["PULLBACK_DIP"])
+    FIRST_REVERSAL = get_strategy_config("FIRST_REVERSAL", globals()["FIRST_REVERSAL"])
     if df is None or len(df) < 30:
         return []
     records = []
@@ -1609,7 +1616,8 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
         # ── 短线：纯抄底融合分（SHORT_ENGINE="pure_bottom" 一键回退）──
         # 权重固定 PURE_BOTTOM_WEIGHTS（2026-07-31 双口径回测唯一赚钱组合），
         # 与 daily_price.fusion_score 同口径；自适应只保留「阈值」这一项。
-        from config.strategy_params import PURE_BOTTOM_WEIGHTS, FUSION_MODE
+        PURE_BOTTOM_WEIGHTS = get_strategy_config("PURE_BOTTOM_WEIGHTS")
+        FUSION_MODE = get_strategy_config("FUSION_MODE")
         _SCORE_COLS = {"vol_score", "ma_score", "diverge_score",
                        "bottom_score", "whale_score", "fusion_score"}
         if reuse_scores and scan_date is not None and _SCORE_COLS.issubset(df.columns):
@@ -1634,7 +1642,8 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
             s1 = strategy_volume_breakout(df)
             s2 = strategy_ma_convergence(df)
             s3 = strategy_price_volume_divergence(df)
-            s4 = _BOTTOM_FISH_FN(df)
+            bottom_fn = strategy_bottom_fishing_v2 if SHORT_ENGINE == "pure_bottom_v2" else strategy_bottom_fishing
+            s4 = bottom_fn(df)
             s5 = strategy_whale_accumulation(df)
             fused = fuse_signals([s1, s2, s3, s4, s5],
                                  weights=PURE_BOTTOM_WEIGHTS, mode=FUSION_MODE)
@@ -2058,6 +2067,63 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
         return {"scan_date": scan_date, "signals": 0, "codes": 0,
                 "elapsed_s": round(time.time() - start, 1), "target": target}
 
+    from config.settings import SIGNAL_MODEL_MODE
+    if SIGNAL_MODEL_MODE != "legacy":
+        from core.signal_runtime import prepare_signal_run, execute_signal_run
+        from core.repository.signal_repo import write_legacy_projection
+        context = prepare_signal_run(scan_date, scope=target, codes=codes)
+        result = execute_signal_run(context, progress_callback=progress_callback)
+        # 推荐发布：完整运行后按来源冻结名单。shadow 产 comparison 旁路对照批次
+        # （不冒充已向用户发布），v2 产 published 正式批次。best-effort，不阻断同步。
+        try:
+            from core.recommendation_service import publish_run_lists
+            published = publish_run_lists(
+                result["run_id"], comparison=(SIGNAL_MODEL_MODE == "shadow"))
+            result["published_lists"] = published
+            if verbose and published:
+                _errs = [k for k, v in published.items() if isinstance(v, dict)]
+                print(f"  [推荐发布] {len(published) - len(_errs)}/{len(published)} 榜就绪"
+                      + (f"，失败: {','.join(_errs)}" if _errs else ""))
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 推荐发布失败（不影响信号主流程）: {e}")
+        # 筹码影子对照：与基线同 run、同资格，仅排序参数不同，前向积累（comparison 批次）。
+        # 受冻结的 short_chip_shadow_enabled 控制；整池无筹码数据则跳过，不造假对照。
+        if result["status"] == "complete":
+            try:
+                from core.experiment import select_chip_shadow
+                _shadow = select_chip_shadow(result["run_id"], "short")
+                result["chip_shadow"] = _shadow
+                if verbose and _shadow.get("skipped"):
+                    print(f"  [筹码影子] 跳过：{_shadow['skipped']}")
+            except Exception as e:
+                if verbose:
+                    print(f"  [WARN] 筹码影子对照失败（不影响信号主流程）: {e}")
+        # 结果推进：诊断（signal_outcome）与模拟成交（simulated_trade）前向累积。
+        # 诊断按 [scan_date-20日, scan_date] 区间重评估，补全既有信号的 T+n；
+        # 模拟单推进到 scan_date。均幂等、best-effort，不阻断同步。
+        try:
+            from core.signal_outcome_tracker import advance_signal_outcomes
+            from core.simulated_trading import advance_simulated_trades
+            _since = (pd.Timestamp(scan_date) - timedelta(days=20)).strftime("%Y-%m-%d")
+            _diag = advance_signal_outcomes(since=_since, as_of=scan_date)
+            _sim = advance_simulated_trades(as_of=scan_date)
+            result["outcome_advance"] = {"diagnosis": _diag, "simulated": _sim}
+            if verbose:
+                print(f"  [结果推进] 诊断 {_diag['evaluated']} 条 / "
+                      f"模拟单 {_sim['trades']} 笔（平仓 {_sim['closed']}、持仓 {_sim['holding']}）")
+        except Exception as e:
+            if verbose:
+                print(f"  [WARN] 结果推进失败（不影响信号主流程）: {e}")
+        if SIGNAL_MODEL_MODE == "shadow" and result["status"] == "complete":
+            write_legacy_projection(result["run_id"])
+            from core.outcome_tracker import insert_new_outcomes, evaluate_outcomes
+            insert_new_outcomes()
+            evaluate_outcomes()
+        from core.repository.price_repo import refresh_latest_price
+        refresh_latest_price(codes if target == "watchlist" else None)
+        return result
+
     # 名称映射（stock_signal.name 字段；缺映射时用 code 兜底，不影响过滤）
     try:
         stocks_df = get_all_stocks()
@@ -2209,7 +2275,7 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
             "codes": n_success, "elapsed_s": round(elapsed, 1), "target": target}
 
 
-def recalc_all_scores(progress_callback=None, target: str = "all"):
+def recalc_all_scores(progress_callback=None, target: str = "all", *, replay_dates=None):
     """
     对数据库中所有股票的历史评分进行全量补算，
     同时将每日融合分高于阈值的日期写入 stock_signal 表。
@@ -2220,6 +2286,32 @@ def recalc_all_scores(progress_callback=None, target: str = "all"):
     :return: dict with total, success, failed, signals, elapsed_s, target
     """
     target = target if target in ("all", "watchlist") else "all"
+
+    from config.settings import SIGNAL_MODEL_MODE, require_signal_model_ready
+    require_signal_model_ready()
+    if SIGNAL_MODEL_MODE != "legacy":
+        from core.signal_runtime import prepare_signal_run, execute_signal_run, recalculate_frozen_scores, replay_signal_dates
+        from core.repository.signal_repo import write_legacy_projection
+        with get_conn(readonly=True) as conn:
+            latest = conn.execute("SELECT MAX(trade_date) FROM daily_price").fetchone()[0]
+        if not latest:
+            return {"success": 0, "failed": 0, "days": 0, "signals": 0, "target": target}
+        codes = get_watchlist_codes() if target == "watchlist" else None
+        context = prepare_signal_run(latest, scope=target, codes=codes,
+            runtime={"history_mode": True, "reuse_scores": False})
+        scores = recalculate_frozen_scores(context, progress_callback=progress_callback)
+        result = execute_signal_run(context, progress_callback=progress_callback)
+        if SIGNAL_MODEL_MODE == "shadow" and result["status"] == "complete":
+            write_legacy_projection(result["run_id"])
+        # 自动同步调用全量评分入口时不得隐式重新生成全部历史信号。
+        # 历史修正必须由调用方显式给出日期，统一写 replay，不覆盖前向名单。
+        replays = replay_signal_dates(replay_dates, scope=target, codes=codes,
+            parameters=context.parameters, progress_callback=progress_callback) if replay_dates else []
+        from core.repository.price_repo import refresh_latest_price
+        refresh_latest_price(codes)
+        result.update(success=scores["success"], failed=scores["failed"], days=scores["days"],
+                      score_failures=scores["failures"], replay_runs=replays)
+        return result
 
     # 止损/止盈比例走参数覆盖层（优化器采纳建议后即时生效，默认 -6%/+20%）
     from config.strategy_params import get_param
