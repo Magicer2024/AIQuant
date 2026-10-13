@@ -310,19 +310,38 @@ async function fetchJSON(url, opts) {
     return resp.json();
 }
 
-// ─── Request manager (AbortController-based cancellation) ───
+// ─── Request manager (AbortController 取消 + 只读短 TTL 缓存) ───
 var RequestManager = {
     controllers: {},
+    _cache: {},            // url -> {ts, data}：高频只读接口的短时去重缓存
+    CACHE_TTL: 5000,       // 默认短缓存 5s：只挡快速切页/重复挂载，不牺牲数据新鲜度
 
     fetch: function(key, url, opts) {
         this.cancel(key);
+        opts = opts || {};
+        var method = (opts.method || 'GET').toUpperCase();
+        // 仅「无 body 的 GET + 显式 cacheTtl」才读缓存；轮询/写操作永远直连
+        var ttl = opts.cacheTtl || 0;
+        var canCache = method === 'GET' && !opts.body && ttl > 0;
+        if (canCache) {
+            var hit = this._cache[url];
+            if (hit && Date.now() - hit.ts < ttl) {
+                return Promise.resolve(hit.data);
+            }
+        }
+
         var ctrl = new AbortController();
         this.controllers[key] = ctrl;
-        opts = opts || {};
         opts.signal = ctrl.signal;
         var self = this;
         return fetchJSON(url, opts).then(function(data) {
             delete self.controllers[key];
+            if (canCache) {
+                self._cache[url] = {ts: Date.now(), data: data};
+            } else if (method !== 'GET') {
+                // 任何写操作成功后清空只读缓存，保证改完数据立刻读到新值
+                self._cache = {};
+            }
             return data;
         }).catch(function(e) {
             delete self.controllers[key];
@@ -414,6 +433,23 @@ var timerManager = {
         this.timers[key] = setTimeout(function() { fn(); delete self.timers[key]; }, delay);
     },
 
+    // 统一任务轮询原语：收敛散落在各功能里的 setInterval+fetch+自停手写逻辑。
+    //  - runImmediately=true 先执行一次（进度面板立即拿到当前状态）
+    //  - 上一轮未返回则跳过本轮，避免慢请求堆积成并发队列
+    //  - fn 内需要停止时调 timerManager.clear(key)（成功/失败终止策略由调用方决定，
+    //    与旧实现一致：默认吞掉单轮异常继续轮询）
+    poll: function(key, fn, delay, runImmediately) {
+        this.clear(key);
+        var busy = false;
+        function tick() {
+            if (busy) return;
+            busy = true;
+            Promise.resolve().then(fn).catch(function() {}).then(function() { busy = false; });
+        }
+        if (runImmediately) tick();
+        this.timers[key] = setInterval(tick, delay);
+    },
+
     clear: function(key) {
         if (this.timers[key] != null) {
             clearInterval(this.timers[key]);
@@ -432,7 +468,20 @@ var timerManager = {
     }
 };
 
+// 切页防抖：120ms 内连续点击导航只执行最后一次内容加载。
+// 旧实现每次点击都立刻 cancelAll+骨架屏+loadTab，快速点两页时第一页的加载全部白做。
+// 导航高亮点击即更新（即时视觉反馈，且不依赖延迟后的内容加载）。
 function switchTab(tab) {
+    var navItems = document.querySelectorAll('.nav-item');
+    for (var i = 0; i < navItems.length; i++) { navItems[i].classList.remove('active'); }
+    var btn = document.querySelector('.nav-item[onclick*="' + tab + '"]');
+    if (btn) btn.classList.add('active');
+
+    timerManager.clear('switchTabDebounce');
+    timerManager.setTimeout('switchTabDebounce', function() { _doSwitchTab(tab); }, 120);
+}
+
+function _doSwitchTab(tab) {
     RequestManager.cancelAll();
     timerManager.clearAll();
 
@@ -442,12 +491,6 @@ function switchTab(tab) {
     }
 
     currentTab = tab;
-
-    // Update nav active
-    var navItems = document.querySelectorAll('.nav-item');
-    for (var i = 0; i < navItems.length; i++) { navItems[i].classList.remove('active'); }
-    var btn = document.querySelector('.nav-item[onclick*="' + tab + '"]');
-    if (btn) btn.classList.add('active');
 
     // Try cached state
     var cached = TabState.load(tab);
@@ -567,14 +610,6 @@ async function loadHomeTab(container) {
 
         <div class="panel">
             <div class="panel-header">
-                <h3>次日强势观察 · 博弈明天涨停/大涨</h3>
-                <span class="text-muted" style="font-size:12px" id="surgePicksHint">大阳突破 × 龙虎榜净买双重严筛 · 次日开盘买入、收盘了结 · 严守止损、仓位从轻 · 宁缺毋滥</span>
-            </div>
-            <div id="surgePicks" class="action-plan-grid">加载中…</div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
                 <h3>反转首日观察 · 首次站上 MA20 的低位入场</h3>
                 <span class="text-muted" style="font-size:12px" id="reversalPicksHint">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池</span>
             </div>
@@ -668,7 +703,6 @@ async function loadHomeTab(container) {
         loadAccountBudget(),
         loadMarketOverview(),
         loadTodayPicks(),
-        loadSurgePicks(),
         loadReversalPicks(),
         loadJgTrack(),
         // 出场跟踪已并入 loadTodayPicks（按 hz 嵌入对应推荐小板块底下）
@@ -721,7 +755,8 @@ const REGIME_META = {
 
 async function loadMarketOverview() {
     try {
-        const resp = await RequestManager.fetch('market', API + '/investor/market-overview');
+        const resp = await RequestManager.fetch('market', API + '/investor/market-overview',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const d = resp.data || {};
 
         // Hero
@@ -859,7 +894,8 @@ async function fillSparklines(codes, days, idPrefix) {
     if (!list.length) return;
     try {
         var resp = await RequestManager.fetch('spark-' + idPrefix, API +
-            '/investor/factor_trend?codes=' + encodeURIComponent(list.join(',')) + '&days=' + (days || 7));
+            '/investor/factor_trend?codes=' + encodeURIComponent(list.join(',')) + '&days=' + (days || 7),
+            {cacheTtl: RequestManager.CACHE_TTL});
         var data = resp.data || {};
         list.forEach(function(code) {
             var el = document.getElementById(idPrefix + code);
@@ -875,7 +911,8 @@ async function showFactorDetail(code, name) {
     var rows = [];
     try {
         var resp = await RequestManager.fetch('factor-detail-' + code, API +
-            '/investor/factor_trend?codes=' + encodeURIComponent(code) + '&days=30');
+            '/investor/factor_trend?codes=' + encodeURIComponent(code) + '&days=30',
+            {cacheTtl: RequestManager.CACHE_TTL});
         rows = (resp.data || {})[code] || [];
     } catch(e) {}
 
@@ -928,7 +965,8 @@ async function loadTodayPicks(isFallback) {
     const dateEl = document.getElementById('pickDate');
     const dateParam = dateEl && dateEl.value ? '&date=' + dateEl.value : '';
     try {
-        const resp = await RequestManager.fetch('today', API + '/investor/today?limit=4' + dateParam);
+        const resp = await RequestManager.fetch('today', API + '/investor/today?limit=4' + dateParam,
+            {cacheTtl: RequestManager.CACHE_TTL});
         const data = (resp && resp.data) || {};
         const serverDate = data.date;
         // 自动回填日期（首次加载时）
@@ -956,7 +994,8 @@ async function loadTodayPicks(isFallback) {
         // 切换推荐日期不影响出场统计，故只拉一次缓存到 _exitTrackData）
         try {
             if (!window._exitTrackData) {
-                const er = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice');
+                const er = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice',
+                    {cacheTtl: RequestManager.CACHE_TTL});
                 window._exitTrackData = (er && er.data) || {};
             }
             HORIZON_GROUPS.forEach(g => renderPickExitEmbed(g.key, window._exitTrackData));
@@ -1191,9 +1230,14 @@ function togglePickDetail(key) {
     }
 }
 
-// ── 次日强势观察（强势突破信号线：博弈次日涨停/大涨，独立于今日推荐）──
-// 历史表现窗口（天）：与「推荐复盘」同尺度，后端 days 上限 180
-const SURGE_HISTORY_DAYS = 60;
+// ── 次日强势观察（强势突破信号线）已于 2026-10-12 下线 ────────────────────────
+// 用户决策：取消首页「次日强势观察 · 博弈明天涨停/大涨」栏目。
+// 已移除：面板 DOM（surgePicks/surgePicksHint）+ loadSurgePicks() 调用 +
+//         loadSurgePicks/renderSurgeCard/renderSurgeHistory/toggleSurgeHistory/SURGE_HISTORY_DAYS。
+// 已保留：后端 /api/investor/surge_picks、core/services/signal_picks.py、
+//         strategy/surge_breakout.py、config.SURGE_BREAKOUT，以及 stock_signal 中
+//         strategy='强势突破' 的全部历史记录（今日推荐/复盘/出场跟踪本就用 SQL 显式排除它）。
+// 复活方式：git 取回本段前端代码 + 把 SURGE_BREAKOUT["enabled"] 改回 True（config/strategy_params.py）。
 
 // ─── 机构席位建仓跟踪（龙虎榜机构专用席位）────────────────────────────
 // ⚠ 定位：资金动向与成本位参考，**不是收益信号**。实测（2024-07~2026-09，13350 样本）：
@@ -1213,7 +1257,8 @@ async function loadJgTrack() {
     try {
         const resp = await RequestManager.fetch(
             'jg-track',
-            `${API}/investor/lhb_jg_track?days=${days}&min_cnt=${minCnt}&sort=${sort}&limit=40`);
+            `${API}/investor/lhb_jg_track?days=${days}&min_cnt=${minCnt}&sort=${sort}&limit=40`,
+            {cacheTtl: RequestManager.CACHE_TTL});
         const d = (resp && resp.data) || {};
         const items = d.items || [];
         const hint = document.getElementById('jgTrackHint');
@@ -1286,201 +1331,6 @@ function renderJgTable(items) {
     </div>`;
 }
 
-async function loadSurgePicks() {
-    const box = document.getElementById('surgePicks');
-    if (!box) return;
-    try {
-        const resp = await RequestManager.fetch('surge-picks', API + '/investor/surge_picks?limit=6&days=' + SURGE_HISTORY_DAYS);
-        const data = (resp && resp.data) || {};
-        const items = data.items || [];
-        const hint = document.getElementById('surgePicksHint');
-        if (hint && data.date) {
-            hint.textContent = '信号日 ' + data.date + ' · 大阳突破 × 龙虎榜净买双重严筛 · 次日开盘买入、收盘了结 · 严守止损、仓位从轻 · 宁缺毋滥';
-        }
-        // 历史跟踪在「无信号日」也要显示——这是板块的长期成绩单，不随当日有无信号消失
-        let html = '';
-        if (!items.length) {
-            html += '<div class="empty-state" style="grid-column:1 / -1">今日无强势突破信号<br><span style="color:var(--text-muted);font-size:12px">龙虎榜净买严筛无合格候选（或大盘过热被门控），宁缺毋滥</span></div>';
-        } else {
-            html += items.map(it => renderSurgeCard(it)).join('');
-        }
-        html += renderSurgeHistory(data.history || [], data.history_summary || {});
-        box.innerHTML = html;
-    } catch(e) {
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
-    }
-}
-
-// 次日强势观察 · 历史表现：更早信号日每条信号按现实口径回放，成绩单格式与「推荐复盘」对齐。
-// 口径：次日开盘买入 → 收盘判止损/止盈/到期（建仓当日不判出厂，与推荐跟踪一致）；
-// T+n = 买入后第 n 个交易日收盘相对买入价的涨幅。仅已结算进胜率/均值，持有中与放弃不算成绩。
-function renderSurgeHistory(hist, hs) {
-    if (!hist || !hist.length) return '';
-    hs = hs || {};
-    const fmt = v => v != null ? Number(v).toFixed(2) : '--';
-    const pctHtml = v => v != null
-        ? `<span class="${v >= 0 ? 'positive' : 'negative'}">${v >= 0 ? '+' : ''}${Number(v).toFixed(2)}%</span>`
-        : '--';
-    // 状态列上色遵循 A 股语义（红=好/涨、绿=差/跌），避免把「止损」涂成红色误读成上涨
-    const statusCell = it => {
-        let color = 'var(--text-muted)', tip = '';
-        if (it.status === 'clear' && it.exit_reason === 'take_profit') color = 'var(--positive)';
-        else if (it.status === 'clear' && it.exit_reason === 'stop_loss') color = 'var(--negative)';
-        else if (it.status === 'clear') color = 'var(--text-secondary)';
-        else if (it.status === 'hold') color = 'var(--gold, #e0b34d)';
-        if (it.status === 'clear') {
-            tip = `卖出 ${it.exit_date} @${fmt(it.exit_price)} · 持仓 ${it.hold_days} 日`;
-        } else if (it.status === 'hold') {
-            tip = `未触发止损/止盈 · 最新收盘 @${fmt(it.last_close)} · 持仓 ${it.hold_days} 日`;
-        } else if (it.status === 'skipped') {
-            tip = (it.status_label || '').indexOf('破止损') >= 0
-                ? `次日开盘 ${fmt(it.entry_price)} 已跌破止损 ${fmt(it.stop_loss)}，跳空破位不买入`
-                : `次日开盘 ${fmt(it.entry_price)} 已越过止盈 ${fmt(it.take_profit)}，现实不追高`;
-        }
-        return `<span style="color:${color}"${tip ? ` title="${tip}"` : ''}>${it.status_label || '--'}</span>`;
-    };
-    const rows = hist.map(it => `<tr>
-            <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
-            <td>${it.name || ''}</td>
-            <td>${it.signal_date || '--'}</td>
-            <td>${it.entry_date ? `${it.entry_date}<br><span class="text-muted">@${fmt(it.entry_price)}</span>` : '--'}</td>
-            <td>${pctHtml(it.t1_return)}</td>
-            <td>${pctHtml(it.t2_return)}</td>
-            <td>${pctHtml(it.t3_return)}</td>
-            <td>${pctHtml(it.t5_return)}</td>
-            <td style="font-weight:600">${pctHtml(it.return_pct)}</td>
-            <td>${statusCell(it)}</td>
-        </tr>`).join('');
-
-    // ① 多期持有漂移（T+1/T+2/T+3/T+5）。T+1 = 实际出场口径，其余为「拿更久」的对照
-    const tCard = (k, label, tip) => {
-        const s = hs[k];
-        if (!s || !s.n) {
-            return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:26px">--</div><div class="lbl">${label} 胜率</div></div>`;
-        }
-        const color = s.win_rate >= 50 ? 'var(--positive)' : 'var(--negative)';
-        const avg = s.avg_return;
-        const avgHtml = avg != null
-            ? `<div style="font-size:11px;margin-top:3px" class="${avg >= 0 ? 'positive' : 'negative'}">平均 ${avg >= 0 ? '+' : ''}${avg}%</div>`
-            : '';
-        const style = k === 't1' ? 'border-color:rgba(255,170,60,0.35);' : '';
-        return `<div class="metric-card"${tip ? ` title="${tip}"` : ''} style="${style}"><div class="val" style="color:${color};font-size:26px">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span></div>${avgHtml}</div>`;
-    };
-
-    // ② 结算成绩单（仅已结算进统计）
-    const dash = v => v != null ? v : '--';
-    const numCard = (val, lbl, cls) =>
-        `<div class="metric-card"><div class="val ${cls || ''}" style="font-size:26px">${val}</div><div class="lbl">${lbl}</div></div>`;
-    const wrCls = hs.win_rate == null ? '' : (hs.win_rate >= 50 ? 'positive' : 'negative');
-    const avgV = hs.avg_return, avgCls = avgV == null ? '' : (avgV >= 0 ? 'positive' : 'negative');
-    const pf = hs.profit_factor, pfCls = pf == null ? '' : (pf >= 1.35 ? 'positive' : (pf >= 1 ? '' : 'negative'));
-    const best = hs.best_return, worst = hs.worst_return;
-
-    const sideChips =
-        (hs.holding ? `<span class="exit-group-stat" title="已买入、未触发止损/止盈，不计入胜率">持有中 ${hs.holding}</span>` : '') +
-        (hs.skipped ? `<span class="exit-group-stat" title="次日开盘已越过止盈，现实不追高，不计盈亏">放弃 ${hs.skipped}</span>` : '') +
-        (hs.pending ? `<span class="exit-group-stat">待买入 ${hs.pending}</span>` : '');
-
-    return `
-        <div style="grid-column:1 / -1;margin-top:10px;border-top:1px solid var(--border, rgba(255,255,255,0.08));padding-top:10px">
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-                <span style="font-weight:600;font-size:13px">📜 历史表现 · 近 ${hs.window_days || 60} 天信号真实成绩</span>
-                <span class="text-muted" style="font-size:11px">次日开盘买入 → ${hs.exit_mode_label || '止损/止盈/到期'}${hs.judge_entry_day ? '（建仓当日纳入判定）' : ''} · T+n 为买入后第 n 个交易日收盘的持有漂移对照</span>
-                ${sideChips}
-                <button class="btn btn-sm" style="margin-left:auto" onclick="toggleSurgeHistory()">收起/展开</button>
-            </div>
-            ${(hs.closed > 0 && hs.closed < 30) ? `
-            <div style="margin-bottom:8px;padding:6px 10px;border-radius:6px;background:rgba(255,170,60,0.10);border:1px solid rgba(255,170,60,0.30);font-size:11.5px;color:var(--text-secondary)">
-                ⚠ 样本不足 30 条（已结算 ${hs.closed} 条）：单笔交易就值约 ±${(100 / hs.closed).toFixed(0)}pp 的胜率台阶，<b>胜率数字不具统计意义</b>——请以盈亏比、出场分布与逐条明细为准
-            </div>` : ''}
-            <div class="metrics-row" style="margin-bottom:8px">
-                ${tCard('t1', 'T+1', '实际出场口径：T+1 收盘了结（跌破止损则止损、涨过止盈则止盈）')}${tCard('t2', 'T+2', '持有漂移对照：若拿到 T+2 收盘（非实际出场）')}${tCard('t3', 'T+3', '持有漂移对照：若拿到 T+3 收盘（非实际出场）')}${tCard('t5', 'T+5', '持有漂移对照：若拿到 T+5 收盘 —— 历史上比 T+1 更差，这就是「隔日了结」的依据')}
-            </div>
-            <div class="metrics-row" style="margin-bottom:10px">
-                ${numCard(hs.total != null ? hs.total : hist.length, '信号数')}
-                ${numCard(dash(hs.closed), '已结算')}
-                ${numCard(hs.win_rate != null ? hs.win_rate + '%' : '--', '结算胜率', wrCls)}
-                ${numCard(avgV != null ? (avgV >= 0 ? '+' : '') + avgV + '%' : '--', '结算平均', avgCls)}
-                ${numCard(pf != null ? pf.toFixed(2) : '--', '盈亏比', pfCls)}
-                ${numCard(best != null ? '+' + best + '%' : '--', '最佳', 'positive')}
-                ${numCard(worst != null ? worst + '%' : '--', '最差', 'negative')}
-                ${numCard(hs.stop_loss_count || 0, '触发止损')}
-                ${numCard(hs.take_profit_count || 0, '触发止盈')}
-            </div>
-            <div id="surgeHistBox" class="table-wrapper" style="max-height:420px;overflow-y:auto">
-                <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">共 ${hist.length} 条信号（按信号日降序；出场按收盘价判定、T+1 收盘为准）</div>
-                <table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-card)"><tr>
-                    <th>代码</th><th>名称</th><th>信号日</th><th>买入(次日开盘)</th><th>T+1</th><th>T+2</th><th>T+3</th><th>T+5</th><th>收益</th><th>状态</th>
-                </tr></thead><tbody>${rows}</tbody></table>
-            </div>
-        </div>`;
-}
-
-function toggleSurgeHistory() {
-    const box = document.getElementById('surgeHistBox');
-    if (box) box.style.display = box.style.display === 'none' ? '' : 'none';
-}
-
-// 次日强势观察卡片：轻量版 action-card（无建仓分批/信号灯，突出信号日涨幅与买卖价位）
-function renderSurgeCard(it) {
-    const fmt = v => v != null ? Number(v).toFixed(2) : '--';
-    const pctDay = it.pct_day;
-    const pctHtml = pctDay != null
-        ? `<span class="idx-up" style="font-weight:700">+${pctDay.toFixed(2)}%</span>` : '';
-    const rr = it.risk_reward_ratio;
-    const rrCls = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
-    const rrHtml = rr != null ? `<span class="rr-tag ${rrCls}">盈亏比 ${rr.toFixed(2)}</span>` : '';
-    const triggers = (it.triggers || []).map(t => `<span class="reason-chip">${t}</span>`).join('');
-    // 龙虎榜增强标记（上榜且净买>0 的票两窗验证更强，徽章突出展示）
-    const hasLhb = (it.triggers || []).some(t => t.indexOf('龙虎榜') >= 0);
-    // 次日已收盘且越过止盈 → 错过不追；次日已开始未错过 → 提示开盘买入
-    let statusHtml = '';
-    if (it.missed) {
-        statusHtml = '<div class="price-sub" style="color:var(--text-muted)">⏰ 已越过止盈位，错过不追</div>';
-    } else if (!it.started) {
-        statusHtml = '<div class="price-sub" style="color:var(--gold, #e0b34d)">🔔 明日开盘买入，当日收盘了结（参考信号日收盘）</div>';
-    }
-    return `
-        <div class="action-card" style="border-color:rgba(255,170,60,0.35)${it.missed ? ';opacity:.6' : ''}" onclick="openKline('${it.code}')">
-            <div class="action-head">
-                <div>
-                    <div class="action-name">${it.name || it.code} <span class="strategy-badge" style="background:rgba(255,170,60,0.15);color:#ffaa3c">⚡ 强势突破</span>${hasLhb ? ' <span class="strategy-badge lhb-badge" title="信号日上榜龙虎榜且主力净买入，历史验证隔日更强">🐯 龙虎榜净买</span>' : ''}</div>
-                    <div class="action-code">${it.code}${it.industry ? ` · ${it.industry}` : ''}</div>
-                </div>
-                <div class="action-score" title="强势分：量比与涨幅强度（30~50）">
-                    <div class="score-num">${it.fusion_score || '--'}</div>
-                    <div class="score-lbl">强势分</div>
-                </div>
-            </div>
-            <div class="action-prices">
-                <div class="price-cell buy">
-                    <div class="price-lbl">信号日收盘</div>
-                    <div class="price-val">${fmt(it.signal_price)}</div>
-                    <div class="price-sub">当日 ${pctHtml}</div>
-                    ${it.latest_close != null ? `<div class="price-sub" title="最新收盘价（该股最近一个有行情的交易日，非盘中实时价）；用于判断现价相对止盈/止损的位置">最新 <b>${Number(it.latest_close).toFixed(2)}</b></div>` : ''}
-                    ${statusHtml}
-                </div>
-                <div class="action-arrow">·</div>
-                <div class="price-cell sell">
-                    <div class="price-lbl">止盈目标</div>
-                    <div class="price-val">${fmt(it.take_profit)}</div>
-                    <div class="price-sub">${it.reward_pct != null ? `+${it.reward_pct}%` : '--'}</div>
-                </div>
-                <div class="price-arrow">⛔</div>
-                <div class="price-cell stop">
-                    <div class="price-lbl">止损</div>
-                    <div class="price-val">${fmt(it.stop_loss)}</div>
-                    <div class="price-sub">${it.risk_pct != null ? `-${it.risk_pct}%` : '--'}</div>
-                </div>
-            </div>
-            <div class="action-foot">
-                <div class="reasons">${triggers}</div>
-                <div class="reasons" style="margin-top:4px"><span class="reason-chip" style="background:rgba(255,100,100,0.08);color:var(--text-muted)">⚠ 博弈型信号：胜率≈半，博的是大涨尾部；次日开盘买入，当日收盘不论涨跌都了结（跌破止损则止损），仓位从轻</span></div>
-                ${rrHtml}
-            </div>
-        </div>`;
-}
-
 // ── 反转首日观察（first_reversal 信号线：首次站上 MA20 那天的低位入场池，独立于今日推荐）──
 // ⚠ 定位：**首日位置观察池，不是买入推荐**。用户反馈「600641 已涨 4 天才推荐、反转第一天没推荐」，
 //   本线只回答「今天哪些票刚完成 首破 MA20 × 大阳 × 放量」，即入场位最低的那天（600641 首日 +4.90%，
@@ -1491,7 +1341,7 @@ function renderSurgeCard(it) {
 //   故不占今日推荐名额；但自 2026-09-24 起**纳入推荐复盘**（strategy='反转首日' 独立成组，
 //   见 renderReversalTracked），不改动短线推荐线成绩。
 const REVERSAL_LIMIT = 12;
-// 历史表现窗口（天）：与「推荐复盘」「次日强势观察」同尺度（后端上限 180）。
+// 历史表现窗口（天）：与「推荐复盘」同尺度（后端上限 180）。
 // ⚠ 与上方「实盘跟踪」的 90 天窗**不是一个数** —— 两处都标了窗口，别混读。
 const REVERSAL_HISTORY_DAYS = 60;
 // 历史表现面板状态（收起态/已加载窗口）。默认收起 + 懒加载：60 天 400+ 条
@@ -1507,7 +1357,8 @@ async function loadReversalPicks() {
     if (!box) return;
     try {
         const resp = await RequestManager.fetch(
-            'reversal-picks', API + '/investor/reversal_picks?limit=' + REVERSAL_LIMIT);
+            'reversal-picks', API + '/investor/reversal_picks?limit=' + REVERSAL_LIMIT,
+            {cacheTtl: RequestManager.CACHE_TTL});
         const data = (resp && resp.data) || {};
         const items = data.items || [];
         const hint = document.getElementById('reversalPicksHint');
@@ -1714,7 +1565,8 @@ async function loadReversalHistory() {
         // key 按窗口区分：RequestManager 会 cancel 同 key 的在途请求，
         // 用同一个 key 切窗口会互相打断
         const resp = await RequestManager.fetch('reversal-hist-' + days,
-            API + '/investor/reversal_history?days=' + days + '&limit=600');
+            API + '/investor/reversal_history?days=' + days + '&limit=600',
+            {cacheTtl: RequestManager.CACHE_TTL});
         _revHist.loading = false;
         _syncRevHistBtn();
         const d = (resp && resp.data) || {};
@@ -2121,7 +1973,10 @@ async function refreshStockDeep(code, opts) {
     if (!box) return;
     box.innerHTML = '<div class="empty-state">正在深度学习该股历史走势、量价关系与涨跌节奏…</div>';
     try {
-        var resp = await RequestManager.fetch('sd-deep-' + code, API + '/investor/stock_deep/' + code);
+        // 个股深析服务端计算较重，5s 内重复查看同一只票直接命中前端缓存
+        var resp = await RequestManager.fetch('sd-deep-' + code,
+            API + '/investor/stock_deep/' + code,
+            {cacheTtl: RequestManager.CACHE_TTL});
         var data = (resp && resp.data) || {};
         _sd.data = data; _sd.code = code;
         // 换股必须清掉锁定日与待触发的回今日定时器，两只票可能有同名交易日
@@ -2165,7 +2020,9 @@ async function loadSdMarket() {
     if (!box) return;
     box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">正在读取明日候选…</div>';
     try {
-        var resp = await RequestManager.fetch('sd-market', API + '/investor/stock_deep/market?limit=10');
+        var resp = await RequestManager.fetch('sd-market',
+            API + '/investor/stock_deep/market?limit=10',
+            {cacheTtl: RequestManager.CACHE_TTL});
         var data = (resp && resp.data) || {};
         _sdMarketData = {
             items: data.items || [],
@@ -2304,8 +2161,10 @@ async function loadSdTrack(opts) {
         box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:12px">正在读取推荐跟踪…</div>';
     }
     try {
+        // 推进/平仓/删除均为 POST，RequestManager 会自动清空只读缓存，刷新必取新值
         var resp = await RequestManager.fetch('sd-track',
-            API + '/investor/deep_track?status=' + encodeURIComponent(_SD_TRACK_STATUS) + '&limit=' + _sdTrackLimit);
+            API + '/investor/deep_track?status=' + encodeURIComponent(_SD_TRACK_STATUS) + '&limit=' + _sdTrackLimit,
+            {cacheTtl: RequestManager.CACHE_TTL});
         var d = (resp && resp.data) || {};
         var items = d.items || [];
         // total 是「符合当前状态过滤」的总笔数；老版本接口没有该字段时退化为本次条数
@@ -2462,7 +2321,7 @@ function refreshSdTrackFromInput() {
 // ── 历史扫描日回补（后台独立进程 + 轮询进度）──────────
 // 回补一天要对 4500+ 只股票跑全套指标（8 进程约 46s/天），30 天就是 20+ 分钟，
 // 绝不能同步等待；这里拉起后台进程后按 2s 轮询进度文件，完成后再刷新列表。
-var _bfPollTimer = null;
+// 轮询定时器统一登记在 timerManager（key='bfPoll'），切页自动清理。
 var _bfPollKey = 'sd-track-bf-status';
 
 function _bfProgressHtml(pct, msg) {
@@ -2477,7 +2336,7 @@ function _bfProgressHtml(pct, msg) {
 }
 
 function _bfStopPoll() {
-    if (_bfPollTimer) { clearInterval(_bfPollTimer); _bfPollTimer = null; }
+    timerManager.clear('bfPoll');
     RequestManager.cancel(_bfPollKey);
 }
 
@@ -2502,7 +2361,8 @@ async function startBackfillScan(days) {
 function _bfStartPoll() {
     _bfStopPoll();
     var box = document.getElementById('sdTrackBox');
-    _bfPollTimer = setInterval(async function () {
+    // 单轮失败不中止（可能瞬时超时），由 poll 原语吞掉异常后下一轮继续
+    timerManager.poll('bfPoll', async function () {
         try {
             var resp = await RequestManager.fetch(_bfPollKey,
                 API + '/investor/deep_track/backfill_scan/status');
@@ -2599,8 +2459,8 @@ async function delSdTrack(id, name) {
     }
 }
 
-// 手动触发全市场深析扫描（异步），并实时显示进度条，完成时刷新候选
-var _sdScanPoll = null;
+// 手动触发全市场深析扫描（异步），并实时显示进度条，完成时刷新候选。
+// 轮询登记在 timerManager（key='sdScanPoll'），切页即停，避免离开首页后空转。
 function triggerSdScan() {
     var box = document.getElementById('sdMarketBox');
     if (!box) return;
@@ -2611,9 +2471,8 @@ function triggerSdScan() {
     </div>`;
     RequestManager.fetch('scan-start', API + '/investor/stock_deep/scan', { method: 'POST' })
       .then(function(resp) {
-          if (_sdScanPoll) clearInterval(_sdScanPoll);
-          _sdScanPoll = setInterval(function() {
-              RequestManager.fetch('scan-status', API + '/investor/stock_deep/scan_status')
+          timerManager.poll('sdScanPoll', function() {
+              return RequestManager.fetch('scan-status', API + '/investor/stock_deep/scan_status')
                 .then(function(sr) {
                     var d = (sr && sr.data) || {};
                     var pctEl = document.getElementById('sdScanPct');
@@ -2623,7 +2482,7 @@ function triggerSdScan() {
                     if (barEl) barEl.style.width = Math.min(100, Math.max(0, d.progress || 0)) + '%';
                     if (msgEl) msgEl.textContent = d.message || '全市场深析扫描中…';
                     if (!d.running && d.candidates != null) {
-                        clearInterval(_sdScanPoll); _sdScanPoll = null;
+                        timerManager.clear('sdScanPoll');
                         showToast('全市场深析扫描完成，候选 ' + d.candidates + ' 只', 'success');
                         loadSdMarket();
                     }
@@ -3293,7 +3152,8 @@ async function loadRuleSignals() {
     const dateEl = document.getElementById('ruleSigDate');
     if (!box) return;
     try {
-        const resp = await RequestManager.fetch('ruleSignals', API + '/investor/rule_signals');
+        const resp = await RequestManager.fetch('ruleSignals', API + '/investor/rule_signals',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const data = (resp && resp.data) || {};
         const items = data.items || [];
         const total = data.total != null ? data.total : items.length;
@@ -3343,12 +3203,11 @@ async function scanRulesNow() {
     if (btn) { btn.disabled = true; btn.textContent = '扫描中…'; }
     if (box) box.innerHTML = '<div class="empty-state">全市场扫描中，预计需数分钟…</div>';
     try {
-        const resp = await fetch(API + '/sync/scan_rules', {
+        const j = await RequestManager.fetch('scan-rules', API + '/sync/scan_rules', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ max_rules: maxRules, lookback_rows: lookback })
         });
-        const j = await resp.json();
         if (j && j.success) {
             const d = j.data || {};
             showToast('扫描完成：' + (d.rules || 0) + ' 条规则 / ' + (d.hits || 0) + ' 条命中，耗时 ' + (d.elapsed_s || 0) + 's', 'success');
@@ -3657,7 +3516,8 @@ async function loadMyPositions() {
             }
         } catch(e) { /* 横幅获取失败不影响持仓列表 */ }
 
-        const resp = await RequestManager.fetch('positions', API + '/investor/positions');
+        const resp = await RequestManager.fetch('positions', API + '/investor/positions',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const d = resp.data || {};
         const positions = d.positions || [];
         const summary = d.summary || {};
@@ -3752,7 +3612,8 @@ async function addTopPicksToWatchlist() {
 async function loadMyWatchlist() {
     const box = document.getElementById('myWatchlist');
     try {
-        const resp = await RequestManager.fetch('watchlist', API + '/investor/watchlist');
+        const resp = await RequestManager.fetch('watchlist', API + '/investor/watchlist',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const items = resp.data || [];
         if (items.length === 0) {
             box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你想跟踪的股票，或直接从今日推荐开始</span><br><button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="addTopPicksToWatchlist()">⭐ 一键加入今日短线推荐前 3 名</button></div>';
@@ -3812,7 +3673,8 @@ async function loadMyWatchlist() {
 async function loadAlertsBanner() {
     const banner = document.getElementById('alertsBanner');
     try {
-        const resp = await RequestManager.fetch('alerts', API + '/investor/alerts');
+        const resp = await RequestManager.fetch('alerts', API + '/investor/alerts',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const alerts = (resp.data && resp.data.alerts) || [];
         if (alerts.length === 0) {
             banner.innerHTML = '';
@@ -3828,7 +3690,8 @@ async function loadAlertsBanner() {
 async function loadExplainerGrid() {
     const grid = document.getElementById('explainerGrid');
     try {
-        const resp = await RequestManager.fetch('explain', API + '/investor/explain');
+        const resp = await RequestManager.fetch('explain', API + '/investor/explain',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const items = (resp.data && resp.data.items) || {};
         grid.innerHTML = Object.entries(items).map(([key, val]) => `
             <div class="exp-card" onclick="showExplainDialog('${key}')">
@@ -3849,7 +3712,9 @@ async function loadRecHistory() {
     const tableEl = document.getElementById('recHistoryTable');
     const updEl = document.getElementById('recHistoryUpdatedAt');
     try {
-        const resp = await RequestManager.fetch('rec-history', API + '/investor/recommendations/history?days=' + REC_HISTORY_DAYS);
+        const resp = await RequestManager.fetch('rec-history',
+            API + '/investor/recommendations/history?days=' + REC_HISTORY_DAYS,
+            {cacheTtl: RequestManager.CACHE_TTL});
         const d = resp.data || {};
         const items = d.items || [];
         const summary = d.summary || {};
@@ -3959,7 +3824,8 @@ async function loadOptimizerPanel() {
     const updEl = document.getElementById('optimizerUpdatedAt');
     if (!box) return;
     try {
-        const resp = await RequestManager.fetch('optimizer', API + '/optimizer/latest');
+        const resp = await RequestManager.fetch('optimizer', API + '/optimizer/latest',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const d = resp.data || {};
         const diag = d.diagnosis;
         const suggestions = d.suggestions || [];
@@ -4046,7 +3912,7 @@ async function loadOptimizerPanel() {
 
 async function applyOptSuggestion(id) {
     try {
-        await fetchJSON(API + '/optimizer/apply', {
+        await RequestManager.fetch('opt-apply', API + '/optimizer/apply', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({id: id})
         });
@@ -4057,7 +3923,7 @@ async function applyOptSuggestion(id) {
 
 async function dismissOptSuggestion(id) {
     try {
-        await fetchJSON(API + '/optimizer/dismiss', {
+        await RequestManager.fetch('opt-dismiss', API + '/optimizer/dismiss', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({id: id})
         });
@@ -4068,7 +3934,7 @@ async function dismissOptSuggestion(id) {
 
 async function rollbackOptParam(key) {
     try {
-        await fetchJSON(API + '/optimizer/rollback', {
+        await RequestManager.fetch('opt-rollback', API + '/optimizer/rollback', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({param_key: key})
         });
@@ -4079,23 +3945,25 @@ async function rollbackOptParam(key) {
 
 async function runOptimizerNow() {
     try {
-        const r = await fetchJSON(API + '/optimizer/run', {method: 'POST'});
+        const r = await RequestManager.fetch('opt-run', API + '/optimizer/run', {method: 'POST'});
         showToast('优化任务已启动，约需十几秒…', 'info');
         const tid = (r.data || {}).task_id;
         if (!tid) return;
-        const timer = setInterval(async () => {
+        // 旧实现轮询失败即终止；登记 timerManager 后切页也能正确清理（原来会泄漏）
+        timerManager.poll('optTaskPoll', async () => {
             try {
-                const st = await fetchJSON(API + '/optimizer/task/' + tid);
+                const st = await RequestManager.fetch(
+                    'opt-task-' + tid, API + '/optimizer/task/' + tid);
                 const t = st.data || {};
                 if (t.status === 'success') {
-                    clearInterval(timer);
+                    timerManager.clear('optTaskPoll');
                     showToast('寻优完成：' + (t.result || ''), 'success', 6000);
                     loadOptimizerPanel();
                 } else if (t.status === 'error') {
-                    clearInterval(timer);
+                    timerManager.clear('optTaskPoll');
                     showToast('寻优失败：' + (t.message || ''), 'error');
                 }
-            } catch(e) { clearInterval(timer); }
+            } catch(e) { timerManager.clear('optTaskPoll'); }
         }, 3000);
     } catch(e) { showToast(e.message, 'error'); }
 }
@@ -4460,8 +4328,8 @@ function hideSyncProgress() {
 }
 
 function pollSyncProgress(onDone) {
-    timerManager.setInterval('syncPoll', function() {
-        RequestManager.fetch('sync-progress', API + '/sync/progress').then(function(resp) {
+    timerManager.poll('syncPoll', function() {
+        return RequestManager.fetch('sync-progress', API + '/sync/progress').then(function(resp) {
             var p = resp.data;
             var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
             document.getElementById('syncProgressFill').style.width = pct + '%';
@@ -4495,7 +4363,9 @@ async function loadSyncStatusPanel() {
 
     // ① 行情数据状态：/api/sync/auto-status
     try {
-        const r = await RequestManager.fetch('sync-auto-status', API + '/sync/auto-status');
+        // POST /sync 成功后 RequestManager 自动清缓存，同步完再看必为新状态
+        const r = await RequestManager.fetch('sync-auto-status', API + '/sync/auto-status',
+            {cacheTtl: RequestManager.CACHE_TTL});
         const d = r.data || {};
         if (d.running) {
             syncState.className = 'state run';
@@ -4664,8 +4534,8 @@ async function homeRecalc() {
 // 轮询重算任务（task_queue 提交的任务）
 function pollRecalcTask(taskId, onDone) {
     if (!taskId) { onDone && onDone(false, 'task_id 缺失'); return; }
-    timerManager.setInterval('recalcPoll', function() {
-        RequestManager.fetch('recalc-status-' + taskId, API + '/sync/status/' + taskId)
+    timerManager.poll('recalcPoll', function() {
+        return RequestManager.fetch('recalc-status-' + taskId, API + '/sync/status/' + taskId)
             .then(function(resp) {
                 const t = resp.data || {};
                 setInlineProgress('recalc', t.progress || 0, 100, t.message || '');
@@ -5176,7 +5046,8 @@ async function openIndexKline(code, name) {
 
     let kdata = [], marks = [];
     try {
-        const resp = await RequestManager.fetch('idx-kline-' + code, url);
+        const resp = await RequestManager.fetch('idx-kline-' + code, url,
+            {cacheTtl: RequestManager.CACHE_TTL});
         kdata = (resp.data?.kline || []).map(d => ({ date: d[0], open: d[1], close: d[2], low: d[3], high: d[4], vol: d[5] || 0 }));
         marks = resp.data?.marks || [];
     } catch(e) {
@@ -5216,7 +5087,8 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
 
     let kdata = [], marks = [];
     try {
-        const resp = await RequestManager.fetch('kline-' + code, url);
+        const resp = await RequestManager.fetch('kline-' + code, url,
+            {cacheTtl: RequestManager.CACHE_TTL});
         kdata = (resp.data?.kline || []).map(d => ({ date: d[0], open: d[1], close: d[2], low: d[3], high: d[4], vol: d[5] || 0 }));
         marks = resp.data?.marks || [];
     } catch(e) {
@@ -5391,12 +5263,12 @@ async function scheduleFixHistory() {
     const rateLimit = parseFloat(document.getElementById('scheduleRateLimit').value);
     
     try {
-        const resp = await fetch(API + '/sync/fix-history/schedule', {
+        const data = await RequestManager.fetch(
+            'fh-schedule-add', API + '/sync/fix-history/schedule', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({time, source, threads, rate_limit: rateLimit})
         });
-        const data = await resp.json();
         if (data.success) {
             showToast(data.data.message, 'success');
             await loadScheduledJobs();
@@ -5410,8 +5282,8 @@ async function scheduleFixHistory() {
 
 async function loadScheduledJobs() {
     try {
-        const resp = await fetch(API + '/sync/fix-history/schedule');
-        const data = await resp.json();
+        const data = await RequestManager.fetch(
+            'fh-schedule-list', API + '/sync/fix-history/schedule');
         const jobs = (data.data && data.data.jobs) || [];
         const container = document.getElementById('scheduledJobsList');
         
@@ -5454,8 +5326,9 @@ async function cancelScheduledJob(jobId) {
     if (!confirm('确定要取消这个定时任务吗？')) return;
     
     try {
-        const resp = await fetch(API + '/sync/fix-history/schedule/' + jobId, {method: 'DELETE'});
-        const data = await resp.json();
+        const data = await RequestManager.fetch(
+            'fh-schedule-del-' + jobId,
+            API + '/sync/fix-history/schedule/' + jobId, {method: 'DELETE'});
         if (data.success) {
             showToast('定时任务已取消', 'success');
             await loadScheduledJobs();
@@ -5476,12 +5349,11 @@ async function runFixHistoryNow(dryRun) {
     if (!confirm(`确定要立即执行全量历史修正（${mode}）吗？\n\n任务将在后台运行，预计耗时2-3小时。`)) return;
     
     try {
-        const resp = await fetch(API + '/sync/fix-history/run', {
+        const data = await RequestManager.fetch('fh-run', API + '/sync/fix-history/run', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({source, threads, rate_limit: rateLimit, dry_run: dryRun})
         });
-        const data = await resp.json();
         if (data.success) {
             showToast(data.data.message, 'success');
             // 显示进度面板
@@ -5495,54 +5367,52 @@ async function runFixHistoryNow(dryRun) {
     }
 }
 
-let fixHistoryPollTimer = null;
+// 轮询登记 timerManager（key='fixHistoryPoll'），切页自动停；旧实现单轮请求异常时
+// 仅展示"轮询失败"并继续，status 缺失才终止，这里保持同一语义。
 async function pollFixHistoryProgress(taskId) {
-    if (fixHistoryPollTimer) clearInterval(fixHistoryPollTimer);
-    
     const content = document.getElementById('fixHistoryProgressContent');
-    
+
     const poll = async () => {
         try {
-            const resp = await fetch(API + '/sync/status/' + taskId);
-            const data = await resp.json();
+            const data = await RequestManager.fetch(
+                'fh-status-' + taskId, API + '/sync/status/' + taskId);
             const status = data.data;
-            
+
             if (!status) {
                 content.innerHTML = '<div style="color:var(--warning);">任务状态查询失败</div>';
-                clearInterval(fixHistoryPollTimer);
+                timerManager.clear('fixHistoryPoll');
                 return;
             }
-            
-            const statusText = status.status === 'running' ? '运行中' : 
-                             status.status === 'completed' ? '已完成' : 
+
+            const statusText = status.status === 'running' ? '运行中' :
+                             status.status === 'completed' ? '已完成' :
                              status.status === 'failed' ? '失败' : status.status;
-            
+
             content.innerHTML = `
                 <div style="margin-bottom:12px;">
                     <strong>状态:</strong> <span style="color:${status.status === 'running' ? 'var(--accent)' : status.status === 'completed' ? 'var(--success)' : 'var(--danger)'}">${statusText}</span>
                 </div>
                 ${status.progress ? `
                     <div style="margin-bottom:8px;">
-                        <strong>进度:</strong> ${status.progress.current || 0} / ${status.progress.total || '?'} 
+                        <strong>进度:</strong> ${status.progress.current || 0} / ${status.progress.total || '?'}
                         (${status.progress.success || 0} 成功, ${status.progress.failed || 0} 失败)
                     </div>
                 ` : ''}
                 ${status.message ? `<div style="margin-bottom:8px;"><strong>消息:</strong> ${status.message}</div>` : ''}
                 ${status.error ? `<div style="color:var(--danger);"><strong>错误:</strong> ${status.error}</div>` : ''}
             `;
-            
+
             if (status.status === 'completed' || status.status === 'failed') {
-                clearInterval(fixHistoryPollTimer);
-                showToast(`全量历史修正${status.status === 'completed' ? '完成' : '失败'}`, 
+                timerManager.clear('fixHistoryPoll');
+                showToast(`全量历史修正${status.status === 'completed' ? '完成' : '失败'}`,
                          status.status === 'completed' ? 'success' : 'error');
             }
         } catch (e) {
             content.innerHTML = '<div style="color:var(--danger);">轮询失败: ' + e.message + '</div>';
         }
     };
-    
-    poll(); // 立即执行一次
-    fixHistoryPollTimer = setInterval(poll, 3000); // 每3秒轮询
+
+    timerManager.poll('fixHistoryPoll', poll, 3000, true); // 立即一次，之后每 3 秒
 }
 </script>
 </body>
