@@ -262,3 +262,41 @@ def test_today_groups_structure():
     resp3 = client.get("/api/investor/today?horizon=bad")
     body3 = resp3.get_json() or {}
     assert body3.get("success") is False or body3.get("ok") is False
+
+
+# ─────────────────────────────────────────────
+# 6. T11（S5）：中线盈亏比 RR 魔法数字收口
+# ─────────────────────────────────────────────
+def test_t11_mid_risk_reward_param_registered():
+    """mid_risk_reward 必须在 TUNABLE_PARAMS 注册，默认 2.5（与收口前硬编码同值）"""
+    from config.strategy_params import TUNABLE_PARAMS, get_param
+    spec = TUNABLE_PARAMS["mid_risk_reward"]
+    assert spec["default"] == 2.5
+    assert spec["min"] <= 2.5 <= spec["max"]
+    assert float(get_param("mid_risk_reward")) == 2.5
+
+
+def test_t11_calc_stop_loss_default_rr_matches_2_5():
+    """strategy.calc_stop_loss_take_profit 默认 RR 读配置，与显式 2.5 逐值一致"""
+    import numpy as np
+    from strategy.strategy import calc_stop_loss_take_profit
+
+    df = pd.DataFrame({
+        "close": np.full(10, 10.0),
+        "ATR": np.full(10, 0.2),
+    })
+    default_out = calc_stop_loss_take_profit(df)          # risk_reward=None → 读配置
+    explicit_out = calc_stop_loss_take_profit(df, risk_reward=2.5)
+    pd.testing.assert_series_equal(
+        default_out["TAKE_PROFIT"], explicit_out["TAKE_PROFIT"], check_names=False)
+    pd.testing.assert_series_equal(
+        default_out["TARGET_PCT"], explicit_out["TARGET_PCT"], check_names=False)
+    # 数值锚点：10.0 + 2.5×(2.0×0.2) = 11.0
+    assert abs(float(default_out["TAKE_PROFIT"].iloc[-1]) - 11.0) < 1e-9
+
+
+def test_t11_mid_fallback_ratio_constants():
+    """ATR 缺失兜底百分比锁定为 -8%/+20%（收口前后行为一致，防误改）"""
+    from strategy import mid_long
+    assert mid_long._MID_FALLBACK_STOP_PRICE_RATIO == 0.92
+    assert mid_long._MID_FALLBACK_TAKE_PRICE_RATIO == 1.20
