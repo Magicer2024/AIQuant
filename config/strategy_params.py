@@ -33,6 +33,16 @@ def get_strategy_config(name, fallback=None):
         return copy.deepcopy(frozen[name])
     return globals()[name] if fallback is None else fallback
 
+# ── 回测交易成本（A 股，backtest/engine.py、service.py、oversold_sim.py 共用唯一来源）──
+# 视觉回测 / 规则回测 / v3 模拟三处原来各自硬编码 0.0003/0.001/0.001，
+# 调费率需改三处，T8（S5）收敛为这一个常量；回测口径因此单一可溯。
+BACKTEST_COST = {
+    "commission_rate": 0.0003,   # 佣金费率：万三（双向）
+    "stamp_tax_rate": 0.001,     # 印花税：千一（仅卖出）
+    "slippage_rate": 0.001,      # 滑点：千一（买卖价偏移）
+    "min_commission": 5.0,       # 单笔最低佣金（元）：不足按 5 元收
+}
+
 # ── 5策略融合权重 ──────────────────────────────
 # 顺序：[放量突破, 均线粘合, 量价背离, 抄底, 主力建仓]
 DEFAULT_WEIGHTS = [0.30, 0.15, 0.20, 0.20, 0.15]
@@ -343,7 +353,14 @@ NEXT_DAY_MOMENTUM = {
 }
 
 
-# ── 强势突破信号线（首页「次日强势观察」栏目专用，独立于今日推荐） ──
+# ── 强势突破信号线（原首页「次日强势观察」栏目专用，独立于今日推荐） ──
+# ⚠ 2026-10-12 用户决策下线：首页「次日强势观察 · 博弈明天涨停/大涨」栏目已取消，
+#   同步停掉每日信号生成（enabled=False）。与「缩量回踩」不同，本线**不在**短线推荐链内
+#   （/today、outcome_tracker、exit_tracking、recommendation 都用 SQL 显式排除
+#   strategy='强势突破'），故停用无需改任何下游口径。
+#   保留：strategy/surge_breakout.py、/api/investor/surge_picks、
+#         core/services/signal_picks.py、stock_signal 里的历史记录（历史成绩单仍可复算）。
+#   复活：enabled 改回 True + 从 git 取回 dashboard.html 的面板与 renderSurgeCard 等函数。
 # 目标：次日（T+1）涨停或大涨的高弹性观察池。
 # Phase 1 样本外验证（2026-01~07，tools/mine_surge_next_day.py，主板 OC 现实口径）：
 #   「大阳突破」族是唯一 OC 均值为正的候选：当日 +5%~9.8% 未涨停（次日开盘买得到）
@@ -353,7 +370,7 @@ NEXT_DAY_MOMENTUM = {
 #   由 max_market_pct 门控拦截。首板/连板族次日触涨停率更高但 OC 均值 <=0（隔夜
 #   跳空吃掉溢价），不采用。enabled=False 即一键下线。
 SURGE_BREAKOUT = {
-    "enabled": True,
+    "enabled": False,
     "min_pct": 5.0,              # 当日涨幅下限（%）：大阳才具隔日惯性
     "max_pct": 9.8,              # 当日涨幅上限（%）：涨停次日高开买不到，剔除
     "vol_ratio_min": 1.5,        # 量比下限（对前 5 日均量）：确认放量
@@ -638,6 +655,31 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         # 清一色「回撤3% 持10」，全窗最优族亦为小回撤；启动线下调后 3% 回撤负责快速锁盈。
         "default": 0.03, "type": float,
         "min": 0.03, "max": 0.20, "label": "短线移动止盈回撤比例(自高点)",
+    },
+    "short_trail_launch_on_close": {
+        # 移动止盈启动判定口径（2026-10-13 落地）：1=收盘价达启动线才启动，
+        # 0=盘中 high 触及即启动（旧口径）。
+        # 旧口径缺陷：启动与卖出同日生效——盘中插针冲过启动线、同日收盘砸穿
+        # 移动止盈线时，「移动止盈」退化为「锁亏」（面板 61 笔中 3 笔：603459
+        # -0.87%、600613 -4.14%、605162 -1.04%，MFE 均 +9% 以上）。
+        # 依据 tools/_backtest_short_exit_grid.py（面板同口径 61 段逐笔对账）：
+        # 单改本项 均笔 -1.22%→-0.94%；tools/_eval_short_package_big.py 3 年
+        # 25k 信号池同步改善（与 stopfill 组合 +1.11%→+1.32%，2026 年 -0.16→+0.03）。
+        # 0=回退旧口径（逐字节等价改动前行为）。
+        "default": 1, "type": int,
+        "min": 0, "max": 1, "label": "移动止盈收盘启动(1=收盘/0=盘中high)",
+    },
+    "short_stop_fill_at_stop": {
+        # 止损成交价口径（2026-10-13 落地）：收盘跌破止损价且止损价<=成本价时，
+        # 按止损价成交（条件单口径），1=开/0=按收盘价成交（旧口径）。
+        # 旧口径在跳空跌穿止损日把亏损放大 3~4pp（09-21/22 高台跳水簇 5 笔
+        # -69.4pp 中约 17pp 为穿线超额：603668 止损宽 12.9% 实亏 -16.59%）。
+        # 语义=用户挂条件止损单的真实成交近似；不改变止损触发频率，只削左尾。
+        # 依据同上两工具：与 launch_on_close 组合 面板均笔 -1.22%→-0.60%，
+        # 3 年池 +1.11%→+1.32%。仅当止损价<=成本价时生效（止损在成本上方的
+        # 保本单仍按收盘价卖，不倒贴）。0=回退旧口径。
+        "default": 1, "type": int,
+        "min": 0, "max": 1, "label": "跳空止损按止损价成交(条件单口径)",
     },
     "short_max_hold_days": {
         # 2026-08-09 由 1 调整为 3：P0-1.1 的 1 天基于 v1 诊断（v1 T+3 转负才快进快出）；
@@ -933,6 +975,15 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         # 取 2.5 折中；回滚：DB 覆盖或改回 2.0。
         "default": 2.5, "type": float,
         "min": 1.0, "max": 4.0, "label": "中线止损 ATR 倍数",
+    },
+    "mid_risk_reward": {
+        # 中线盈亏比 RR（T11 S5 收口：原在 strategy/mid_long.py 与 strategy/strategy.py
+        # 各硬编码一份 2.5，改参数后两处共用同一值，展示列与信号口径一致）：
+        #   止盈 = 入场价 + RR × k×ATR，k=mid_atr_stop_mult。
+        # 2.5 是 2026-08 回测定的折中值（见 mid_atr_stop_mult 注释），无单独网格数据，
+        # 可调区间保守给 1.0~5.0；改值需重跑 tools/backtest_midlong_exit.py 对照。
+        "default": 2.5, "type": float,
+        "min": 1.0, "max": 5.0, "label": "中线盈亏比（止盈/风险）",
     },
     "long_ma_stop_mult": {
         # 长线止损 MA120 倍数（2026-08 回测 tools/backtest_midlong_exit.py：全历史 raw 趋势信号

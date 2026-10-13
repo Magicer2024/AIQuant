@@ -421,6 +421,15 @@ def evaluate_exit_by_prices(
 
     # ── 逐日模拟（A股 T+1：买入日当天不可卖出，最早次日才能出场） ──
     # 卖出判定统一用当日收盘价（不做盘中插针触发）：收盘价破止损/破移动止盈线/达止盈价按收盘价卖出
+    # 2026-10-13 两个口径开关（参数注释见 config/strategy_params.py）：
+    #   launch_on_close  移动止盈启动改收盘判定（修复盘中插针启动+同日砸盘锁亏）
+    #   stop_fill_at_stop 跳空跌穿止损按止损价成交（条件单口径，削左尾）
+    try:
+        from config.strategy_params import get_param as _gp
+        launch_on_close = bool(int(_gp("short_trail_launch_on_close") or 0))
+        stop_fill_at_stop = bool(int(_gp("short_stop_fill_at_stop") or 0))
+    except Exception:
+        launch_on_close, stop_fill_at_stop = True, True
     hold_days = 0
     highest = None
     partial_done = False          # 浮盈（按持仓期最高价计）是否已首次达到移动止盈启动线
@@ -440,7 +449,9 @@ def evaluate_exit_by_prices(
         # ⚠ 设计取舍：启动线用盘中 high 触发（避免插针假启动）、卖出用收盘价判定
         # （不插针，与全项目出场口径一致）；极端情形（买入日盘中冲过启动线又回落）
         # 会早启动移动止盈，属可接受的保守方向。
-        if trailing_enabled and not partial_done and highest >= launch_line:
+        if trailing_enabled and not partial_done and (
+                close >= launch_line if launch_on_close
+                else highest >= launch_line):
             partial_done = True
         if trailing_enabled and partial_done:
             line = highest * (1 - trailing_pct)
@@ -451,9 +462,10 @@ def evaluate_exit_by_prices(
         if i == 1:
             continue
 
-        # 1. 止损：收盘价跌破止损价 → 按收盘价卖出
+        # 1. 止损：收盘价跌破止损价 → 卖出（跳空穿线时按条件单口径以止损价成交）
         if stop_loss is not None and close <= stop_loss:
-            exit_date, exit_price, exit_reason = ts, close, f"收盘跌破止损价 {stop_loss:.2f}"
+            px = stop_loss if (stop_fill_at_stop and stop_loss <= entry_price) else close
+            exit_date, exit_price, exit_reason = ts, px, f"收盘跌破止损价 {stop_loss:.2f}"
             break
         # 2. 移动止盈：浮盈已过启动线且收盘跌破移动止盈线 → 按收盘价卖出（让利润奔跑后锁利）
         if trailing_enabled and partial_done and trailing_stop is not None and close <= trailing_stop:

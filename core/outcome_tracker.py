@@ -27,7 +27,7 @@ from config.personal_config import (
 # ─────────────────────────────────────────────
 
 def short_t1_filter_sql(conn, start_date: str, end_date: str | None = None,
-                        alias: str = "s") -> tuple[str, list]:
+                        alias: str = "s", series: dict | None = None) -> tuple[str, list]:
     """短线抄底推荐 T1 辅助过滤 SQL 片段（组合条件 C + regime 自动切换）。
 
     2026-08-20 挖掘落地（tools/eval_short_t1_filter.py 特征分桶 +
@@ -51,8 +51,10 @@ def short_t1_filter_sql(conn, start_date: str, end_date: str | None = None,
     if mkt_gate >= 99 and dev >= 99:
         return "1", []
     # regime 自动切换：仅信号日为冰点/偏冷的日期启用过滤
-    from core.market_regime import compute_regime_series
-    series = compute_regime_series(conn, start_date, end_date)
+    # （series 可由调用方预计算传入，与 short_market_gate_sql 共享一次计算）
+    if series is None:
+        from core.market_regime import compute_regime_series
+        series = compute_regime_series(conn, start_date, end_date)
     active = sorted(d for d, r in series.items() if r in ("cold", "cool"))
     if not active:
         return "1", []
@@ -118,7 +120,8 @@ def short_order_clause(alias: str = "s") -> str:
     return _short_order_keys(alias, chip_first, direction)
 
 
-def _short_weak_dates(conn, start_date: str, end_date: str | None = None) -> set:
+def _short_weak_dates(conn, start_date: str, end_date: str | None = None,
+                      series: dict | None = None) -> set:
     """计算 [start_date, end_date] 内的「市场走弱日」集合（宽松口径）。
 
     2026-08-26 v2 放宽（初版过紧：ANY 指数略破 MA20 即判弱，2 年窗口 73% 交易日
@@ -131,8 +134,9 @@ def _short_weak_dates(conn, start_date: str, end_date: str | None = None) -> set
     也一刀切屏蔽；任一指数缺数据时跳过对应项（仅按 regime 判定，不误判为强）。
     """
     import pandas as pd
-    from core.market_regime import compute_regime_series
-    series = compute_regime_series(conn, start_date, end_date)
+    if series is None:
+        from core.market_regime import compute_regime_series
+        series = compute_regime_series(conn, start_date, end_date)
     weak = {d for d, r in series.items() if r == "cold"}
     end_filter = " AND trade_date <= ?" if end_date else ""
     for icode in ("000001", "000300"):
@@ -163,7 +167,7 @@ def _short_weak_dates(conn, start_date: str, end_date: str | None = None) -> set
 
 
 def short_market_gate_sql(conn, start_date: str, end_date: str | None = None,
-                          alias: str = "s") -> tuple[str, list]:
+                          alias: str = "s", series: dict | None = None) -> tuple[str, list]:
     """短线「大盘走弱闸门」SQL 片段（组合进 short 组 WHERE，三处出口共用）。
 
     2026-08-26 用户要求：市场下跌/走弱时不要盲推短线建仓。
@@ -173,12 +177,30 @@ def short_market_gate_sql(conn, start_date: str, end_date: str | None = None,
     推荐复盘入库」三处共用，保证口径一致。参数里没有开关——弱市判定本身是硬规则，
     若要整体放量可用 all_dates 逻辑之外，此处默认仅在明确弱市日收缩。
     """
-    weak = _short_weak_dates(conn, start_date, end_date)
+    weak = _short_weak_dates(conn, start_date, end_date, series=series)
     if not weak:
         return "1", []
     ph = ",".join("?" * len(weak))
     return (f"(COALESCE({alias}.strategy, '') = '隔日动量' "
             f"OR {alias}.scan_date NOT IN ({ph}))"), list(weak)
+
+
+def short_gate_sql(conn, start_date: str, end_date: str | None = None,
+                   alias: str = "s") -> tuple[str, list, str, list]:
+    """T1 辅助过滤 + 大盘走弱闸门组合版：同一窗口的 regime 只计算一次。
+
+    两个过滤器都按信号日 regime 判定，而 compute_regime_series 同窗口重复
+    计算实测占出场跟踪请求近一半耗时（cProfile 2×2.3s，2026-10 T4）。
+    返回 (t1_cond, t1_params, mk_cond, mk_params)，与分别调用两个
+    *_filter_sql 完全同构（口径不变），调用方拼接方式无需改变。
+    """
+    from core.market_regime import compute_regime_series
+    series = compute_regime_series(conn, start_date, end_date)
+    t1_cond, t1_params = short_t1_filter_sql(conn, start_date, end_date,
+                                             alias, series=series)
+    mk_cond, mk_params = short_market_gate_sql(conn, start_date, end_date,
+                                               alias, series=series)
+    return t1_cond, t1_params, mk_cond, mk_params
 
 
 def short_observe_bottom_sql(alias: str = "s") -> tuple[str, list]:
@@ -362,10 +384,10 @@ def insert_new_outcomes(days_back: int = 60):
         gap_sql = "0"
     with get_conn() as conn:
         # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
-        # 隔日动量豁免；参数 >=99 禁用）——复盘窗内各信号日按当天历史 regime 判定
-        t1_cond, t1_params = short_t1_filter_sql(conn, start_date)
-        # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量，与今日推荐/出场跟踪同口径
-        mk_cond, mk_params = short_market_gate_sql(conn, start_date)
+        # 隔日动量豁免；参数 >=99 禁用）+ 大盘走弱闸门（2026-08-26 弱市日只保留
+        # 隔日动量）——复盘窗内各信号日按当天历史 regime 判定，两闸门共用
+        # short_gate_sql（同一窗口 regime 只算一次，T4），与今日推荐/出场跟踪同口径
+        t1_cond, t1_params, mk_cond, mk_params = short_gate_sql(conn, start_date)
         # 抄底融合线降观察（2026-09-06）：不占短线名额（与今日推荐/出场跟踪同口径）
         ob_cond, ob_params = short_observe_bottom_sql()
         horizon_specs = {
@@ -895,6 +917,12 @@ def _short_exit_sim(hold_prices, exec_entry: float, stop, tp,
         stop = exec_entry * (1 + float(stop_loss_pct))
 
     trail_ok = trail_pct is not None and 0.01 <= trail_pct < 1.0
+    # 2026-10-13 口径开关（与 evaluate_exit_by_prices 同语义，参数注释见 strategy_params）
+    try:
+        launch_on_close = bool(int(get_param("short_trail_launch_on_close") or 0))
+        stop_fill_at_stop = bool(int(get_param("short_stop_fill_at_stop") or 0))
+    except Exception:
+        launch_on_close, stop_fill_at_stop = True, True
     highest = None
     tline = None
     launched = 0
@@ -908,7 +936,9 @@ def _short_exit_sim(hold_prices, exec_entry: float, stop, tp,
         high = p["high"] or close
         if highest is None or high > highest:
             highest = high
-        if not launched and launch_price and highest >= launch_price:
+        if not launched and launch_price and (
+                close >= launch_price if launch_on_close
+                else highest >= launch_price):
             launched = 1
         if launched and trail_ok:
             line = highest * (1 - trail_pct)
@@ -918,8 +948,9 @@ def _short_exit_sim(hold_prices, exec_entry: float, stop, tp,
         if j == 1:
             continue
         if stop and close <= stop:
+            px = stop if (stop_fill_at_stop and stop <= exec_entry) else close
             return ("stop_loss", p["trade_date"],
-                    round((close - exec_entry) / exec_entry * 100, 2), 1, launched, True)
+                    round((px - exec_entry) / exec_entry * 100, 2), 1, launched, True)
         if launched and tline is not None and close <= tline:
             return ("trailing_stop", p["trade_date"],
                     round((close - exec_entry) / exec_entry * 100, 2), 0, launched, True)
