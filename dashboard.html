@@ -978,22 +978,30 @@ function renderPickExitEmbed(hz, d) {
         mount.innerHTML = '<div class="pick-exit-empty">该周期暂无出场跟踪记录（短线 ≤10 日 / 中线 ≤60 日 / 长线不限）</div>';
         return;
     }
-    mount.innerHTML = renderPickExitMini(hz, list, perf);
+    mount.innerHTML = renderPickExitMini(hz, list, perf, d.start_date);
 }
 
 // 紧凑版出场跟踪（嵌入到推荐小板块底部）
-function renderPickExitMini(hz, list, perf) {
+// 统计行（2026-10-13 精简）：主指标 = 平均每笔 / 按仓位累计 / 胜率，
+// 外加动量·抄底分组均笔与状态计数；累计起点用后端 start_date，不再硬编码日期。
+function renderPickExitMini(hz, list, perf, startDate) {
     var held = list.filter(function (it) { return it.status === 'hold'; }).length;
     var cleared = list.filter(function (it) { return it.status === 'clear'; }).length;
     var watching = list.filter(function (it) { return it.status === 'watching'; }).length;
     var expired = list.filter(function (it) { return it.status === 'expired'; }).length;
     var expanded = !!EXIT_EXPANDED[hz];
     var meta = EXIT_HORIZON_META[hz] || { icon: '📊', label: hz };
+    var fromTxt = startDate ? ('自 ' + startDate + ' 累计') : '累计';
+    var tip = meta.label + '出场跟踪：' + fromTxt
+        + '；口径含持仓中的浮动盈亏，待回踩/未成交不建仓、不计入收益与胜率'
+        + '；' + (meta.hint || '');
     return '<div class="pick-exit-mini">' +
         '<div class="pick-exit-head">' +
-            '<span class="pick-exit-title">📊 出场跟踪 · ' + meta.label + '（7月20日起累计）</span>' +
+            '<span class="pick-exit-title" title="' + tip + '">📊 出场跟踪 · ' + meta.label
+                + '（' + fromTxt + '）</span>' +
             '<span class="hz-spacer"></span>' +
             '<span class="pick-exit-chips">' + exitStatChip(hz, perf) +
+                exitSplitChips(hz, list) +
                 '<span class="exit-group-stat">持有 ' + held + '</span>' +
                 '<span class="exit-group-stat">已卖出 ' + cleared + '</span>' +
                 (watching > 0 ? '<span class="exit-group-stat">待回踩 ' + watching + '</span>' : '') +
@@ -1005,7 +1013,7 @@ function renderPickExitMini(hz, list, perf) {
                 (expanded ? '收起' : '详情') + '<span class="caret">▾</span>' +
             '</button>' +
         '</div>' +
-        (expanded ? '<div class="pick-exit-body">' + renderExitGroupBody(list) + '</div>' : '') +
+        (expanded ? '<div class="pick-exit-body">' + renderExitGroupBody(list, perf) + '</div>' : '') +
     '</div>';
 }
 
@@ -3097,6 +3105,9 @@ const EXIT_HORIZON_META = {
 // 短线 40+ 笔并行分布在 40 个交易日（每日最多 3 只同时持有），按顺序复利等于假设
 // "一份钱做完一笔再做下一笔"，把 -2% 的单笔均摊放大成 -65%。改为「按仓位累计」：
 // Σ(单笔收益 × POSITION_PLAN_MAX_PCT)，对总资金的影响可线性累加，有明确资金含义。
+// ⚠ 展示（2026-10-13 精简）：界面只保留 平均每笔 / 按仓位累计 / 胜率 三个主指标，
+// 弃用口径（算术和 cum_pnl、顺序复利 comp_pct）不再出现在界面上，只在悬浮说明里
+// 留一句对照；样本笔数并入「平均每笔」，状态计数由外层 chips 承担。
 function exitStatChip(hz, perf) {
     const p = (perf && perf[hz]) || {};
     let s = '';
@@ -3104,7 +3115,7 @@ function exitStatChip(hz, perf) {
     if (p.avg_pct != null) {
         const sign = p.avg_pct >= 0 ? '+' : '';
         const raw = p.cum_pnl != null ? `${p.cum_pnl >= 0 ? '+' : ''}${p.cum_pnl}%` : '--';
-        s += `<span class="exit-group-stat ${p.avg_pct >= 0 ? 'positive' : 'negative'}" title="平均每笔收益：${n} 笔（已卖出 ${p.clear || 0} + 持仓中 ${p.hold || 0}）的等权算术平均，不依赖仓位假设，是唯一可直接比较的口径。原「累计收益 ${raw}」为单笔收益率直接相加，无资金含义，已弃用">平均每笔 ${sign}${p.avg_pct}%</span>`;
+        s += `<span class="exit-group-stat ${p.avg_pct >= 0 ? 'positive' : 'negative'}" title="平均每笔收益：${n} 笔已建仓（已卖出 ${p.clear || 0} + 持仓中 ${p.hold || 0}）的等权算术平均，含持仓中浮盈，不依赖仓位假设，是唯一可直接比较的口径。原「累计收益 ${raw}」为单笔收益率直接相加，无资金含义，已弃用">平均每笔 ${sign}${p.avg_pct}% · ${n}笔</span>`;
     }
     if (p.pnl_at_pos != null) {
         const sign = p.pnl_at_pos >= 0 ? '+' : '';
@@ -3112,19 +3123,98 @@ function exitStatChip(hz, perf) {
         s += `<span class="exit-group-stat ${p.pnl_at_pos >= 0 ? 'positive' : 'negative'}" title="按仓位累计：每笔按 ${posPct}% 仓位下单，对总资金的影响 = Σ(单笔收益 × ${posPct}%)，可线性累加、有资金含义（共 ${n} 笔）。注：原「等权累计」（逐笔满仓顺序复利）把并行持仓当成串联，会把 -2% 的单笔均摊放大成 -65%，已弃用">按仓位累计 ${sign}${p.pnl_at_pos}%</span>`;
     }
     if (p.win_rate != null) {
-        s += `<span class="exit-group-stat ${p.win_rate >= 50 ? 'positive' : 'negative'}" title="${p.segments || 0} 段中盈利 ${p.win_rate >= 0 ? Math.round(p.win_rate * (p.segments || 0) / 100) : 0} 段">胜率 ${p.win_rate}%</span>`;
+        const wins = Math.round(p.win_rate * n / 100);
+        s += `<span class="exit-group-stat ${p.win_rate >= 50 ? 'positive' : 'negative'}" title="${n} 笔已建仓中 ${wins} 笔盈利；口径与「平均每笔」一致（含持仓浮盈，待回踩/未成交不计入）">胜率 ${p.win_rate}%</span>`;
     }
     return s;
 }
 
+// 分组均笔（2026-10-13 新增，仅短线）：「隔日动量」与「抄底类」是两套独立期望的
+// 信号线，混在一个平均值里看不出谁在拖。3 年生产口径实测：动量名额均笔 +4.45%
+// vs 抄底 +1.90%（tools/_eval_short_exposure_grid.py 的 rn 名次归因）。
+// 数值全部来自已建仓段（clear/hold）的 detail.current_pnl_pct，与主口径一致；
+// 某类当期没有已建仓段 → 该类 chips 整个不显示，不给策略没产出的数字。
+function exitSplitChips(hz, list) {
+    if (hz !== 'short') return '';
+    var defs = [{ label: '动量', isMom: true }, { label: '抄底', isMom: false }];
+    var s = '';
+    defs.forEach(function (def) {
+        var vals = list.filter(function (it) {
+            return ((it.strategy || '') === '隔日动量') === def.isMom;
+        }).map(function (it) {
+            return (it.detail || {}).current_pnl_pct;
+        }).filter(function (v) { return typeof v === 'number'; });
+        if (!vals.length) return;
+        var mean = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+        var win = vals.filter(function (v) { return v > 0; }).length / vals.length * 100;
+        s += `<span class="exit-group-stat exit-split ${mean >= 0 ? 'positive' : 'negative'}" title="隔日动量与抄底类（回踩确认入场）分开统计，避免被平均值掩盖。口径同「平均每笔」：仅已建仓、含持仓浮盈。共 ${vals.length} 笔，盈利 ${Math.round(win * vals.length / 100)} 笔">${def.label} ${vals.length}笔 ${mean >= 0 ? '+' : ''}${mean.toFixed(2)}%</span>`;
+    });
+    return s;
+}
+
 // 跟踪列表行（展开态表格 tbody）
-function renderExitRows(list) {
+// ── 列集合（2026-10-13 重排，表头见 renderExitGroupBody，两者必须一一对应）──
+// 修掉此前「表头 10 列 / 单元格 11 个」的整列错位（加「现价」列时没回头补表头，
+// 导致 现价 显示在 卖出价 表头下、卖出价 显示在 持仓天数 表头下……）。
+// 只保留「这笔接下来该怎么处理」真正要看的数值：
+//   1 股票      名称+代码+信号线（原「代码」「名称」两列合一）
+//   2 综合分    融合分，判断这笔离短线门控线多远
+//   3 推荐日    连续推荐时附最早一次
+//   4 建仓      价 + 日（回踩类的买价语义 = 回踩买点）
+//   5 市价      已卖出=卖出价 / 其余=最新收盘价。原「现价」「卖出价」两列对已卖出
+//              行是**同一个数字**（evaluate_exit_by_prices 清仓时 current_price 就取
+//              exit_price），属纯冗余，已合并为一列
+//   6 持仓      交易日 / 该周期上限（上限取后端 perf.max_hold，不硬编码）
+//   7 止损      相对建仓价的距离%（ATR 自适应后 5%~15% 不等，>8% 标黄）+ 绝对价
+//   8 最高浮盈  MFE%，与盈亏之差即回吐 —— 用来区分「信号看错」还是「出场没拿住」
+//   9 盈亏
+//  10 状态      徽章 + 出场原因标签；完整文案收进悬浮，替代原来最长的一列「说明」
+// 不再显示：固定止盈价（移动止盈口径下它只是启动线兜底，读它没有决策价值）、
+// 盘中最高价绝对值（已换算成 MFE%）、ma5/减半标记（短线三档出场用不到）。
+const EXIT_STOP_WIDE_PCT = 8;   // 止损宽度超过此值标黄：ATR 自适应止损常 10%+
+
+function exitNum(v, dg) {
+    if (v == null || v === '' || isNaN(Number(v))) return null;
+    return Number(v).toFixed(dg == null ? 2 : dg);
+}
+
+// 出场原因短标签：界面只留一眼能读完的词，完整文案进 title。
+// 三周期的 reason 文案不同（短线 evaluate_exit_by_prices 的 short 分支写「收盘跌破
+// 止损价 / 移动止盈 / 持仓满 N 日到期」，中长线写「触发硬止损 / 自高点回撤…移动止盈
+// 清仓 / 超过最长持仓期 / 已减半后跌破MA5」），这里统一归成同一组标签。
+// 归不出来的就返回空（宁可空白，也不显示与状态徽章重复的「已卖出」）。
+function exitReasonTag(it) {
+    const d = it.detail || {};
+    const r = String(d.exit_reason || it.reason || '');
+    if (it.status === 'reduce') return '建议减半';
+    if (it.status === 'watching') return '等待回踩';
+    if (it.status === 'expired') return '窗口内未回踩';
+    if (it.status !== 'clear') return '';
+    if (r.indexOf('移动止盈') >= 0) return '移动止盈';
+    if (r.indexOf('止损') >= 0) return '止损';
+    if (r.indexOf('止盈') >= 0) return '止盈';
+    if (r.indexOf('到期') >= 0 || r.indexOf('超过最长持仓期') >= 0) return '到期';
+    if (r.indexOf('MA5') >= 0) return '减半后破MA5';
+    return '';
+}
+
+function renderExitRows(list, maxHold) {
     return list.map(it => {
         const detail = it.detail || {};
         const pnl = detail.current_pnl_pct;
         const pnlCls = pnl != null ? (pnl >= 0 ? 'positive' : 'negative') : '';
         const pnlStr = pnl != null ? `${pnl>=0?'+':''}${pnl}%` : '--';
         const sold = it.status === 'clear';
+        const filled = sold || it.status === 'hold';      // 已建仓（含持仓中）
+        const muted = '<span style="color:var(--text-muted)">--</span>';
+        const entry = detail.entry_price != null ? detail.entry_price : it.entry_price;
+        // 衍生口径只用 payload 已有数值换算（建仓价 / 止损价 / 最高价），不新造数字
+        const pctOf = px => (Number(entry) > 0 && px != null)
+            ? (Number(px) / Number(entry) - 1) * 100 : null;
+        const mfe = pctOf(detail.highest_since_entry);
+        // 止损价字段名两套口径：短线分支给 stop_loss，中长线分支给 stop_price
+        const stopPx = detail.stop_loss != null ? detail.stop_loss : detail.stop_price;
+        const risk = pctOf(stopPx);
         const ST_MAP = {
             clear:  ['🔴', '已卖出', 'var(--danger)', 600],
             hold:   ['🟢', '持有', 'var(--green, #10b981)', 600],
@@ -3132,50 +3222,69 @@ function renderExitRows(list) {
             expired:  ['⚪', '未成交', 'var(--text-muted)', 400],
         };
         const _st = ST_MAP[it.status] || ST_MAP.hold;
-        const statusHtml = `<span style="color:${_st[2]};font-weight:${_st[3]}">${_st[0]} ${_st[1]}</span>`;
-        const holdDays = (it.status === 'watching' || it.status === 'expired')
-            ? '--'
-            : (detail.hold_days != null ? detail.hold_days + '天' : '--');
-        // 卖出价：仅已卖出（止盈/止损/到期）显示，持有中为空
-        const exitPriceHtml = (sold && detail.exit_price != null)
-            ? `<span title="${detail.exit_date || ''} 卖出">${Number(detail.exit_price).toFixed(2)}</span>`
-            : '<span style="color:var(--text-muted)">--</span>';
-        // 现价：持仓/已卖出 = 评估时点收盘价；待回踩/未成交 = 该股最新收盘价
-        // （未成交单的现价用于判断「离回踩买点还差多少」）
-        const curPx = detail.current_price;
-        const curDate = detail.current_date || '';
-        const curHtml = curPx != null
-            ? `<span title="最新收盘价${curDate ? '：' + curDate : ''}（该股最近一个有行情的交易日，非盘中实时价）">${Number(curPx).toFixed(2)}</span>`
-            : '<span style="color:var(--text-muted)">--</span>';
+        const tag = exitReasonTag(it);
+        const statusHtml = `<span style="color:${_st[2]};font-weight:${_st[3]}">${_st[0]} ${_st[1]}</span>`
+            + (tag ? `<div class="exit-sub">${tag}</div>` : '');
+        // 持仓天数：待回踩/未成交未建仓，无天数可读
+        const holdHtml = (filled && detail.hold_days != null)
+            ? `${detail.hold_days}${maxHold ? ' / ' + maxHold : ''}` : muted;
+        // 市价列：已卖出=卖出价，持仓/未成交=最新收盘价
+        const pxVal = sold && detail.exit_price != null ? detail.exit_price : detail.current_price;
+        const pxWhen = sold ? (detail.exit_date || '') : (detail.current_date || '');
+        const pxHtml = pxVal != null
+            ? `${exitNum(pxVal)}<div class="exit-sub">${sold ? '卖出' : '现价'}${pxWhen ? ' ' + pxWhen : ''}</div>`
+            : muted;
+        // 止损距离：正常为负（还能跌多少）。若 >= 0 说明建仓价已低于止损价
+        // （隔日跳空直接穿线，stop_fill_at_stop 只在止损<=成本时按止损价成交），
+        // 这类单的风险敞口不是「还能跌多少」而是「开盘即已穿线」，必须标出来。
+        const stopBrokenAtEntry = risk != null && risk >= 0;
+        const stopHtml = risk != null
+            ? `<span class="exit-risk ${(stopBrokenAtEntry || Math.abs(risk) > EXIT_STOP_WIDE_PCT) ? 'wide' : ''}"`
+              + (stopBrokenAtEntry
+                 ? ' title="止损价不低于建仓价：建仓当日已跳空穿止损，这笔的止损位实际在成本之上"' : '')
+              + `>${risk >= 0 ? '+' : ''}${risk.toFixed(1)}%</span>`
+              + `<div class="exit-sub">${exitNum(stopPx)}</div>` : muted;
+        const mfeHtml = mfe != null
+            ? `${mfe >= 0 ? '+' : ''}${mfe.toFixed(1)}%`
+              + (pnl != null && mfe - pnl > 3
+                 ? `<div class="exit-sub">回吐 ${(mfe - pnl).toFixed(1)}</div>` : '')
+              : muted;
         // 连续推荐：推荐日显示最新一次，附最早推荐日提示
         const firstDate = detail.first_scan_date;
         const scanHtml = (it.scan_date || '--')
             + (firstDate && firstDate !== it.scan_date
-                ? `<div style="font-size:10px;color:var(--text-muted)">自 ${firstDate} 连续推荐</div>` : '');
+                ? `<div class="exit-sub">自 ${firstDate} 连续推荐</div>` : '');
+        const isPullback = (it.strategy || '') !== '隔日动量';
+        const entryTip = isPullback
+            ? `回踩买点 ${exitNum(entry) || '--'}：推荐日后若干交易日内价格触及才建仓，`
+              + '一直不触及则视为未成交放弃（涨上去不追高）。止盈/止损同样以该买点为基准。'
+            : `建仓价 ${exitNum(entry) || '--'}：推荐日后首个交易日开盘价。`;
         return `<tr>
-            <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
-            <td>${it.name||''}</td>
+            <td><span class="code-link" onclick="openKline('${it.code}')" title="点击查看 K 线">${it.name || it.code}</span>
+                <div class="exit-sub">${it.code}${it.strategy ? ' · ' + it.strategy : ''}</div></td>
+            <td class="exit-num" title="融合分（多因子加权）。短线名额要求不低于门控阈值，越接近阈值越是勉强入选">${it.fusion_score != null ? it.fusion_score : '--'}</td>
             <td>${scanHtml}</td>
-            <td>${detail.entry_date||'--'}</td>
-            <td>${it.entry_price||'--'}</td>
-            <td>${curHtml}</td>
-            <td>${exitPriceHtml}</td>
-            <td>${holdDays}</td>
-            <td class="${pnlCls}">${pnlStr}</td>
-            <td>${statusHtml}</td>
-            <td style="font-size:11px;color:var(--text-secondary);max-width:220px">${it.reason||''}</td>
+            <td class="exit-num" title="${entryTip}">${filled || entry != null ? (exitNum(entry) || '--') : '--'}
+                <div class="exit-sub">${detail.entry_date || (filled ? '' : '未建仓')}</div></td>
+            <td class="exit-num">${pxHtml}</td>
+            <td class="exit-num" title="已持仓交易日 / 该周期持仓上限">${holdHtml}</td>
+            <td class="exit-num" title="止损价相对建仓价的距离。止损宽度按个股 ATR 自适应，波动大的票止损更宽、单笔潜在亏损也更大">${stopHtml}</td>
+            <td class="exit-num" title="持仓期间最高浮盈（相对建仓价）。它与盈亏的差 = 回吐，用于区分「信号看错」与「出场没拿住」">${mfeHtml}</td>
+            <td class="${pnlCls} exit-num">${pnlStr}</td>
+            <td title="${(it.reason || '').replace(/"/g, '')}">${statusHtml}</td>
         </tr>`;
     }).join('');
 }
 
-// 展开态内容：完整跟踪表
-function renderExitGroupBody(list) {
+// 展开态内容：完整跟踪表（表头数量必须与 renderExitRows 的单元格数量一致 = 10）
+function renderExitGroupBody(list, perf) {
     if (!list.length) {
         return '<div class="empty-state" style="padding:14px;font-size:12px">该周期暂无跟踪记录</div>';
     }
-    return `<div class="table-wrapper"><table><thead><tr>
-        <th>代码</th><th>名称</th><th>推荐日</th><th>买入日</th><th>买入价</th><th>卖出价</th><th>持仓天数</th><th>盈亏</th><th>状态</th><th>说明</th>
-    </tr></thead><tbody>${renderExitRows(list)}</tbody></table></div>`;
+    const maxHold = (perf || {}).max_hold;
+    return `<div class="table-wrapper"><table class="exit-table"><thead><tr>
+        <th>股票</th><th class="exit-num">综合分</th><th>推荐日</th><th class="exit-num">建仓</th><th class="exit-num">市价</th><th class="exit-num">持仓</th><th class="exit-num">止损</th><th class="exit-num">最高浮盈</th><th class="exit-num">盈亏</th><th>状态</th>
+    </tr></thead><tbody>${renderExitRows(list, maxHold)}</tbody></table></div>`;
 }
 
 // 策略规则命中（常驻规则今日筛出，独立于融合分信号）

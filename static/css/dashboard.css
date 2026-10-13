@@ -1183,6 +1183,22 @@ tr:hover td {
 .pick-exit-body table { font-size: 11px; }
 .pick-exit-body th, .pick-exit-body td { padding: 4px 8px; }
 
+/* 出场跟踪明细表（2026-10-13 列重排）：主值 + 小字次要说明的两层单元格，
+   数值列右对齐并用等宽数字，保证 10 列在一屏内不横向滚动 */
+.exit-sub {
+    font-size: 10px; line-height: 1.35; font-weight: 400;
+    color: var(--text-muted); white-space: nowrap;
+}
+table.exit-table th { white-space: nowrap; }
+table.exit-table .exit-num, table.exit-table th.exit-num {
+    text-align: right; font-variant-numeric: tabular-nums;
+}
+table.exit-table td.exit-num .exit-sub { text-align: right; }
+table.exit-table .exit-risk { font-weight: 600; color: var(--text-secondary); }
+/* 止损宽度 >8%：ATR 自适应止损在题材股上会放到 10%+，单笔潜在亏损大，标黄提示 */
+table.exit-table .exit-risk.wide { color: #ffaa3c; }
+.exit-group-stat.exit-split { font-weight: 600; }
+
 /* ── 3 个挂单位置 ── */
 .entry-strategy {
     padding: 8px 0 4px;
