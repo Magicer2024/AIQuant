@@ -79,28 +79,6 @@ def load_history(conn, code: str, lookback: int = 260,
     return df
 
 
-def _calc_kdj_safe(high: pd.Series, low: pd.Series, close: pd.Series,
-                   n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataFrame:
-    """NaN 安全的 KDJ（修复 indicators.calc_kdj 热启动期 NaN 污染递归的问题）。
-
-    calc_kdj 的 rsv 在前 n-1 日为 NaN（rolling 未满窗），递归式因此被污染成 NaN。
-    这里把热启动期 rsv 填充为中性 50，保证 KDJ 在暖机后稳定输出。
-    """
-    low_min = low.rolling(window=n).min()
-    high_max = high.rolling(window=n).max()
-    rsv = (close - low_min) / (high_max - low_min + 1e-10) * 100
-    rsv = rsv.fillna(50.0)   # 暖机期视为中性
-    k = pd.Series(index=close.index, dtype=float)
-    d = pd.Series(index=close.index, dtype=float)
-    k.iloc[0] = 50.0
-    d.iloc[0] = 50.0
-    for i in range(1, len(close)):
-        k.iloc[i] = (m1 - 1) / m1 * k.iloc[i - 1] + 1 / m1 * rsv.iloc[i]
-        d.iloc[i] = (m2 - 1) / m2 * d.iloc[i - 1] + 1 / m2 * k.iloc[i]
-    j = 3 * k - 2 * d
-    return pd.DataFrame({"KDJ_K": k, "KDJ_D": d, "KDJ_J": j}, index=close.index)
-
-
 def _compute(df: pd.DataFrame) -> pd.DataFrame:
     """在原始 df 基础上叠加全套技术指标，返回新 df（保留原始列）。
 
@@ -111,10 +89,6 @@ def _compute(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in ind.columns:
         out[col] = ind[col].values
-    # 覆盖 NaN 污染的 KDJ（indicators.calc_kdj 的热启动 bug）
-    kdj = _calc_kdj_safe(base["high"], base["low"], base["close"])
-    for col in kdj.columns:
-        out[col] = kdj[col].values
     return out
 
 
