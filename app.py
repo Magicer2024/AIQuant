@@ -100,6 +100,13 @@ def create_app(config=None):
     def server_error(error):
         return fail("服务器内部错误", 500)
 
+    from core.task_queue import QueueFullError
+
+    @app.errorhandler(QueueFullError)
+    def queue_full(error):
+        # 内存任务队列排队超限（D6）：全部 submit_task 提交点统一 503，无需各自 try/except
+        return fail(str(error), 503)
+
     return app
 
 
@@ -112,6 +119,10 @@ def initialize_runtime(app):
     setup_logging()
     init_db()
     init_investor_tables()
+    # D6：按配置装配内存任务队列（worker 数 / 待处理上限）；不调 configure 时用模块默认 4/32
+    from core import task_queue
+    task_queue.configure(max_workers=settings.TASK_QUEUE_MAX_WORKERS,
+                         max_pending=settings.TASK_QUEUE_MAX_PENDING)
     # 进程重启时回收上次中断遗留的 running 任务（标记 interrupted），
     # 无条件执行以覆盖调度器关闭的场景（方案 D：进程中断不留永久 running）。
     try:
@@ -140,5 +151,8 @@ app = create_app()
 
 if __name__ == "__main__":
     initialize_runtime(app)
-    app.run(host=settings.FLASK_HOST, port=int(os.getenv("FLASK_PORT", settings.FLASK_PORT)),
+    # FLASK_HOST 允许环境变量覆盖：浏览器测试夹具在 AIQUANT_TESTING 外网守卫下
+    # 只能绑回环地址（127.0.0.1）；不传时保持生产默认 settings.FLASK_HOST(0.0.0.0)
+    app.run(host=os.getenv("FLASK_HOST", settings.FLASK_HOST),
+            port=int(os.getenv("FLASK_PORT", settings.FLASK_PORT)),
             debug=False, use_reloader=False, threaded=True)

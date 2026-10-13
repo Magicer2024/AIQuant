@@ -12,6 +12,10 @@ SYNC_BATCH_SIZE = 100
 SYNC_RETRY_COUNT = 2
 SYNC_TIMEOUT = 30
 
+# ── 内存任务队列（core.task_queue；D6：worker 数 + 待处理排队上限，env 可覆盖）──
+TASK_QUEUE_MAX_WORKERS = int(os.getenv("AIQUANT_TASK_QUEUE_WORKERS", "4"))
+TASK_QUEUE_MAX_PENDING = int(os.getenv("AIQUANT_TASK_QUEUE_MAX_PENDING", "32"))
+
 # ── 数据库 ──
 PRODUCTION_DB_PATH = os.path.join(BASE_DIR, "core", "quant.db")
 DB_PATH = os.path.abspath(os.getenv("AIQUANT_DB_PATH", PRODUCTION_DB_PATH))
