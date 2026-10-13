@@ -83,20 +83,47 @@ def _conn() -> sqlite3.Connection:
 
 
 # ─────────────────────────────────────────────
+# 接口名常量（D7）：缓存键 / 频控 / 配额的唯一标识
+# ─────────────────────────────────────────────
+# ⚠ 常量值即写入 em_cache.name / em_calls.name 的持久化字符串，
+#    只可新增、不可改名（改名等于旧缓存与频控记录全部失联）。
+# 调用方（em_realtime/em_kline/routes）必须 import 本常量，禁止再写裸字符串，
+# 避免「GUARD_CONFIG 改了名、调用方漏改」的霰弹式修改。
+class GuardName:
+    REALTIME_ALL = "realtime_all"        # 盘前/盘后全 A 最新价快照
+    KLINES_BY_DATE = "klines_by_date"    # 按日拉全 A 1 天 K 线
+    KLINE = "kline"                      # 单只 K 线（高并发）
+    STOCK_ZH_A_SPOT = "stock_zh_a_spot"  # 预留配额档：akshare 现货当前直连、不走护栏，登记防将来误用
+
+
+# ─────────────────────────────────────────────
 # 配额配置：每类接口的窗口限制
 # ─────────────────────────────────────────────
 # 经验值：东财单 IP 半小时内同类请求 ≤ 10 次比较安全
 # 缓存命中不计配额
+
+# 未注册接口名的兜底档位（D7：原在 cached_fetch 内以临时 dict 重复硬编码，
+# 且 1800/10/50/120 默认值散落在多处 .get()，收敛为单一来源）
+_DEFAULT_GUARD_CFG = {
+    "window_sec": 1800, "max_in_window": 10,
+    "daily_quota": 50, "default_ttl": 120,
+}
+
 GUARD_CONFIG: dict[str, dict] = {
     # name: {"window_sec": 1800, "max_in_window": 10, "daily_quota": 50, "default_ttl": 120}
-    "realtime_all":     {"window_sec": 1800, "max_in_window": 10, "daily_quota": 50,  "default_ttl": 120},  # 盘前/盘后全 A 最新价
-    "klines_by_date":   {"window_sec": 1800, "max_in_window": 8,  "daily_quota": 40,  "default_ttl": 86400},  # 按日拉全 A 1 天数据
-    "kline":            {"window_sec": 60,   "max_in_window": 30, "daily_quota": 1000,"default_ttl": 86400},  # 单只 K 线（高并发，限紧）
-    "stock_zh_a_spot":  {"window_sec": 1800, "max_in_window": 10, "daily_quota": 50,  "default_ttl": 120},
+    GuardName.REALTIME_ALL:     {"window_sec": 1800, "max_in_window": 10, "daily_quota": 50,  "default_ttl": 120},
+    GuardName.KLINES_BY_DATE:   {"window_sec": 1800, "max_in_window": 8,  "daily_quota": 40,  "default_ttl": 86400},
+    GuardName.KLINE:            {"window_sec": 60,   "max_in_window": 30, "daily_quota": 1000,"default_ttl": 86400},
+    GuardName.STOCK_ZH_A_SPOT:  {"window_sec": 1800, "max_in_window": 10, "daily_quota": 50,  "default_ttl": 120},
 }
 
 # 旧缓存最大保留时间（防止积压）：24 小时
 _STALE_TTL = 86400
+
+
+def _resolve_cfg(name: str) -> dict:
+    """取接口护栏配置：注册档覆盖默认档，保证四个键齐全（消除各处 .get 默认值）"""
+    return {**_DEFAULT_GUARD_CFG, **GUARD_CONFIG.get(name, {})}
 
 
 # ─────────────────────────────────────────────
@@ -224,9 +251,9 @@ def cached_fetch(name: str, params: dict, fetcher: Callable[[], Any],
          b. 配额超限 → 返回 stale 缓存（兜底，不发请求）
       3. fetcher 抛错 → 返回 stale 缓存（兜底）
     """
-    cfg = GUARD_CONFIG.get(name, {"window_sec": 1800, "max_in_window": 10, "default_ttl": 120})
+    cfg = _resolve_cfg(name)
     if ttl is None:
-        ttl = cfg.get("default_ttl", 120)
+        ttl = cfg["default_ttl"]
 
     key = _make_key(name, params)
     _ensure_db()
@@ -242,11 +269,11 @@ def cached_fetch(name: str, params: dict, fetcher: Callable[[], Any],
 
     # 2) 配额检查
     now = time.time()
-    window_ago = now - cfg.get("window_sec", 1800)
+    window_ago = now - cfg["window_sec"]
     in_window = _recent_call_count(name, window_ago)
     today_n = _today_call_count(name)
-    max_window = cfg.get("max_in_window", 10)
-    daily_quota = cfg.get("daily_quota", 50)
+    max_window = cfg["max_in_window"]
+    daily_quota = cfg["daily_quota"]
 
     allow = (in_window < max_window) and (today_n < daily_quota)
     if not allow:
@@ -321,12 +348,13 @@ def guard_status() -> dict:
     now = time.time()
     status = {}
 
-    for name, cfg in GUARD_CONFIG.items():
-        window_ago = now - cfg.get("window_sec", 1800)
+    for name in GUARD_CONFIG:
+        cfg = _resolve_cfg(name)
+        window_ago = now - cfg["window_sec"]
         in_window = _recent_call_count(name, window_ago)
         today_n = _today_call_count(name)
-        max_window = cfg.get("max_in_window", 10)
-        daily_quota = cfg.get("daily_quota", 50)
+        max_window = cfg["max_in_window"]
+        daily_quota = cfg["daily_quota"]
 
         with _conn() as conn:
             last_row = conn.execute(

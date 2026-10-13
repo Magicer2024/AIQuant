@@ -2,13 +2,12 @@
 core/em_realtime.py —— 东方财富全市场行情直连
 ============================================
 盘前/盘后推荐场景专用：
-  - fetch_realtime_all()    一次 HTTP 拉全 A 最新行情（5000+ 只）
-  - fetch_realtime(codes)   按代码批量查询最新价
+  - fetch_realtime_all()    全 A 最新行情，降级链：东财 clist → 腾讯批量(500只/请求) → akshare
   - fetch_klines_by_date()  按交易日拉全市场日线（盘后批量同步）
 
 特点：
-  - 零 akshare 依赖，直接调东财 push2 接口
-  - 单次 5000 只 < 3s
+  - 全部经 core.em_guard.cached_fetch（TTL 缓存 + 频控 + 日配额）
+  - 东财存活时单次 5000 只 < 3s；被反爬断连时腾讯批量 ≈10 请求拉全 A
   - 内置 retry + 连接池
 """
 from __future__ import annotations
@@ -98,25 +97,19 @@ def fetch_realtime_all(page_size: int = 5000,
     实现策略：先尝试东财 clist（最快）；失败/被反爬时降级到 akshare
     返回 DataFrame，如果缓存命中则不消耗网络配额
     """
-    from core.em_guard import cached_fetch, GUARD_CONFIG
+    from core.em_guard import cached_fetch, GUARD_CONFIG, GuardName
 
     # 默认 TTL 120s（盘前 9:00 / 盘后 16:00 各刷一次就够了）
-    cfg = GUARD_CONFIG.get("realtime_all", {})
+    cfg = GUARD_CONFIG.get(GuardName.REALTIME_ALL, {})
     ttl = cfg.get("default_ttl", 120)
 
+    # 降级链（东财 clist → 腾讯批量 → akshare）整体在护栏内执行，
+    # 一轮无论内部发多少分页请求都只占 1 次 realtime_all 配额
     def _do_fetch():
-        # 优先：东财 clist（直接 HTTP，最快 2-3s 拉 5000 只）
-        try:
-            df = _fetch_realtime_all_em(progress_cb)
-            if not df.empty:
-                return df
-        except Exception as e:
-            logger.info("东财 clist 失败，降级 akshare: %s", e)
-        # 降级：akshare（底层是东财，但 UA 不同）
-        return _fetch_realtime_all_akshare(progress_cb)
+        return _fetch_realtime_with_fallback(progress_cb)
 
     params = {"page_size": page_size}
-    df, source = cached_fetch("realtime_all", params, _do_fetch, ttl=ttl)
+    df, source = cached_fetch(GuardName.REALTIME_ALL, params, _do_fetch, ttl=ttl)
 
     if source == "fresh":
         logger.info("[fetch_realtime_all] 缓存命中, 0 网络请求")
@@ -125,6 +118,31 @@ def fetch_realtime_all(page_size: int = 5000,
     elif source == "empty":
         logger.error("[fetch_realtime_all] 无数据可用")
     return df if df is not None else pd.DataFrame()
+
+
+def _fetch_realtime_with_fallback(progress_cb=None) -> pd.DataFrame:
+    """
+    实时全 A 快照降级链（护栏内 fetcher，整轮只占 1 次配额）：
+      1. 东财 clist 直连（存活时最快，但会周期性被反爬断连）
+      2. 腾讯 qt.gtimg.cn 批量（500 只/请求，全 A ≈10 请求；
+         2026-10 T6 实测东财主备全断连时唯一可用通道，与 klines 腾讯通道同源）
+      3. akshare（底层仍是东财编号子域，UA/子域不同，最后兜底）
+    """
+    try:
+        df = _fetch_realtime_all_em(progress_cb)
+        if not df.empty:
+            return df
+    except Exception as e:
+        logger.info("东财实时 clist 失败，降级腾讯批量: %s", e)
+
+    try:
+        df = _fetch_realtime_all_tencent(progress_cb)
+        if not df.empty:
+            return df
+    except Exception as e:
+        logger.info("腾讯批量实时失败，降级 akshare: %s", e)
+
+    return _fetch_realtime_all_akshare(progress_cb)
 
 
 def _fetch_realtime_all_em(progress_cb=None) -> pd.DataFrame:
@@ -233,6 +251,90 @@ def _fetch_realtime_all_akshare(progress_cb=None) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _parse_tencent_quote_line(line: str) -> dict | None:
+    """
+    解析腾讯 qt.gtimg.cn 单行快照为东财兼容字段；无效行返回 None。
+
+    与 _fetch_klines_by_date_tencent 的区别：实时场景不按交易日过滤——
+    停牌票腾讯仍返回最后交易日快照（f3>0），东财 clist 同样包含停牌票，
+    结果集口径须保持一致。字段单位沿用日线腾讯通道约定：
+      volume=手（写库时 *100 转股）、amount=万元×1e4 转元、turnover=%。
+    """
+    if "=" not in line:
+        return None
+    body = line.split("=", 1)[1].strip().strip('"')
+    if not body:
+        return None  # 停牌/无效代码的占位空串
+    f = body.split("~")
+    if len(f) < 40:
+        return None
+    code = f[2]
+    if not (code.isdigit() and len(code) == 6):
+        return None
+    price = _to_float(f[3])
+    if price <= 0:
+        return None
+    return {
+        "code":       code,
+        "name":       f[1],
+        "price":      price,                         # 最新价（收盘后=当日收盘价）
+        "change":     _to_float(f[31]),              # 涨跌额
+        "pct_change": _to_float(f[32]),              # 涨跌幅 %
+        "open":       _to_float(f[5]),               # 今开
+        "preclose":   _to_float(f[4]),               # 昨收
+        "high":       _to_float(f[33]),              # 最高
+        "low":        _to_float(f[34]),              # 最低
+        "volume":     _to_float(f[6]),               # 成交量(手)
+        "amount":     _to_float(f[37]) * 10000.0,    # 成交额：万元 → 元
+        "turnover":   _to_float(f[38]),              # 换手率 %
+        "pe":         _to_float(f[39]),              # 市盈率(动态)
+    }
+
+
+def _fetch_realtime_all_tencent(progress_cb=None) -> pd.DataFrame:
+    """
+    腾讯 qt.gtimg.cn 批量实时快照（东财断连时的实时兜底）：
+    500 只/请求（实测 1000+ 被拒），全 A 4500+ 只 ≈10 请求 ≈9s。
+
+    股票池取本地 stock_info（与日线腾讯通道一致：仅沪深、无北交所），
+    输出 13 列与 _fetch_realtime_all_em 完全同构。
+    """
+    try:
+        from core.repository.stock_repo import get_all_stocks
+        stocks_df = get_all_stocks()
+    except Exception as e:
+        logger.warning("腾讯实时: 取股票列表失败: %s", e)
+        return pd.DataFrame()
+    if stocks_df is None or stocks_df.empty:
+        return pd.DataFrame()
+    codes = stocks_df["code"].astype(str).tolist()
+
+    all_rows: list[dict] = []
+    total = len(codes)
+    BATCH = 500  # 腾讯批量上限：实测 500 正常、1000+ 返回 0 条
+    for i in range(0, total, BATCH):
+        chunk = codes[i:i + BATCH]
+        syms = ",".join(("sh" if c[0] in "56" else "sz") + c for c in chunk)
+        try:
+            resp = _SESSION.get(f"https://qt.gtimg.cn/q={syms}", timeout=15)
+            resp.encoding = "gbk"  # 腾讯返回 GBK，不显式设置会乱码
+        except Exception as e:
+            # 单批失败不拖垮整轮（该批股票缺失，由下一轮 TTL 过期后自然补齐）
+            logger.warning("腾讯实时 第 %d 批失败: %s", i // BATCH + 1, e)
+            continue
+        for line in resp.text.strip().split(";"):
+            row = _parse_tencent_quote_line(line)
+            if row is not None:
+                all_rows.append(row)
+        if progress_cb:
+            progress_cb(len(all_rows), total)
+    return pd.DataFrame(all_rows, columns=[
+        "code", "name", "price", "change", "pct_change",
+        "open", "preclose", "high", "low",
+        "volume", "amount", "turnover", "pe",
+    ]).reset_index(drop=True)
+
+
 # ─────────────────────────────────────────────
 # 核心：按交易日拉全 A 日线（盘后批量同步主入口）
 # ─────────────────────────────────────────────
@@ -244,9 +346,9 @@ def fetch_klines_by_date(trade_date: str,
 
     优先东财（最近 30 天可能因反爬失败），降级 akshare stock_zh_a_hist
     """
-    from core.em_guard import cached_fetch, GUARD_CONFIG
+    from core.em_guard import cached_fetch, GUARD_CONFIG, GuardName
 
-    cfg = GUARD_CONFIG.get("klines_by_date", {})
+    cfg = GUARD_CONFIG.get(GuardName.KLINES_BY_DATE, {})
     ttl = cfg.get("default_ttl", 86400)  # 日线数据，1 天 1 拉
 
     def _do_fetch():
@@ -268,7 +370,7 @@ def fetch_klines_by_date(trade_date: str,
         return _fetch_klines_by_date_akshare(trade_date, progress_cb)
 
     params = {"trade_date": trade_date, "page_size": page_size}
-    df, source = cached_fetch("klines_by_date", params, _do_fetch, ttl=ttl)
+    df, source = cached_fetch(GuardName.KLINES_BY_DATE, params, _do_fetch, ttl=ttl)
 
     if source in ("stale", "empty"):
         logger.warning("[fetch_klines_by_date] %s 走降级路径 source=%s", trade_date, source)
@@ -364,7 +466,7 @@ def _fetch_klines_by_date_tencent(trade_date: str, progress_cb=None) -> pd.DataF
     """
     trade_date = trade_date.replace("-", "")
     try:
-        from core.db import get_all_stocks
+        from core.repository.stock_repo import get_all_stocks
         stocks_df = get_all_stocks()
     except Exception as e:
         logger.warning("腾讯备用: 取股票列表失败: %s", e)

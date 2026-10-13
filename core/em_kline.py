@@ -109,9 +109,9 @@ def fetch_kline(code: str, adjust: str = "qfq", klt: str = "d",
     :param end: 结束日期 YYYYMMDD（20500101 表示到最远）
     :return: DataFrame, index=trade_date
     """
-    from core.em_guard import cached_fetch, GUARD_CONFIG
+    from core.em_guard import cached_fetch, GUARD_CONFIG, GuardName
 
-    cfg = GUARD_CONFIG.get("kline", {})
+    cfg = GUARD_CONFIG.get(GuardName.KLINE, {})
     ttl = cfg.get("default_ttl", 86400)
 
     def _do_fetch():
@@ -140,7 +140,7 @@ def fetch_kline(code: str, adjust: str = "qfq", klt: str = "d",
         "code": code, "adjust": adjust, "klt": klt,
         "beg": str(beg), "end": str(end),
     }
-    df, source = cached_fetch("kline", cache_params, _do_fetch, ttl=ttl)
+    df, source = cached_fetch(GuardName.KLINE, cache_params, _do_fetch, ttl=ttl)
     return df if df is not None else pd.DataFrame()
 
 

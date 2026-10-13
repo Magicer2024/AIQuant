@@ -112,6 +112,43 @@ def test_guard_status():
     print("  [OK] 状态查询接口工作正常")
 
 
+# ─────────────────────────────────────────────
+# T11（D7）：接口名常量化 —— 防改名漏改 + 持久化字符串兼容
+# ─────────────────────────────────────────────
+def test_t11_guard_name_values_pinned():
+    """常量值必须等于历史写入 em_cache/em_calls 的持久化字符串，改名=旧缓存失联"""
+    from core.em_guard import GuardName
+    assert GuardName.REALTIME_ALL == "realtime_all"
+    assert GuardName.KLINES_BY_DATE == "klines_by_date"
+    assert GuardName.KLINE == "kline"
+    assert GuardName.STOCK_ZH_A_SPOT == "stock_zh_a_spot"
+
+
+def test_t11_guard_config_keys_equal_constants():
+    """GuardName 登记的每个接口都必须在 GUARD_CONFIG 有配额档（新增接口两处同登记）。
+
+    注：不断言集合相等——同文件频控/配额用例会动态注册 _t* 临时档。
+    """
+    from core.em_guard import GuardName
+    pinned = {
+        GuardName.REALTIME_ALL, GuardName.KLINES_BY_DATE,
+        GuardName.KLINE, GuardName.STOCK_ZH_A_SPOT,
+    }
+    assert pinned <= set(GUARD_CONFIG), f"缺少配额档: {pinned - set(GUARD_CONFIG)}"
+
+
+def test_t11_resolve_cfg_defaults_and_override():
+    """未注册接口名走默认档；注册档覆盖默认档，四键始终齐全"""
+    from core.em_guard import _resolve_cfg, GuardName
+    fallback = _resolve_cfg("not_registered_endpoint")
+    assert fallback == {"window_sec": 1800, "max_in_window": 10,
+                        "daily_quota": 50, "default_ttl": 120}
+    kline_cfg = _resolve_cfg(GuardName.KLINE)
+    assert kline_cfg["window_sec"] == 60          # 注册档覆盖
+    assert kline_cfg["daily_quota"] == 1000
+    assert set(kline_cfg) == set(fallback)        # 四键齐全
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  东财护栏三道防线验证")
@@ -122,6 +159,9 @@ if __name__ == "__main__":
     test_daily_quota()
     test_source_field()
     test_guard_status()
+    test_t11_guard_name_values_pinned()
+    test_t11_guard_config_keys_equal_constants()
+    test_t11_resolve_cfg_defaults_and_override()
 
     print("\n" + "=" * 60)
     print("  ✓ 全部测试通过")
