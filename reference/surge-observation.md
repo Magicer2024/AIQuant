@@ -1,5 +1,11 @@
 # 次日强势观察（强势突破）· 成绩单归因与修复提案
 
+> ⚠ **状态：2026-10-12 已下线**。用户决策取消首页「次日强势观察 · 博弈明天涨停/大涨」栏目：
+> 前端面板与渲染函数已移除，`SURGE_BREAKOUT["enabled"]=False` 停止每日信号生成。
+> 后端 `/api/investor/surge_picks`、`strategy/surge_breakout.py` 与 `stock_signal` 里
+> `strategy='强势突破'` 的历史记录**全部保留**，本文的诊断结论与脚本仍可复用。
+> 复活方式：`enabled` 改回 `True` + 从 git 取回 `dashboard.html` 的面板段落。
+
 > 触发：2026-09-20 用户反馈「模块看起来不太行，胜率没超过 45%，收益是负的」。
 > 结论：**不是信号崩了，是「考核口径 + 小样本 + 门控转向」三件事叠加出来的读数**。
 > 诊断脚本：`tools/_diag_surge_perf.py`（单条明细）、`tools/_diag_surge_replay.py`（历史重放）。
