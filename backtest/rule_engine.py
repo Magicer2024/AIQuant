@@ -134,8 +134,12 @@ def run_rule_backtest(rule: Dict[str, Any],
         conditions = json.loads(rule.get("conditions") or "{}")
     except json.JSONDecodeError:
         return {"success": False, "error": f"规则 conditions 解析失败: {rule.get('rule_name')}"}
-    if not _iter_condition_items(conditions):
+    cond_items = _iter_condition_items(conditions)
+    if not cond_items:
         return {"success": False, "error": "规则 conditions 为空或格式不支持"}
+    # T8：一条规则通常只用 2~5 个因子，按需计算代替全量 60 因子（评估列集不变，
+    # 注册表外名称 compute_all_factors 会忽略，与全量路径「列缺失→信号全 False」同语义）
+    only_factors = list(dict.fromkeys(f for f, _op, _thr in cond_items))
 
     # 回测区间交易日列表
     with get_conn() as conn:
@@ -171,7 +175,7 @@ def run_rule_backtest(rule: Dict[str, Any],
         if df is None or len(df) < 30:
             continue
         try:
-            factor_df = compute_all_factors(df)
+            factor_df = compute_all_factors(df, only=only_factors)
         except Exception:
             continue
         if factor_df.empty:

@@ -26,12 +26,15 @@ from strategy.indicators import calc_ma, calc_macd, calc_rsi, calc_kdj
 from utils.trade_constraints import classify_fill_bar, can_fill, board_limit_pct
 # ── E2：研究回测默认资金（与个人参考账户 1 万分离命名，不强制研究回测改 1 万）──
 from config.personal_config import RESEARCH_CAPITAL
+# ── T8（S5）：交易成本唯一来源，视觉/规则回测/v3 模拟共用，调费率只改 config ──
+from config.strategy_params import BACKTEST_COST
 
 
-# ─────────────── 默认交易成本（A 股）───────────────
-DEFAULT_COMMISSION = 0.0003   # 手续费：万三（双向）
-DEFAULT_STAMP_DUTY = 0.001    # 印花税：千一（仅卖出）
-DEFAULT_SLIPPAGE   = 0.001    # 滑点：千一
+# ─────────────── 默认交易成本（A 股，值来自 BACKTEST_COST）───────────────
+DEFAULT_COMMISSION = BACKTEST_COST["commission_rate"]   # 手续费：万三（双向）
+DEFAULT_STAMP_DUTY = BACKTEST_COST["stamp_tax_rate"]    # 印花税：千一（仅卖出）
+DEFAULT_SLIPPAGE   = BACKTEST_COST["slippage_rate"]     # 滑点：千一
+DEFAULT_MIN_COMMISSION = BACKTEST_COST["min_commission"]  # 单笔最低佣金（元）
 
 
 # ─────────────── 单条条件求值 ───────────────
@@ -40,10 +43,64 @@ class ConditionError(ValueError):
     """条件解析/求值异常"""
 
 
-def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+# ─────────────── 指标按需计算（T8）───────────────
+# 全量预计算的固定周期集合：need=None 旧签名沿用，保证 tools/ 下单参调用方行为不变
+_FULL_MA_PERIODS = (5, 10, 20, 30, 60)
+_FULL_RSI_PERIODS = (6, 14, 24)
+
+
+@dataclass(frozen=True)
+class IndicatorNeed:
+    """条件集合推导出的指标需求：只声明「这轮回测真正要算的列」。
+
+    铁律：按需只允许「少算」，不允许「算得不一样」——周期必须从每条条件的
+    params 精确推导（含自定义周期，如 MA13），缺省参数补策略默认值。
+    """
+    ma_periods: frozenset = frozenset()
+    rsi_periods: frozenset = frozenset()
+    macd: bool = False
+    kdj: bool = False
+
+    @staticmethod
+    def from_conditions(conditions: List[Dict[str, Any]]) -> "IndicatorNeed":
+        """从 _eval_condition 支持的条件清单推导所需指标。
+
+        映射关系：ma_cross → 短/长两条均线；close_above_ma/bias → 单条均线；
+        rsi → 对应周期；macd_cross/kdj_cross → 整套摆动指标。
+        其余条件（涨跌幅/量比/突破/因子分）纯内联计算，无需预计算列。
+        """
+        ma_periods: set = set()
+        rsi_periods: set = set()
+        need_macd = False
+        need_kdj = False
+        for cond in conditions:
+            indicator = cond.get("indicator")
+            params = cond.get("params") or {}
+            if indicator == "ma_cross":
+                ma_periods.add(int(params.get("short_period", 5)))
+                ma_periods.add(int(params.get("long_period", 20)))
+            elif indicator == "close_above_ma":
+                ma_periods.add(int(params.get("period", 20)))
+            elif indicator == "bias":
+                ma_periods.add(int(params.get("period", 6)))
+            elif indicator == "rsi":
+                rsi_periods.add(int(params.get("period", 14)))
+            elif indicator == "macd_cross":
+                need_macd = True
+            elif indicator == "kdj_cross":
+                need_kdj = True
+        return IndicatorNeed(frozenset(ma_periods), frozenset(rsi_periods),
+                             need_macd, need_kdj)
+
+
+def _add_indicators(df: pd.DataFrame,
+                    need: Optional[IndicatorNeed] = None) -> pd.DataFrame:
     """
     在 DataFrame 上补充回测所需技术指标。
     列名遵循 strategy.indicators 的约定：MA5/MA20/RSI14/KDJ_K/KDJ_D/KDJ_J/MACD_DIF/MACD_DEA/MACD_HIST
+
+    :param need: IndicatorNeed 按需计算；None = 全量预计算（旧签名行为，
+                 tools/ 下 calib/eval 脚本的单参调用依赖此默认值，勿改语义）
     """
     out = df.copy()
     for col in ("open", "high", "low", "close", "volume"):
@@ -52,34 +109,53 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = out[col].astype(float)
 
     # 前收盘价（涨跌停核定基准）：df 已按 trade_date 升序索引，shift(1) 即上一交易日收盘。
-    # 停牌缺口日的上一有效收盘恰好是正确的复牌涨跌停基准。
+    # 停牌缺口日的上一有效收盘恰好是正确的复牌涨跌停基准。任何条件组合都要算（成交判定用）。
     out["prev_close"] = out["close"].shift(1)
 
-    # 移动平均
-    ma = calc_ma(out["close"], periods=[5, 10, 20, 30, 60])
-    for c in ma.columns:
-        out[c] = ma[c]
+    # need=None：固定全套周期；否则只算条件推导出的周期
+    ma_periods = _FULL_MA_PERIODS if need is None else sorted(need.ma_periods)
+    rsi_periods = _FULL_RSI_PERIODS if need is None else sorted(need.rsi_periods)
+    want_macd = need is None or need.macd
+    want_kdj = need is None or need.kdj
 
-    # MACD
-    macd = calc_macd(out["close"], fast=12, slow=26, signal=9)
-    for c in macd.columns:
-        out[c] = macd[c]
+    if ma_periods:
+        ma = calc_ma(out["close"], periods=list(ma_periods))
+        for c in ma.columns:
+            out[c] = ma[c]
 
-    # RSI
-    rsi = calc_rsi(out["close"], periods=[6, 14, 24])
-    for c in rsi.columns:
-        out[c] = rsi[c]
+    if want_macd:
+        macd = calc_macd(out["close"], fast=12, slow=26, signal=9)
+        for c in macd.columns:
+            out[c] = macd[c]
 
-    # KDJ
-    kdj = calc_kdj(out["high"], out["low"], out["close"], n=9, m1=3, m2=3)
-    for c in kdj.columns:
-        out[c] = kdj[c]
+    if rsi_periods:
+        rsi = calc_rsi(out["close"], periods=list(rsi_periods))
+        for c in rsi.columns:
+            out[c] = rsi[c]
+
+    if want_kdj:
+        kdj = calc_kdj(out["high"], out["low"], out["close"], n=9, m1=3, m2=3)
+        for c in kdj.columns:
+            out[c] = kdj[c]
 
     return out
 
 
 def _ensure_series(v) -> pd.Series:
     return v if isinstance(v, pd.Series) else pd.Series(v)
+
+
+def _ma_series(df: pd.DataFrame, close: pd.Series, period: int) -> pd.Series:
+    """取预计算的 MA{period} 列；缺失时（自定义周期或未纳入 IndicatorNeed）现算。
+
+    统一 ma_cross/close_above_ma/bias 三处「取列或计算」的重复 fallback，
+    现算口径必须与 _add_indicators 里 calc_ma 完全一致。
+    """
+    col = f"MA{period}"
+    ma = df.get(col)
+    if ma is None:
+        ma = calc_ma(close, [period])[col]
+    return ma.astype(float)
 
 
 def _eval_condition(cond: Dict[str, Any], df: pd.DataFrame) -> pd.Series:
@@ -93,14 +169,8 @@ def _eval_condition(cond: Dict[str, Any], df: pd.DataFrame) -> pd.Series:
     if indicator == "ma_cross":
         short_p = int(params.get("short_period", 5))
         long_p = int(params.get("long_period", 20))
-        ma_s = df.get(f"MA{short_p}")
-        if ma_s is None:
-            ma_s = calc_ma(close, [short_p])[f"MA{short_p}"]
-        ma_l = df.get(f"MA{long_p}")
-        if ma_l is None:
-            ma_l = calc_ma(close, [long_p])[f"MA{long_p}"]
-        s = ma_s.astype(float)
-        l = ma_l.astype(float)
+        s = _ma_series(df, close, short_p)
+        l = _ma_series(df, close, long_p)
         if operator == "golden_cross":
             return ((s > l) & (s.shift(1) <= l.shift(1))).fillna(False)
         if operator == "death_cross":
@@ -178,10 +248,7 @@ def _eval_condition(cond: Dict[str, Any], df: pd.DataFrame) -> pd.Series:
     # ──────── 收盘在 MA 上下 ────────
     if indicator == "close_above_ma":
         period = int(params.get("period", 20))
-        ma_col = f"MA{period}"
-        ma = df.get(ma_col)
-        if ma is None:
-            ma = calc_ma(close, [period])[ma_col]
+        ma = _ma_series(df, close, period)
         if operator == "above":
             return (close > ma).fillna(False)
         if operator == "below":
@@ -191,10 +258,7 @@ def _eval_condition(cond: Dict[str, Any], df: pd.DataFrame) -> pd.Series:
     # ──────── BIAS 乖离率 ────────
     if indicator == "bias":
         period = int(params.get("period", 6))
-        ma_col = f"MA{period}"
-        ma = df.get(ma_col)
-        if ma is None:
-            ma = calc_ma(close, [period])[ma_col]
+        ma = _ma_series(df, close, period)
         bias = (close - ma) / ma.replace(0, np.nan) * 100
         if operator == "gt":
             thr = float(params.get("value", params.get("min", 5)))
@@ -376,12 +440,13 @@ class VisualBacktestEngine:
         stock_info = _load_stock_info(all_codes)
         info_map = {r["code"]: r.to_dict() for _, r in stock_info.iterrows()}
 
-        # 3) 按股票拆分 + 计算指标
+        # 3) 按股票拆分 + 计算指标（T8：按条件集合按需计算，纯内联条件不再算全套重指标）
         self._report(stage="indicators", progress=20, message="计算技术指标...")
+        indicator_need = IndicatorNeed.from_conditions(conditions)
         stock_data: Dict[str, pd.DataFrame] = {}
         for code, df in daily.groupby("code", sort=False):
             df = df.set_index("trade_date").sort_index()
-            df = _add_indicators(df)
+            df = _add_indicators(df, indicator_need)
             stock_data[code] = df
         if self.cancel_flag.is_set():
             return self._empty("已取消")
@@ -523,15 +588,15 @@ class VisualBacktestEngine:
                     if shares <= 0:
                         continue
                     cost = shares * fill_price
-                    commission = max(cost * p.commission_rate, 5.0)
+                    commission = max(cost * p.commission_rate, DEFAULT_MIN_COMMISSION)
                     total_cost = cost + commission
                     if total_cost > cash:
                         # 退档：再算一次
-                        shares = int((cash - 5) // (fill_price * (1 + p.commission_rate)) // 100) * 100
+                        shares = int((cash - DEFAULT_MIN_COMMISSION) // (fill_price * (1 + p.commission_rate)) // 100) * 100
                         if shares <= 0:
                             continue
                         cost = shares * fill_price
-                        commission = max(cost * p.commission_rate, 5.0)
+                        commission = max(cost * p.commission_rate, DEFAULT_MIN_COMMISSION)
                         total_cost = cost + commission
                     cash -= total_cost
                     info = info_map.get(code, {})
@@ -580,7 +645,7 @@ class VisualBacktestEngine:
                     continue
 
                 proceeds = pos["shares"] * sell_price
-                commission_out = max(proceeds * p.commission_rate, 5.0)
+                commission_out = max(proceeds * p.commission_rate, DEFAULT_MIN_COMMISSION)
                 stamp = proceeds * p.stamp_tax_rate
                 cash += proceeds - commission_out - stamp
                 trades.append({
@@ -650,7 +715,7 @@ class VisualBacktestEngine:
                     if shares <= 0:
                         continue
                     cost = shares * fill_price
-                    commission = max(cost * p.commission_rate, 5.0)
+                    commission = max(cost * p.commission_rate, DEFAULT_MIN_COMMISSION)
                     total_cost = cost + commission
                     if total_cost > cash:
                         continue
@@ -718,7 +783,7 @@ class VisualBacktestEngine:
                     close = float(pos["entry_price"])
                 sell_price = close * (1 - p.slippage_rate)
                 proceeds = pos["shares"] * sell_price
-                commission_out = max(proceeds * p.commission_rate, 5.0)
+                commission_out = max(proceeds * p.commission_rate, DEFAULT_MIN_COMMISSION)
                 stamp = proceeds * p.stamp_tax_rate
                 cash += proceeds - commission_out - stamp
                 hold_days = (last_dt.date() - pd.to_datetime(pos["entry_date"]).date()).days

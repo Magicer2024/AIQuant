@@ -183,139 +183,244 @@ def get_factor_names_by_categories(categories: list) -> list:
 
 # ── 批量计算 ──────────────────────────────────
 
+def _want(wanted: Optional[List[str]], *names: str) -> bool:
+    """wanted=None 表示全量；否则该组任一因子被请求才算。"""
+    return wanted is None or any(n in wanted for n in names)
+
+
+# ── 分组 builder：每个只算 wanted 命中的列，表达式与原全量路径逐字一致 ──
+# （归一化是按列独立的分位数变换，故单列按需计算与全量结果必然相同）
+
+def _add_trend_factors(result: pd.DataFrame, df: pd.DataFrame,
+                       wanted: Optional[List[str]]) -> None:
+    close = df["close"]
+    if _want(wanted, "MA5_偏离", "MA10_偏离", "MA20_偏离",
+             "MA60_偏离", "MA_多头强度"):
+        # 5 个均线因子共享一次 calc_ma（多头强度依赖全部 4 条均线）
+        mas = calc_ma(close, periods=[5, 10, 20, 60])
+        if _want(wanted, "MA5_偏离"):
+            result["MA5_偏离"] = (close - mas["MA5"]) / mas["MA5"].clip(lower=1e-9)
+        if _want(wanted, "MA10_偏离"):
+            result["MA10_偏离"] = (close - mas["MA10"]) / mas["MA10"].clip(lower=1e-9)
+        if _want(wanted, "MA20_偏离"):
+            result["MA20_偏离"] = (close - mas["MA20"]) / mas["MA20"].clip(lower=1e-9)
+        if _want(wanted, "MA60_偏离"):
+            result["MA60_偏离"] = (close - mas["MA60"]) / mas["MA60"].clip(lower=1e-9)
+        if _want(wanted, "MA_多头强度"):
+            result["MA_多头强度"] = (
+                ((mas["MA5"] - mas["MA10"]) / mas["MA10"].clip(lower=1e-9)).clip(lower=0) * 0.5
+                + ((mas["MA10"] - mas["MA20"]) / mas["MA20"].clip(lower=1e-9)).clip(lower=0) * 0.3
+                + ((mas["MA20"] - mas["MA60"]) / mas["MA60"].clip(lower=1e-9)).clip(lower=0) * 0.2
+            )
+
+    if _want(wanted, "MACD_DIF", "MACD_DEA", "MACD_HIST", "MACD_金叉距离"):
+        macd = calc_macd(close)
+        if _want(wanted, "MACD_DIF"):
+            result["MACD_DIF"] = macd["MACD_DIF"] / close
+        if _want(wanted, "MACD_DEA"):
+            result["MACD_DEA"] = macd["MACD_DEA"] / close
+        if _want(wanted, "MACD_HIST"):
+            result["MACD_HIST"] = macd["MACD_HIST"] / close
+        if _want(wanted, "MACD_金叉距离"):
+            result["MACD_金叉距离"] = (macd["MACD_DIF"] - macd["MACD_DEA"]).abs()
+
+    high, low = df["high"], df["low"]
+    if _want(wanted, "CCI"):
+        result["CCI"] = calc_cci(high, low, close)
+    if _want(wanted, "DPO"):
+        dpo = calc_dpo(close)
+        result["DPO"] = dpo["DPO"] / close.clip(lower=1e-9)
+    if _want(wanted, "ADX", "PDI", "MDI"):
+        dmi = calc_dmi(high, low, close)
+        if _want(wanted, "ADX"):
+            result["ADX"] = dmi["DMI_ADX"] / 100.0
+        if _want(wanted, "PDI"):
+            result["PDI"] = dmi["DMI_PDI"] / 100.0
+        if _want(wanted, "MDI"):
+            result["MDI"] = dmi["DMI_MDI"] / 100.0
+
+
+def _add_momentum_factors(result: pd.DataFrame, df: pd.DataFrame,
+                          wanted: Optional[List[str]]) -> None:
+    close, high, low = df["close"], df["high"], df["low"]
+    rsi_names = ["RSI_6", "RSI_9", "RSI_14", "RSI_21"]
+    if _want(wanted, *rsi_names):
+        rsi_all = calc_rsi(close, periods=[6, 9, 14, 21])
+        for p, name in zip([6, 9, 14, 21], rsi_names):
+            if _want(wanted, name):
+                result[name] = rsi_all[f"RSI{p}"]
+
+    for p in [6, 12, 24]:
+        name = f"BIAS_{p}"
+        if _want(wanted, name):
+            ma_p = close.rolling(p).mean()
+            result[name] = (close - ma_p) / ma_p.clip(lower=1e-9)
+
+    for p in [10, 20]:
+        name = f"MOM_{p}"
+        if _want(wanted, name):
+            result[name] = close - close.shift(p)
+
+    if _want(wanted, "KDJ_K", "KDJ_D", "KDJ_J"):
+        kdj = calc_kdj(high, low, close)
+        if _want(wanted, "KDJ_K"):
+            result["KDJ_K"] = kdj["KDJ_K"]
+        if _want(wanted, "KDJ_D"):
+            result["KDJ_D"] = kdj["KDJ_D"]
+        if _want(wanted, "KDJ_J"):
+            result["KDJ_J"] = kdj["KDJ_J"]
+
+    for p in [3, 5, 10, 20]:
+        name = f"RET_{p}D"
+        if _want(wanted, name):
+            result[name] = close.pct_change(p)
+
+
+def _add_volatility_factors(result: pd.DataFrame, df: pd.DataFrame,
+                            wanted: Optional[List[str]]) -> None:
+    close, high, low = df["close"], df["high"], df["low"]
+    if _want(wanted, "BB_PCT_B", "BB_BANDWIDTH"):
+        bb = calc_bollinger(close)
+        if _want(wanted, "BB_PCT_B"):
+            result["BB_PCT_B"] = bb["BB_PCT_B"]
+        if _want(wanted, "BB_BANDWIDTH"):
+            result["BB_BANDWIDTH"] = bb["BB_BANDWIDTH"]
+    if _want(wanted, "ATR_PCT"):
+        atr_series = calc_atr(high, low, close)
+        result["ATR_PCT"] = atr_series / close.clip(lower=1e-9)
+    if _want(wanted, "HV_10"):
+        result["HV_10"] = calc_historical_volatility(close, 10)["HV_10"]
+    if _want(wanted, "HV_20"):
+        result["HV_20"] = calc_historical_volatility(close, 20)["HV_20"]
+
+
+def _add_volume_factors(result: pd.DataFrame, df: pd.DataFrame,
+                        wanted: Optional[List[str]]) -> None:
+    close, volume = df["close"], df["volume"]
+    amount = df.get("amount", volume * close)
+    for p in [5, 10, 20]:
+        name = f"VOL_RATIO_{p}"
+        if _want(wanted, name):
+            vol_ma = volume.rolling(p).mean()
+            result[name] = volume / vol_ma.clip(lower=1e-9)
+    if _want(wanted, "OBV_偏离度"):
+        obv = calc_obv(close, volume)
+        obv_ma = obv.rolling(20).mean()
+        obv_range = obv.rolling(20).max() - obv.rolling(20).min()
+        result["OBV_偏离度"] = ((obv - obv_ma) / obv_range.clip(lower=1e-9)).clip(-1, 1)
+    if _want(wanted, "VOL_波动率"):
+        result["VOL_波动率"] = (
+            volume.rolling(20).std() / volume.rolling(20).mean().clip(lower=1e-9))
+    if _want(wanted, "VWAP_偏离"):
+        vwap = (amount / volume.clip(lower=1e-9)).fillna(close)
+        result["VWAP_偏离"] = (close - vwap) / close.clip(lower=1e-9)
+    if _want(wanted, "AMOUNT_RATIO_20"):
+        result["AMOUNT_RATIO_20"] = (
+            amount / amount.rolling(20).mean().clip(lower=1e-9))
+
+
+def _add_pattern_factors(result: pd.DataFrame, df: pd.DataFrame,
+                         wanted: Optional[List[str]]) -> None:
+    close, high, low = df["close"], df["high"], df["low"]
+    if _want(wanted, "CONSEC_UP"):
+        result["CONSEC_UP"] = _calc_consecutive(close, "up")
+    if _want(wanted, "CONSEC_DOWN"):
+        result["CONSEC_DOWN"] = _calc_consecutive(close, "down")
+    if _want(wanted, "AMPLITUDE_5"):
+        result["AMPLITUDE_5"] = (
+            high.rolling(5).max() - low.rolling(5).min()) / close.rolling(5).mean()
+    if _want(wanted, "AMPLITUDE_20"):
+        result["AMPLITUDE_20"] = (
+            high.rolling(20).max() - low.rolling(20).min()) / close.rolling(20).mean()
+    if _want(wanted, "GAP_UP"):
+        result["GAP_UP"] = ((low - df["high"].shift(1))
+                            / df["high"].shift(1).clip(lower=1e-9) > 0.005).astype(float)
+    if _want(wanted, "GAP_DOWN"):
+        result["GAP_DOWN"] = ((df["low"].shift(1) - high)
+                              / df["low"].shift(1).clip(lower=1e-9) > 0.005).astype(float)
+    if _want(wanted, "HAMMER"):
+        result["HAMMER"] = _detect_hammer(df["open"], high, low, close).astype(float)
+    if _want(wanted, "ENGULF_BULL"):
+        result["ENGULF_BULL"] = _detect_engulf(df, "bull").astype(float)
+    if _want(wanted, "ENGULF_BEAR"):
+        result["ENGULF_BEAR"] = _detect_engulf(df, "bear").astype(float)
+    if _want(wanted, "MORNING_STAR"):
+        result["MORNING_STAR"] = _detect_morning_star(df).astype(float)
+    if _want(wanted, "EVENING_STAR"):
+        result["EVENING_STAR"] = _detect_evening_star(df).astype(float)
+    if _want(wanted, "DOUBLE_BOTTOM"):
+        result["DOUBLE_BOTTOM"] = _detect_double_pattern(close, "bottom").astype(float)
+    if _want(wanted, "DOUBLE_TOP"):
+        result["DOUBLE_TOP"] = _detect_double_pattern(close, "top").astype(float)
+
+
+def _add_liquidity_factors(result: pd.DataFrame, df: pd.DataFrame,
+                          wanted: Optional[List[str]]) -> None:
+    close, volume = df["close"], df["volume"]
+    amount = df.get("amount", volume * close)
+    if "turnover" in df.columns and _want(
+            wanted, "TURNOVER", "TURNOVER_5MA", "TURNOVER_PCTL"):
+        if _want(wanted, "TURNOVER"):
+            result["TURNOVER"] = df["turnover"]
+        if _want(wanted, "TURNOVER_5MA"):
+            result["TURNOVER_5MA"] = df["turnover"].rolling(5).mean()
+        if _want(wanted, "TURNOVER_PCTL"):
+            result["TURNOVER_PCTL"] = df["turnover"].rolling(252).rank(pct=True)
+    if _want(wanted, "AMIHUD_ILLIQ"):
+        ret = close.pct_change()
+        result["AMIHUD_ILLIQ"] = (ret.abs() / amount.clip(lower=1e-9)) * 1e8
+    if _want(wanted, "PV_CORREL"):
+        result["PV_CORREL"] = close.rolling(20).corr(volume)
+
+
 def compute_all_factors(df: pd.DataFrame, index_close: pd.Series = None,
-                        fundamental_data: dict = None) -> pd.DataFrame:
+                        fundamental_data: dict = None,
+                        only: Optional[List[str]] = None) -> pd.DataFrame:
     """
-    批量计算所有价量因子。
+    批量计算价量因子。
 
     Args:
         df: OHLCV DataFrame, 含 open/high/low/close/volume/amount/turnover 列
         index_close: 大盘指数收盘价 Series（用于计算 RPS），可选
         fundamental_data: 基本面数据 dict，{factor_name: value}，可选
+        only: 只计算给定因子名列表（T8 按需）：注册表外名称忽略，
+              产出列按 only 顺序排列；None = 全量（旧签名行为与列顺序不变）
 
     Returns:
-        所有因子归一化后的 DataFrame，index 与 df 对齐
+        归一化后的因子 DataFrame，index 与 df 对齐
     """
-    close, high, low, volume = df["close"], df["high"], df["low"], df["volume"]
-    amount = df.get("amount", volume * close)
+    # 去重保序 + 过滤注册表外名称（契约：未知因子忽略而非报错）
+    wanted = None
+    if only is not None:
+        wanted = list(dict.fromkeys(n for n in only if n in FACTOR_REGISTRY))
+
     result = pd.DataFrame(index=df.index)
+    _add_trend_factors(result, df, wanted)
+    _add_momentum_factors(result, df, wanted)
+    _add_volatility_factors(result, df, wanted)
+    _add_volume_factors(result, df, wanted)
+    _add_pattern_factors(result, df, wanted)
+    _add_liquidity_factors(result, df, wanted)
 
-    # ── 趋势类 ──
-    mas = calc_ma(close, periods=[5, 10, 20, 60])
-    result["MA5_偏离"] = (close - mas["MA5"]) / mas["MA5"].clip(lower=1e-9)
-    result["MA10_偏离"] = (close - mas["MA10"]) / mas["MA10"].clip(lower=1e-9)
-    result["MA20_偏离"] = (close - mas["MA20"]) / mas["MA20"].clip(lower=1e-9)
-    result["MA60_偏离"] = (close - mas["MA60"]) / mas["MA60"].clip(lower=1e-9)
-    result["MA_多头强度"] = (
-        ((mas["MA5"] - mas["MA10"]) / mas["MA10"].clip(lower=1e-9)).clip(lower=0) * 0.5
-        + ((mas["MA10"] - mas["MA20"]) / mas["MA20"].clip(lower=1e-9)).clip(lower=0) * 0.3
-        + ((mas["MA20"] - mas["MA60"]) / mas["MA60"].clip(lower=1e-9)).clip(lower=0) * 0.2
-    )
-
-    macd = calc_macd(close)
-    result["MACD_DIF"] = macd["MACD_DIF"] / close
-    result["MACD_DEA"] = macd["MACD_DEA"] / close
-    result["MACD_HIST"] = macd["MACD_HIST"] / close
-    result["MACD_金叉距离"] = (macd["MACD_DIF"] - macd["MACD_DEA"]).abs()
-
-    result["CCI"] = calc_cci(high, low, close)
-
-    dpo = calc_dpo(close)
-    result["DPO"] = dpo["DPO"] / close.clip(lower=1e-9)
-
-    dmi = calc_dmi(high, low, close)
-    result["ADX"] = dmi["DMI_ADX"] / 100.0
-    result["PDI"] = dmi["DMI_PDI"] / 100.0
-    result["MDI"] = dmi["DMI_MDI"] / 100.0
-
-    # ── 动量类 ──
-    rsi_all = calc_rsi(close, periods=[6, 9, 14, 21])
-    for p in [6, 9, 14, 21]:
-        result[f"RSI_{p}"] = rsi_all[f"RSI{p}"]
-
-    for p in [6, 12, 24]:
-        ma_p = close.rolling(p).mean()
-        result[f"BIAS_{p}"] = (close - ma_p) / ma_p.clip(lower=1e-9)
-
-    for p in [10, 20]:
-        result[f"MOM_{p}"] = close - close.shift(p)
-
-    kdj = calc_kdj(high, low, close)
-    result["KDJ_K"] = kdj["KDJ_K"]
-    result["KDJ_D"] = kdj["KDJ_D"]
-    result["KDJ_J"] = kdj["KDJ_J"]
-
-    for p in [3, 5, 10, 20]:
-        result[f"RET_{p}D"] = close.pct_change(p)
-
-    # ── 波动类 ──
-    bb = calc_bollinger(close)
-    result["BB_PCT_B"] = bb["BB_PCT_B"]
-    result["BB_BANDWIDTH"] = bb["BB_BANDWIDTH"]
-
-    atr_series = calc_atr(high, low, close)
-    result["ATR_PCT"] = atr_series / close.clip(lower=1e-9)
-
-    result["HV_10"] = calc_historical_volatility(close, 10)["HV_10"]
-    result["HV_20"] = calc_historical_volatility(close, 20)["HV_20"]
-
-    # ── 量能类 ──
-    for p in [5, 10, 20]:
-        vol_ma = volume.rolling(p).mean()
-        result[f"VOL_RATIO_{p}"] = volume / vol_ma.clip(lower=1e-9)
-
-    obv = calc_obv(close, volume)
-    obv_ma = obv.rolling(20).mean()
-    obv_range = obv.rolling(20).max() - obv.rolling(20).min()
-    result["OBV_偏离度"] = ((obv - obv_ma) / obv_range.clip(lower=1e-9)).clip(-1, 1)
-
-    result["VOL_波动率"] = volume.rolling(20).std() / volume.rolling(20).mean().clip(lower=1e-9)
-
-    vwap = (amount / volume.clip(lower=1e-9)).fillna(close)
-    result["VWAP_偏离"] = (close - vwap) / close.clip(lower=1e-9)
-
-    result["AMOUNT_RATIO_20"] = amount / amount.rolling(20).mean().clip(lower=1e-9)
-
-    # ── 形态类 ──
-    result["CONSEC_UP"] = _calc_consecutive(close, "up")
-    result["CONSEC_DOWN"] = _calc_consecutive(close, "down")
-    result["AMPLITUDE_5"] = (high.rolling(5).max() - low.rolling(5).min()) / close.rolling(5).mean()
-    result["AMPLITUDE_20"] = (high.rolling(20).max() - low.rolling(20).min()) / close.rolling(20).mean()
-    result["GAP_UP"] = ((low - df["high"].shift(1)) / df["high"].shift(1).clip(lower=1e-9) > 0.005).astype(float)
-    result["GAP_DOWN"] = ((df["low"].shift(1) - high) / df["low"].shift(1).clip(lower=1e-9) > 0.005).astype(float)
-    result["HAMMER"] = _detect_hammer(df["open"], high, low, close).astype(float)
-    result["ENGULF_BULL"] = _detect_engulf(df, "bull").astype(float)
-    result["ENGULF_BEAR"] = _detect_engulf(df, "bear").astype(float)
-    result["MORNING_STAR"] = _detect_morning_star(df).astype(float)
-    result["EVENING_STAR"] = _detect_evening_star(df).astype(float)
-    result["DOUBLE_BOTTOM"] = _detect_double_pattern(close, "bottom").astype(float)
-    result["DOUBLE_TOP"] = _detect_double_pattern(close, "top").astype(float)
-
-    # ── 流动性 ──
-    if "turnover" in df.columns:
-        result["TURNOVER"] = df["turnover"]
-        result["TURNOVER_5MA"] = df["turnover"].rolling(5).mean()
-        result["TURNOVER_PCTL"] = df["turnover"].rolling(252).rank(pct=True)
-    ret = close.pct_change()
-    result["AMIHUD_ILLIQ"] = (ret.abs() / amount.clip(lower=1e-9)) * 1e8
-    result["PV_CORREL"] = close.rolling(20).corr(volume)
-
-    # ── 情绪 ──
-    if index_close is not None:
-        result["RPS"] = close.pct_change(20) - index_close.pct_change(20)
+    # ── 情绪（需指数数据）──
+    if index_close is not None and _want(wanted, "RPS"):
+        result["RPS"] = df["close"].pct_change(20) - index_close.pct_change(20)
 
     # ── 基本面插值 ──
     if fundamental_data:
         for fname, fval in fundamental_data.items():
-            if fname in FACTOR_REGISTRY:
+            if fname in FACTOR_REGISTRY and _want(wanted, fname):
                 result[fname] = fval
 
-    # ── 归一化 ──
+    # ── 归一化（按列独立：按需单列与全量结果逐值相同）──
     for col in result.columns:
         if col in FACTOR_REGISTRY:
             result[col] = normalize_factor(result[col], col)
     result = result.fillna(0)
 
+    # 按需路径：按调用方给定顺序重排（数据源缺失的列自然不产出）
+    if wanted is not None:
+        result = result[[c for c in wanted if c in result.columns]]
     return result
 
 
