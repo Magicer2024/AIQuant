@@ -10,7 +10,7 @@ from routes import sync_bp
 from utils.api import ok, fail
 from core.sync import recalc_all_scores as run_recalc_all_scores
 from core.task_queue import submit_task, get_task_status, is_any_running
-from scheduler.state import SYNC_STATUS
+from scheduler.state import SYNC_STATUS, release_sync, try_acquire_sync
 
 # ─────────────────────────────────────────────
 # 定时任务管理（全量历史修正）
@@ -264,10 +264,14 @@ def start_sync():
 
     if _sync_progress["running"]:
         return fail("同步正在进行中，请稍候", 409)
+    # 进程内原子抢占：与定时/重试/其他手动入口互斥（任务表不可用时兜底）
+    if not try_acquire_sync():
+        return fail("同步正在进行中，请稍候", 409)
     # 纳入统一写任务互斥：与定时/CLI 共享 pipeline_write 租约，只产生一个有效写任务。
     task_id, owner_token, conflict = _acquire_write_task(
         "daily_sync", input={"target": target, "source": "manual"})
     if conflict:
+        release_sync()
         return fail("已有主数据写任务在处理，请稍候", 409)
     _sync_progress.update({"running": True, "current": 0, "total": 0,
                             "success": 0, "failed": 0, "message": "",
@@ -294,7 +298,7 @@ def start_sync():
         finally:
             _sync_progress["running"] = False
             # 回写进程内状态，保持与 sync_log 一致（scheduler/state 供定时任务与文档沿用）
-            SYNC_STATUS["running"] = False
+            release_sync()
             SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             SYNC_STATUS["last_result"] = _sync_progress["message"] or SYNC_STATUS.get("last_result", "")
 
@@ -314,6 +318,9 @@ def start_fast_sync():
     from flask import request
     if _sync_progress["running"]:
         return fail("同步正在进行中，请稍候", 409)
+    # 进程内原子抢占：与定时/重试/其他手动入口互斥（任务表不可用时兜底）
+    if not try_acquire_sync():
+        return fail("同步正在进行中，请稍候", 409)
 
     body = request.get_json(silent=True) or {}
     # 默认拉最近 1 个交易日；可指定 trade_dates: ["20260624", "20260625"]
@@ -326,6 +333,7 @@ def start_fast_sync():
     task_id, owner_token, conflict = _acquire_write_task(
         "fast_sync", input={"target": target, "trade_dates": trade_dates, "source": "manual"})
     if conflict:
+        release_sync()
         return fail("已有主数据写任务在处理，请稍候", 409)
     _sync_progress.update({"running": True, "current": 0, "total": 0,
                             "success": 0, "failed": 0, "message": "",
@@ -353,6 +361,7 @@ def start_fast_sync():
             _finish_write_task(task_id, owner_token, "error", error=str(e))
         finally:
             _sync_progress["running"] = False
+            release_sync()
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -393,16 +402,16 @@ def get_realtime():
       - 返回 data 里包含 source 字段（fresh/network/stale/empty）
     """
     from core.em_realtime import fetch_realtime_all
-    from core.em_guard import cached_fetch, GUARD_CONFIG
+    from core.em_guard import cached_fetch, GUARD_CONFIG, GuardName
 
-    cfg = GUARD_CONFIG.get("realtime_all", {})
+    cfg = GUARD_CONFIG.get(GuardName.REALTIME_ALL, {})
     ttl = cfg.get("default_ttl", 120)
 
     def _do_fetch():
         return fetch_realtime_all()  # 实际网络调用
 
     # 再包一层（fetch_realtime_all 内部已经走护栏了，这里双保险）
-    df, source = cached_fetch("realtime_all", {"endpoint": "/realtime"}, _do_fetch, ttl=ttl)
+    df, source = cached_fetch(GuardName.REALTIME_ALL, {"endpoint": "/realtime"}, _do_fetch, ttl=ttl)
     if df is None or df.empty:
         return fail("东财接口无数据，可能被反爬封禁", 502, source=source)
 

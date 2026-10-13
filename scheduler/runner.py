@@ -3,8 +3,8 @@ scheduler/runner.py -- background sync task and scheduler
 
 调度策略：
   - 19:00  盘后同步（全市场行情 + 龙虎榜 + 策略分重算）
-    （19 点而非 18 点：东财龙虎榜通常 18:30 后才发布齐全，强势突破
-     硬过滤与隔日动量都依赖当日龙虎榜，宁晚勿缺）
+    （19 点而非 18 点：东财龙虎榜通常 18:30 后才发布齐全，隔日动量依赖当日龙虎榜，
+     宁晚勿缺；强势突破硬过滤同样依赖它，但该线 2026-10-12 已停用）
   - 失败后指数退避重试（30min → 60min → 120min，最多 3 次）
 """
 import threading
@@ -13,7 +13,13 @@ import time
 import uuid
 from datetime import datetime, date
 
-from scheduler.state import SYNC_STATUS, SCHEDULER_RUNNING, SCHEDULER_THREAD
+from scheduler.state import (
+    SYNC_STATUS,
+    SCHEDULER_RUNNING,
+    SCHEDULER_THREAD,
+    release_sync,
+    try_acquire_sync,
+)
 
 # 独立 Scheduler 实例：不使用全局 schedule 模块，避免 start_scheduler 的 schedule.clear()
 # 清掉 routes/sync.py 等其他模块注册的定时任务（方案 D2）。清空只作用于本实例。
@@ -159,8 +165,8 @@ def run_sync_blocking(task_id=None, owner_token=None):
     global _retry_count
     try:
         from core.sync import daily_sync_by_date, is_trading_day, update_stock_list
-        from core.db import init_db, log_sync
-        from core.repository.sync_repo import db_stats
+        from core.db import init_db
+        from core.repository.sync_repo import log_sync, db_stats
 
         init_db()
         today = date.today().strftime("%Y-%m-%d")
@@ -168,7 +174,7 @@ def run_sync_blocking(task_id=None, owner_token=None):
         if not is_trading_day(today):
             SYNC_STATUS["last_result"] = "非交易日，跳过数据拉取"
             SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            SYNC_STATUS["running"] = False
+            release_sync()
             _task_set_status(task_id, owner_token, "success", result={"skipped": "non_trading_day"})
             return
 
@@ -277,16 +283,15 @@ def run_sync_blocking(task_id=None, owner_token=None):
         import traceback
         traceback.print_exc()
     finally:
-        SYNC_STATUS["running"] = False
+        release_sync()
         _task_release(task_id, owner_token)
 
 
 def _schedule_retry(delay_seconds: int):
-    """指数退避重试"""
+    """指数退避重试：睡醒后原子抢占，已有同步在跑则不叠加"""
     time.sleep(delay_seconds)
-    if SYNC_STATUS["running"]:
+    if not try_acquire_sync():
         return
-    SYNC_STATUS["running"] = True
     run_sync_blocking()
 
 
@@ -360,7 +365,8 @@ def _submit_daily_sync_task(source):
 
 
 def _job_sync():
-    if SYNC_STATUS["running"]:
+    # 先原子抢占再查任务表：占不到执行权直接跳过，杜绝检查与置位窗口内的重复触发
+    if not try_acquire_sync():
         return
     task_id = owner_token = None
     try:
@@ -374,12 +380,12 @@ def _job_sync():
                                          status="skipped_duplicate")
             except Exception:
                 pass
+            release_sync()
             return
     except Exception:
         import traceback
         traceback.print_exc()
         task_id = owner_token = None   # 回退：任务表不可用也照常同步
-    SYNC_STATUS["running"] = True
     SYNC_STATUS["last_result"] = "定时同步中..."
     threading.Thread(target=run_sync_blocking, args=(task_id, owner_token), daemon=True).start()
     if task_id:

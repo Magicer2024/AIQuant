@@ -15,13 +15,21 @@ import signal
 from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from core.data_fetcher import get_market_index
-from core.db import (
-    init_db, upsert_stock_list, update_strategy_scores_batch,
-    get_all_stocks, get_latest_date, get_latest_date_all, get_stock_count_in_db,
-    log_sync, db_stats, get_conn, get_daily_price, upsert_index_daily, get_index_daily,
-    # 自选股相关
+# 连接/DDL 基础设施仍由 db.py 提供；业务数据访问统一走 repository（T10 双轨收敛）
+from core.db import init_db, get_conn
+from core.repository.stock_repo import upsert_stock_list, get_all_stocks
+from core.repository.price_repo import (
+    update_strategy_scores_batch, get_latest_date, get_latest_date_all,
+    get_stock_count_in_db, get_daily_price, upsert_index_daily, get_index_daily,
+    # 自选股同步用的 daily_price 子集查询
+    has_price_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
+)
+from core.repository.sync_repo import log_sync, db_stats
+from core.repository.watchlist_repo import (
+    # personal_watchlist 只读查询
     get_watchlist_codes, get_watchlist_with_names, count_watchlist,
-    has_watchlist_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
+)
+from core.repository.lhb_repo import (
     # 龙虎榜（隔日动量信号线）
     upsert_lhb_detail, get_latest_lhb_date, get_lhb_map_for_date,
     # 龙虎榜机构专用席位（机构建仓跟踪，独立数据轨道）
@@ -1140,7 +1148,7 @@ def sync_single_stock_to_watchlist(code: str, verbose: bool = False) -> dict:
                         "message": f"code={code} 不在 stock_info 中，请确认股票代码正确"}
 
         # 2) 判断是否需要补拉历史
-        need_pull = not has_watchlist_data(code)
+        need_pull = not has_price_data(code)
         rows_added = 0
         if need_pull:
             ok = sync_one_stock(code, HISTORY_START, end_date=None, verbose=False)
@@ -1238,7 +1246,7 @@ def sync_market_cap(codes: list = None, progress_cb=None) -> int:
     返回: 成功更新的数量
     """
     from core.data_fetcher import fetch_all_market_cap
-    from core.db import batch_update_market_cap
+    from core.repository.stock_repo import batch_update_market_cap
 
     records = fetch_all_market_cap(codes, progress_cb)
     if records:
@@ -1370,7 +1378,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                           scan_date=None, reuse_scores=False,
                           surge_ok=False, mid_weak_ok=True,
                           circ_shares=None, first_rev_ok=False,
-                          first_rev_market_pct=None) -> list:
+                          first_rev_market_pct=None, conn=None) -> list:
     """
     对单只股票的日线 df 生成 stock_signal 记录列表（与 recalc_all_scores 同口径）。
 
@@ -1462,7 +1470,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                     _start = (pd.Timestamp(scan_date)
                               - timedelta(days=520)).strftime("%Y-%m-%d")
                     _long = get_daily_price(code, start_date=_start,
-                                            end_date=scan_date)
+                                            end_date=scan_date, conn=conn)
                     if _long is not None and len(_long) > len(vdf):
                         vdf = _long
                 _r = vdf["close"].astype(float).pct_change()
@@ -1499,7 +1507,7 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                     _start = (pd.Timestamp(scan_date)
                               - timedelta(days=2600)).strftime("%Y-%m-%d")
                     _long = get_daily_price(code, start_date=_start,
-                                            end_date=scan_date)
+                                            end_date=scan_date, conn=conn)
                     if _long is not None and len(_long) > len(cdf):
                         cdf = _long
                 cdf = cdf.tail(_CHIP_WARMUP_ROWS)
@@ -1825,7 +1833,9 @@ def _build_signal_records(df, code, name, total_shares, sig_threshold,
                     pd.Timestamp(nd_sig["trade_date"]), nd_sig["buy_price"]),
             })
 
-    # ── 强势突破（首页「次日强势观察」栏目专用）：仅最新交易日、大盘未过热 ──
+    # ── 强势突破（原首页「次日强势观察」栏目专用）：仅最新交易日、大盘未过热 ──
+    # ⚠ 2026-10-12 已下线：SURGE_BREAKOUT["enabled"]=False ⇒ _surge_market_ok() 恒 False
+    #   ⇒ surge_ok=False，本块不再执行（首页面板同步移除）。代码保留以便一键复活。
     # 与今日推荐短线组隔离：strategy='强势突破' 由 /today 与 outcome_tracker 显式剔除；
     # 追加在动量之后：同 horizon 同票冲突时突破信号胜出（两者同为正期望短线信号）
     if surge_ok:
@@ -2046,6 +2056,10 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
         return {"scan_date": None, "signals": 0, "codes": 0,
                 "elapsed_s": 0.0, "target": target}
 
+    # 阶段计时（方案 F2：热点归因只认真实测量，优化前后以此对照）
+    from utils.timing import StageTimer
+    timer = StageTimer()
+
     # 统一信号评估日格式为 YYYY-MM-DD（与 daily_price.trade_date 存储格式一致）
     scan_date = str(trade_dates[-1])
     if len(scan_date) == 8 and scan_date.isdigit():
@@ -2124,122 +2138,132 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
         refresh_latest_price(codes if target == "watchlist" else None)
         return result
 
-    # 名称映射（stock_signal.name 字段；缺映射时用 code 兜底，不影响过滤）
-    try:
-        stocks_df = get_all_stocks()
-        name_map = dict(zip(stocks_df["code"], stocks_df["name"])) if not stocks_df.empty else {}
-    except Exception:
-        name_map = {}
-
-    # 阈值/止损止盈（与全量 recalc_all_scores 同口径）
-    from config.strategy_params import get_param
-    STOP_LOSS_SC = float(get_param("short_stop_loss"))
-    TAKE_PROFIT_SC = float(get_param("short_take_profit"))
-    SIG_THRESHOLD, _market_state = _resolve_sig_threshold()
-    if verbose and _market_state is not None:
-        print(f"  [增量信号] {scan_date} 市场状态 {_market_state['detail']}，"
-              f"阈值 {SIG_THRESHOLD}，止损 {STOP_LOSS_SC:.0%} 止盈 {TAKE_PROFIT_SC:.0%}")
-
-    # 质量过滤所需总股本映射 + 龙虎榜预加载
-    from core.db import get_market_cap_map
-    try:
-        _mktcap_map = get_market_cap_map()
-    except Exception:
-        _mktcap_map = {}
-    _lhb_map = {}
-    # 隔日动量与强势突破（龙虎榜硬过滤）均需龙虎榜映射；
-    # 按信号评估日加载（而非全局最新日），否则历史日重算会错配到更新的龙虎榜记录
-    if NEXT_DAY_MOMENTUM.get("enabled") or SURGE_BREAKOUT.get("enabled"):
+    # ── prepare：名称/阈值/股本/龙虎榜/大盘闸门（一次性预热）──
+    with timer.stage("prepare"):
+        # 名称映射（stock_signal.name 字段；缺映射时用 code 兜底，不影响过滤）
         try:
-            _lhb_map = get_lhb_map_for_date(scan_date)
-            if verbose:
-                if _lhb_map:
-                    print(f"  [增量信号] 预加载龙虎榜 {scan_date}：{len(_lhb_map)} 只")
-                else:
-                    print(f"  [增量信号] {scan_date} 无龙虎榜记录"
-                          f"（强势突破硬过滤当日将无信号）")
-        except Exception as e:
-            if verbose:
-                print(f"  [WARN] 龙虎榜预加载失败: {e}")
+            stocks_df = get_all_stocks()
+            name_map = dict(zip(stocks_df["code"], stocks_df["name"])) if not stocks_df.empty else {}
+        except Exception:
+            name_map = {}
 
-    # 强势突破大盘门控（全市场一次性判定，火热日不产生信号）
-    _surge_ok = _surge_market_ok()
-    if verbose and SURGE_BREAKOUT.get("enabled"):
-        print(f"  [强势突破] 大盘门控: {'放行' if _surge_ok else '拦截（全市场过热）'}")
+        # 阈值/止损止盈（与全量 recalc_all_scores 同口径）
+        from config.strategy_params import get_param
+        STOP_LOSS_SC = float(get_param("short_stop_loss"))
+        TAKE_PROFIT_SC = float(get_param("short_take_profit"))
+        SIG_THRESHOLD, _market_state = _resolve_sig_threshold()
+        if verbose and _market_state is not None:
+            print(f"  [增量信号] {scan_date} 市场状态 {_market_state['detail']}，"
+                  f"阈值 {SIG_THRESHOLD}，止损 {STOP_LOSS_SC:.0%} 止盈 {TAKE_PROFIT_SC:.0%}")
 
-    # 反转首日（2026-09-24）：观察池已上线（enabled=True）；门控 max_market_pct 为 None 时不查库
-    _first_rev_ok = bool(FIRST_REVERSAL.get("enabled"))
-    _first_rev_pct = _first_rev_market_pct(scan_date)
-    if verbose and _first_rev_ok:
-        print(f"  [反转首日] 启用中（当日全市场均涨 {_first_rev_pct if _first_rev_pct is not None else 'n/a'}%）")
-
-    # 中线弱市闸门（全市场一次性判定，弱市日不产生中线信号）
-    _mid_weak_ok = _mid_weak_market_ok(scan_date)
-    if verbose:
-        print(f"  [中线] 弱市闸门: {'放行' if _mid_weak_ok else '拦截（全市场弱势）'}")
-
-    sig_records = []
-    n_success = 0
-    for i, code in enumerate(codes):
-        if verbose and (i + 1) % 500 == 0:
-            print(f"    增量信号进度: {i+1}/{len(codes)}")
-        if progress_callback and (i + 1) % 200 == 0:
-            progress_callback(int((i + 1) / len(codes) * 100),
-                              f"增量信号 {i+1}/{len(codes)}，已生成 {len(sig_records)} 条")
+        # 质量过滤所需总股本映射 + 龙虎榜预加载
+        from core.repository.stock_repo import get_market_cap_map
         try:
-            # 增量只评估最新交易日：读取 scan_date 前 ~700 自然日窗口即可
-            # （覆盖长线 250 日回撤 + MA120 斜率 + 中线 80 日 + 短线滚动窗口；
-            #  滚动指标在 scan_date 处与全历史读取完全一致，I/O 与计算量大幅下降）
-            # end_date 截断到信号评估日：历史日重算时若读到更新数据，
-            # 中/长线/强势突破会错评成最新日（已踩坑）
-            _start = (pd.Timestamp(scan_date) - timedelta(days=700)).strftime("%Y-%m-%d")
-            df = get_daily_price(code, start_date=_start, end_date=scan_date)
-            if df is None or len(df) < 30:
-                continue
-            # 停牌密集股窗口内行数可能不足 scan_long_term 的 min_rows=250，
-            # 回退全历史读取（同样截断到评估日），保证长线评估口径与全量重算一致
-            if len(df) < 260:
-                df = get_daily_price(code, end_date=scan_date)
-                if df is None or len(df) < 30:
-                    continue
-            _mk = _mktcap_map.get(code) or {}
-            _ts, _cs = _mk.get("total_shares"), _mk.get("circ_shares")
-            _recs = _build_signal_records(
-                df, code, name_map.get(code) or code, _ts,
-                SIG_THRESHOLD, STOP_LOSS_SC, TAKE_PROFIT_SC,
-                lhb_row=_lhb_map.get(code), scan_date=scan_date,
-                reuse_scores=True, surge_ok=_surge_ok,
-                mid_weak_ok=_mid_weak_ok, circ_shares=_cs,
-                first_rev_ok=_first_rev_ok,
-                first_rev_market_pct=_first_rev_pct)
-            sig_records.extend(_recs)
-            n_success += 1
-        except Exception as e:
-            if verbose:
-                print(f"  [{code}] 增量信号生成失败: {e}")
+            _mktcap_map = get_market_cap_map()
+        except Exception:
+            _mktcap_map = {}
+        _lhb_map = {}
+        # 隔日动量与强势突破（龙虎榜硬过滤）均需龙虎榜映射；
+        # 按信号评估日加载（而非全局最新日），否则历史日重算会错配到更新的龙虎榜记录
+        if NEXT_DAY_MOMENTUM.get("enabled") or SURGE_BREAKOUT.get("enabled"):
+            try:
+                _lhb_map = get_lhb_map_for_date(scan_date)
+                if verbose:
+                    if _lhb_map:
+                        print(f"  [增量信号] 预加载龙虎榜 {scan_date}：{len(_lhb_map)} 只")
+                    else:
+                        print(f"  [增量信号] {scan_date} 无龙虎榜记录"
+                              f"（强势突破硬过滤当日将无信号）")
+            except Exception as e:
+                if verbose:
+                    print(f"  [WARN] 龙虎榜预加载失败: {e}")
 
-    # 重写当日信号（历史日保留不动）：
-    # 当日 short/mid/long/动量全部由本次增量重新生成，语义与全量 recalc 的
-    # "当日候选完全由当日过滤链决定"一致；target=all 时清当日全部，watchlist 时只清自选股。
-    with get_conn() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        if target == "all":
-            conn.execute("DELETE FROM stock_signal WHERE scan_date=?", (scan_date,))
-        else:
-            ph = ",".join("?" * len(codes))
-            conn.execute(
-                f"DELETE FROM stock_signal WHERE scan_date=? AND code IN ({ph})",
-                [scan_date] + codes)
-        if sig_records:
-            conn.executemany(_SIGNAL_INSERT_SQL, sig_records)
-        conn.commit()
-    # long 排序键是**横截面**百分位，必须等当日全部 long 信号写完才能算
-    try:
-        _n = recompute_long_rank_key(scan_date)
-        if verbose and _n:
-            print(f"  long 排序键回填 {_n} 条（{scan_date}）")
-    except Exception as _e:
-        print(f"  [WARN] long 排序键回填失败（不影响主流程）: {_e}")
+        # 强势突破大盘门控（全市场一次性判定，火热日不产生信号）
+        _surge_ok = _surge_market_ok()
+        if verbose and SURGE_BREAKOUT.get("enabled"):
+            print(f"  [强势突破] 大盘门控: {'放行' if _surge_ok else '拦截（全市场过热）'}")
+
+        # 反转首日（2026-09-24）：观察池已上线（enabled=True）；门控 max_market_pct 为 None 时不查库
+        _first_rev_ok = bool(FIRST_REVERSAL.get("enabled"))
+        _first_rev_pct = _first_rev_market_pct(scan_date)
+        if verbose and _first_rev_ok:
+            print(f"  [反转首日] 启用中（当日全市场均涨 {_first_rev_pct if _first_rev_pct is not None else 'n/a'}%）")
+
+        # 中线弱市闸门（全市场一次性判定，弱市日不产生中线信号）
+        _mid_weak_ok = _mid_weak_market_ok(scan_date)
+        if verbose:
+            print(f"  [中线] 弱市闸门: {'放行' if _mid_weak_ok else '拦截（全市场弱势）'}")
+
+    # ── 共享连接（T5-2 2026-10：cProfile 暴露 224 次 get_conn+close 占 wall 73%，
+    #     每次 close ≈0.7s WAL checkpoint-on-close；复用后全链路只开/关各 1 次）──
+    from core.db import get_conn as _open_conn
+    with _open_conn() as shared_conn:
+        sig_records = []
+        n_success = 0
+        for i, code in enumerate(codes):
+            if verbose and (i + 1) % 500 == 0:
+                print(f"    增量信号进度: {i+1}/{len(codes)}")
+            if progress_callback and (i + 1) % 200 == 0:
+                progress_callback(int((i + 1) / len(codes) * 100),
+                                  f"增量信号 {i+1}/{len(codes)}，已生成 {len(sig_records)} 条")
+            try:
+                # 增量只评估最新交易日：读取 scan_date 前 ~700 自然日窗口即可
+                # （覆盖长线 250 日回撤 + MA120 斜率 + 中线 80 日 + 短线滚动窗口；
+                #  滚动指标在 scan_date 处与全历史读取完全一致，I/O 与计算量大幅下降）
+                # end_date 截断到信号评估日：历史日重算时若读到更新数据，
+                # 中/长线/强势突破会错评成最新日（已踩坑）
+                with timer.stage("load_price"):
+                    _start = (pd.Timestamp(scan_date) - timedelta(days=700)).strftime("%Y-%m-%d")
+                    df = get_daily_price(code, start_date=_start, end_date=scan_date,
+                                         conn=shared_conn)
+                    if df is None or len(df) < 30:
+                        continue
+                    # 停牌密集股窗口内行数可能不足 scan_long_term 的 min_rows=250，
+                    # 回退全历史读取（同样截断到评估日），保证长线评估口径与全量重算一致
+                    if len(df) < 260:
+                        df = get_daily_price(code, end_date=scan_date, conn=shared_conn)
+                        if df is None or len(df) < 30:
+                            continue
+                _mk = _mktcap_map.get(code) or {}
+                _ts, _cs = _mk.get("total_shares"), _mk.get("circ_shares")
+                with timer.stage("build_signal"):
+                    _recs = _build_signal_records(
+                        df, code, name_map.get(code) or code, _ts,
+                        SIG_THRESHOLD, STOP_LOSS_SC, TAKE_PROFIT_SC,
+                        lhb_row=_lhb_map.get(code), scan_date=scan_date,
+                        reuse_scores=True, surge_ok=_surge_ok,
+                        mid_weak_ok=_mid_weak_ok, circ_shares=_cs,
+                        first_rev_ok=_first_rev_ok,
+                        first_rev_market_pct=_first_rev_pct,
+                        conn=shared_conn)
+                sig_records.extend(_recs)
+                n_success += 1
+            except Exception as e:
+                if verbose:
+                    print(f"  [{code}] 增量信号生成失败: {e}")
+
+        # 重写当日信号（历史日保留不动）：
+        # 当日 short/mid/long/动量全部由本次增量重新生成，语义与全量 recalc 的
+        # "当日候选完全由当日过滤链决定"一致；target=all 时清当日全部，watchlist 时只清自选股。
+        with timer.stage("write_signals"):
+            shared_conn.execute("BEGIN TRANSACTION")
+            if target == "all":
+                shared_conn.execute("DELETE FROM stock_signal WHERE scan_date=?", (scan_date,))
+            else:
+                ph = ",".join("?" * len(codes))
+                shared_conn.execute(
+                    f"DELETE FROM stock_signal WHERE scan_date=? AND code IN ({ph})",
+                    [scan_date] + codes)
+            if sig_records:
+                shared_conn.executemany(_SIGNAL_INSERT_SQL, sig_records)
+            shared_conn.commit()
+            # long 排序键是**横截面**百分位，必须等当日全部 long 信号写完才能算
+            try:
+                _n = recompute_long_rank_key(scan_date)
+                if verbose and _n:
+                    print(f"  long 排序键回填 {_n} 条（{scan_date}）")
+            except Exception as _e:
+                print(f"  [WARN] long 排序键回填失败（不影响主流程）: {_e}")
 
     elapsed = time.time() - start
     if verbose:
@@ -2272,7 +2296,8 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
             print(f"  [WARN] latest_price 刷新失败: {e}")
 
     return {"scan_date": scan_date, "signals": len(sig_records),
-            "codes": n_success, "elapsed_s": round(elapsed, 1), "target": target}
+            "codes": n_success, "elapsed_s": round(elapsed, 1), "target": target,
+            "stages": timer.report()}
 
 
 def recalc_all_scores(progress_callback=None, target: str = "all", *, replay_dates=None):
@@ -2361,7 +2386,7 @@ def recalc_all_scores(progress_callback=None, target: str = "all", *, replay_dat
     total = len(stocks)
 
     # 质量过滤所需的总股本映射（缺失的股票自动跳过市值项）
-    from core.db import get_market_cap_map
+    from core.repository.stock_repo import get_market_cap_map
     try:
         _mktcap_map = get_market_cap_map()
     except Exception:
@@ -2879,8 +2904,7 @@ if __name__ == "__main__":
         # 全量重算历史打分 + stock_signal（数据回填/修正后使用，约 5 分钟）
         recalc_all_scores()
     elif cmd == "pool_test":
-        # 推荐池并行拉取测试
-        from core.db import get_all_stocks
+        # 推荐池并行拉取测试（get_all_stocks 已在文件顶部从 stock_repo 导入）
         df = get_all_stocks()
         codes = df["code"].head(50).tolist() if not df.empty else ["000001", "600519", "300750"]
         result = fetch_recommend_pool_parallel(codes, max_workers=8, verbose=True)

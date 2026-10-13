@@ -10,7 +10,6 @@ db.py  ——  本地 SQLite 数据库模块
 
 import sqlite3
 import os
-import pandas as pd
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -1106,100 +1105,8 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
 
 
 # ─────────────────────────────────────────────
-# 自选股（personal_watchlist）查询辅助
-# ─────────────────────────────────────────────
-def get_watchlist_codes() -> list[str]:
-    """
-    返回所有自选股代码（去重、按 created_at 升序，便于展示稳定）
-    表不存在或为空时返回空列表，绝不抛异常（让同步层走降级分支）
-    """
-    try:
-        with get_conn() as conn:
-            rows = conn.execute(
-                "SELECT code FROM personal_watchlist "
-                "WHERE code IS NOT NULL AND code != '' "
-                "GROUP BY code ORDER BY MIN(created_at)"
-            ).fetchall()
-    except Exception:
-        # 表尚未创建（init_personal_tables 未跑）—— 视作空自选
-        return []
-    return [r[0] for r in rows]
-
-
-def get_watchlist_with_names() -> pd.DataFrame:
-    """
-    返回自选股的 code / name / market / created_at / note。
-    LEFT JOIN stock_info，name 缺失时退化为 code。
-    """
-    try:
-        with get_conn() as conn:
-            rows = conn.execute("""
-                SELECT w.code, COALESCE(s.name, w.code) AS name,
-                       s.market, w.created_at, w.note
-                FROM personal_watchlist w
-                LEFT JOIN stock_info s ON s.code = w.code
-                GROUP BY w.code
-                ORDER BY MIN(w.created_at)
-            """).fetchall()
-    except Exception:
-        return pd.DataFrame(columns=["code", "name", "market", "created_at", "note"])
-    return pd.DataFrame([dict(r) for r in rows])
-
-
-def has_watchlist_data(code: str) -> bool:
-    """判断 daily_price 中该 code 是否至少有 1 条记录"""
-    if not code:
-        return False
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM daily_price WHERE code=? LIMIT 1", (code,)
-        ).fetchone()
-    return row is not None
-
-
-def count_watchlist() -> int:
-    """返回自选股去重后的数量"""
-    try:
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT COUNT(DISTINCT code) FROM personal_watchlist"
-            ).fetchone()
-    except Exception:
-        return 0
-    return int(row[0] or 0)
-
-
-def get_latest_date_for_codes(codes: list[str]) -> str | None:
-    """
-    返回给定代码子集在 daily_price 中最新的 trade_date（'YYYY-MM-DD'），
-    子集为空或全无数据时返回 None。
-    """
-    if not codes:
-        return None
-    placeholders = ",".join("?" for _ in codes)
-    with get_conn() as conn:
-        row = conn.execute(
-            f"SELECT MAX(trade_date) FROM daily_price WHERE code IN ({placeholders})",
-            codes,
-        ).fetchone()
-    return row[0] if row and row[0] else None
-
-
-def get_stock_count_in_db_for_codes(codes: list[str]) -> int:
-    """返回子集中在 daily_price 至少有一条数据的 code 数"""
-    if not codes:
-        return 0
-    placeholders = ",".join("?" for _ in codes)
-    with get_conn() as conn:
-        row = conn.execute(
-            f"SELECT COUNT(DISTINCT code) FROM daily_price WHERE code IN ({placeholders})",
-            codes,
-        ).fetchone()
-    return int(row[0] or 0)
-
-
-# ─────────────────────────────────────────────
 # Repository 兼容层（新代码优先从 core.repository 导入）
+# T10：自住业务函数已全部迁入 repository/，本层仅保留 re-export 兼容旧导入路径
 # ─────────────────────────────────────────────
 
 from core.repository.stock_repo import (
@@ -1211,6 +1118,12 @@ from core.repository.price_repo import (
     upsert_index_daily, get_index_daily,
     get_latest_date, get_latest_date_all, has_today_data, get_stock_count_in_db,
     refresh_latest_price,
+    # T10 迁入（自选股同步用的 daily_price 子集查询）
+    has_price_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
+)
+from core.repository.watchlist_repo import (
+    # T10 迁入（personal_watchlist 只读查询）
+    get_watchlist_codes, get_watchlist_with_names, count_watchlist,
 )
 from core.repository.signal_repo import (
     save_signals, save_scan_signals, get_signals, get_today_signals,

@@ -28,6 +28,44 @@ class TestRepositoryImports(unittest.TestCase):
         self.assertTrue(callable(upsert_daily_price))
         self.assertTrue(callable(get_daily_price))
 
+    def test_t10_watchlist_repo_import(self):
+        """T10：personal_watchlist 只读查询迁入独立 repo"""
+        from core.repository.watchlist_repo import (
+            get_watchlist_codes, get_watchlist_with_names, count_watchlist,
+        )
+        self.assertTrue(callable(get_watchlist_codes))
+        self.assertTrue(callable(get_watchlist_with_names))
+        self.assertTrue(callable(count_watchlist))
+        # 表不存在时必须降级为「空自选」而非抛异常
+        self.assertIsInstance(get_watchlist_codes(), list)
+        self.assertIsInstance(count_watchlist(), int)
+
+    def test_t10_price_subset_import(self):
+        """T10：daily_price 子集查询迁入 price_repo，兼容层仍可 re-export"""
+        import inspect
+        from core.repository import price_repo
+        # has_watchlist_data 正名为 has_price_data（语义：daily_price 任意日期有记录）
+        self.assertEqual(
+            list(inspect.signature(price_repo.has_price_data).parameters), ["code"]
+        )
+        self.assertEqual(
+            list(inspect.signature(price_repo.get_latest_date_for_codes).parameters), ["codes"]
+        )
+        self.assertEqual(
+            list(inspect.signature(price_repo.get_stock_count_in_db_for_codes).parameters), ["codes"]
+        )
+        # core.db 兼容层旧/新路径都可用
+        from core.db import (
+            get_watchlist_codes, get_watchlist_with_names, count_watchlist,
+            has_price_data, get_latest_date_for_codes, get_stock_count_in_db_for_codes,
+        )
+        self.assertTrue(callable(has_price_data))
+        self.assertTrue(callable(get_watchlist_codes))
+        # 空入参边界不连库即返回
+        self.assertIsNone(get_latest_date_for_codes([]))
+        self.assertEqual(get_stock_count_in_db_for_codes([]), 0)
+        self.assertFalse(has_price_data(""))
+
     def test_signal_repo_import(self):
         from core.repository.signal_repo import (
             save_signals, save_scan_signals, get_signals, get_today_signals,

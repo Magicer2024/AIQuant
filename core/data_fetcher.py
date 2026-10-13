@@ -570,7 +570,7 @@ def fetch_all_market_cap(codes: list[str] = None, progress_cb=None) -> list[dict
     返回: [{"code": ..., "total_shares": ..., "circ_shares": ...}, ...]
     """
     if codes is None:
-        from core.db import get_all_stocks
+        from core.repository.stock_repo import get_all_stocks
         df = get_all_stocks(active_only=True)
         codes = df["code"].tolist()
 
