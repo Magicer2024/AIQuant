@@ -90,10 +90,12 @@ def update_strategy_scores_batch(code: str, scores_df: pd.DataFrame):
 
 
 def get_daily_price(code: str, start_date: str = None, end_date: str = None,
-                    min_rows: int = 30) -> pd.DataFrame:
-    """
-    从数据库读取某只股票行情，返回 DataFrame（index=date）
-    start_date / end_date: "YYYY-MM-DD" 或 "YYYYMMDD"
+                    min_rows: int = 30, conn=None) -> pd.DataFrame:
+    """从数据库读取某只股票行情，返回 DataFrame（index=date）。
+
+    start_date / end_date: "YYYY-MM-DD" 或 "YYYYMMDD"；
+    conn: 可选共享连接（复用调用方事务视角，避免 WAL checkpoint-on-close，
+          T5-2 2026-10 实测每次 close ≈0.7s → 224 次 close ≈160s 被砍掉）。
     """
     def _fmt(d):
         if d and len(d) == 8:
@@ -113,8 +115,12 @@ def get_daily_price(code: str, start_date: str = None, end_date: str = None,
         params.append(end_date)
     sql += " ORDER BY trade_date ASC"
 
-    with _get_conn() as conn:
+    # 有共享连接 → 直接用，避免 WAL checkpoint-on-close 成本
+    if conn is not None:
         rows = conn.execute(sql, params).fetchall()
+    else:
+        with _get_conn() as cn:
+            rows = cn.execute(sql, params).fetchall()
 
     if not rows:
         return pd.DataFrame()
@@ -124,6 +130,48 @@ def get_daily_price(code: str, start_date: str = None, end_date: str = None,
     df.set_index("trade_date", inplace=True)
     df.drop(columns=["id", "code"], errors="ignore", inplace=True)
     return df
+
+
+def get_price_frames(codes: list, conn=None) -> dict:
+    """批量取多只股票的日线 DataFrame（单条 code IN (...) SQL，消除逐票 N+1）。
+
+    返回 {code: DataFrame(index=trade_date, [open, close, high, low]) 或 None}；
+    无行情数据的 code 为 None，结构与原逐票查询逐值一致（T4，2026-10）。
+    传入 conn 可复用调用方连接（同一事务视角）；不传则自开连接。
+    """
+    out = {c: None for c in codes}
+    uniq = list(dict.fromkeys(codes))       # 去重保序
+    if not uniq:
+        return out
+    placeholders = ",".join("?" * len(uniq))
+
+    def _load(cn):
+        # 游标迭代按 code 分段建帧（SQL 已 ORDER BY code）：同一时刻只驻留
+        # 一只股票的行，避免 fetchall 把全量行物化进内存（峰值内存约束）
+        cur = cn.execute(
+            f"SELECT code, trade_date, open, close, high, low FROM daily_price "
+            f"WHERE code IN ({placeholders}) ORDER BY code, trade_date ASC", uniq
+        )
+        cols = ["trade_date", "open", "close", "high", "low"]
+        cur_code, recs = None, []
+
+        def _flush():
+            if cur_code is not None:
+                out[cur_code] = pd.DataFrame(recs, columns=cols).set_index("trade_date")
+
+        for r in cur:
+            if r["code"] != cur_code:
+                _flush()
+                cur_code, recs = r["code"], []
+            recs.append((r["trade_date"], r["open"], r["close"], r["high"], r["low"]))
+        _flush()
+
+    if conn is not None:
+        _load(conn)
+    else:
+        with _get_conn() as cn:
+            _load(cn)
+    return out
 
 
 # ── 指数行情 ──────────────────────────────────
@@ -253,6 +301,50 @@ def get_stock_count_in_db() -> int:
             "SELECT COUNT(DISTINCT code) as n FROM daily_price"
         ).fetchone()
     return row["n"] if row else 0
+
+
+def has_price_data(code: str) -> bool:
+    """判断 daily_price 中该 code 是否至少有 1 条记录（任意日期）。
+
+    T10 自 core/db.py 迁入，原名 has_watchlist_data（自选股同步场景命名，
+    实际只查 daily_price），迁入 price_repo 时按真实语义正名。
+    """
+    if not code:
+        return False
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM daily_price WHERE code=? LIMIT 1", (code,)
+        ).fetchone()
+    return row is not None
+
+
+def get_latest_date_for_codes(codes: list[str]) -> str | None:
+    """给定代码子集在 daily_price 中最新的 trade_date（'YYYY-MM-DD'）。
+
+    子集为空或全无数据时返回 None。
+    """
+    if not codes:
+        return None
+    placeholders = ",".join("?" for _ in codes)
+    with _get_conn() as conn:
+        row = conn.execute(
+            f"SELECT MAX(trade_date) FROM daily_price WHERE code IN ({placeholders})",
+            codes,
+        ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def get_stock_count_in_db_for_codes(codes: list[str]) -> int:
+    """子集中在 daily_price 至少有一条数据的 code 数"""
+    if not codes:
+        return 0
+    placeholders = ",".join("?" for _ in codes)
+    with _get_conn() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT code) FROM daily_price WHERE code IN ({placeholders})",
+            codes,
+        ).fetchone()
+    return int(row[0] or 0)
 
 
 # ── latest_price 物化表维护 ─────────────────────

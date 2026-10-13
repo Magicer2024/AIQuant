@@ -18,7 +18,9 @@ from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
                                   short_market_gate_sql, short_observe_bottom_sql,
                                   long_order_clause, long_second_order_clause,
                                   long_pool_filter_sql, long_sort_pool_mult)
-from routes.investor import _calc_signal, _compute_market_regime
+# T7 下沉后从业务模块直接导入（原 routes.investor 私有函数已迁出）
+from strategy.recommendation import calc_signal as _calc_signal
+from strategy.market_regime import compute_market_regime as _compute_market_regime
 
 LIMIT = 4
 
