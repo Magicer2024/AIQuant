@@ -44,7 +44,7 @@ def detect_market_state(index_code: str = "000001") -> dict:
         }
     """
     try:
-        from core.db import get_index_daily
+        from core.repository.price_repo import get_index_daily
         idx = get_index_daily(index_code, None, None)
     except Exception:
         idx = None

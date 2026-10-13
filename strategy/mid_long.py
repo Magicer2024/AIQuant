@@ -32,6 +32,12 @@ import pandas as pd
 # 中线：三过滤确认入场（2026-08-19 风格替换，替代"上穿当日"触发）
 # ─────────────────────────────────────────────
 
+# ATR 列缺失/NaN 时的保守兜底止损止盈（T11 S5：原函数体内 0.92/1.20 魔法数字提为常量）。
+# 仅异常数据路径使用（正常路径走 k×ATR 与 mid_risk_reward），不进 TUNABLE_PARAMS——
+# 没有可调节的回测依据，命名即文档。
+_MID_FALLBACK_STOP_PRICE_RATIO = 0.92   # 兜底止损价 = close × 0.92（-8%）
+_MID_FALLBACK_TAKE_PRICE_RATIO = 1.20   # 兜底止盈价 = close × 1.20（+20%）
+
 def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
                   score_threshold: float = 65.0,
                   weak_market_ok: bool = True) -> Optional[dict]:
@@ -116,15 +122,16 @@ def scan_mid_term(df: pd.DataFrame, min_rows: int = 80,
 
     atr = float(latest.get("ATR", 0) or 0)
     if math.isfinite(atr) and atr > 0:
-        # 止损 = close - k×ATR，止盈 = close + 2.5×k×ATR（盈亏比固定 2.5）。
+        # 止损 = close - k×ATR，止盈 = close + RR×k×ATR（RR=mid_risk_reward，T11 前硬编码 2.5）。
         # k 默认 2.5（2026-08 回测：2.0 止损率 63% 偏紧被震荡误扫，2.5 均值/胜率↑、PF 略降）。
         k = float(get_param("mid_atr_stop_mult"))
+        risk_reward = float(get_param("mid_risk_reward"))
         stop = round(close - k * atr, 4)
-        take = round(close + 2.5 * k * atr, 4)
+        take = round(close + risk_reward * k * atr, 4)
     else:
-        # ATR 列缺失/NaN 时给保守兜底：-8% / +20%
-        stop = round(close * 0.92, 4)
-        take = round(close * 1.20, 4)
+        # ATR 列缺失/NaN 时给保守兜底（常量见模块顶部）
+        stop = round(close * _MID_FALLBACK_STOP_PRICE_RATIO, 4)
+        take = round(close * _MID_FALLBACK_TAKE_PRICE_RATIO, 4)
 
     anchor_score = float(score.iloc[anchor])
     triggers = [

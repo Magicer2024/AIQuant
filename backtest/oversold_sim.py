@@ -20,11 +20,15 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from core.db import get_index_daily
+# T10：指数行情数据访问走 price_repo（core.db 仅保留 re-export 兼容层）
+from core.repository.price_repo import get_index_daily
+# ── T8（S5）：交易成本与 engine.py 共用 config.strategy_params.BACKTEST_COST ──
+from config.strategy_params import BACKTEST_COST
 
-DEFAULT_COMMISSION = 0.0003
-DEFAULT_STAMP_DUTY = 0.001
-DEFAULT_SLIPPAGE = 0.001
+DEFAULT_COMMISSION = BACKTEST_COST["commission_rate"]
+DEFAULT_STAMP_DUTY = BACKTEST_COST["stamp_tax_rate"]
+DEFAULT_SLIPPAGE = BACKTEST_COST["slippage_rate"]
+DEFAULT_MIN_COMMISSION = BACKTEST_COST["min_commission"]
 
 
 def market_timing_ok_dates(start_date: str, end_date: str,
@@ -100,7 +104,7 @@ def run_v3_portfolio(
     def _sell(code, dt, shares, reason, sell_price, entry_price, entry_date, cost_per_share):
         nonlocal cash
         proceeds = shares * sell_price
-        commission_out = max(proceeds * commission_rate, 5.0)
+        commission_out = max(proceeds * commission_rate, DEFAULT_MIN_COMMISSION)
         stamp = proceeds * stamp_tax_rate
         cash += proceeds - commission_out - stamp
         hold_days = (dt.date() - pd.to_datetime(entry_date).date()).days
@@ -139,7 +143,7 @@ def run_v3_portfolio(
                 if shares <= 0:
                     continue
                 cost = shares * fill_price
-                commission = max(cost * commission_rate, 5.0)
+                commission = max(cost * commission_rate, DEFAULT_MIN_COMMISSION)
                 total_cost = cost + commission
                 if total_cost > cash:
                     continue

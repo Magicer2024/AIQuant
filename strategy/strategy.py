@@ -250,12 +250,21 @@ def strategy_composite(df_with_indicators: pd.DataFrame) -> pd.DataFrame:
 # 止损止盈管理
 # ─────────────────────────────────────────────
 
-def calc_stop_loss_take_profit(df: pd.DataFrame, atr_multiplier_stop: float = 2.0, risk_reward: float = 2.5) -> pd.DataFrame:
+def calc_stop_loss_take_profit(
+    df: pd.DataFrame,
+    atr_multiplier_stop: float = 2.0,
+    risk_reward: float | None = None,
+) -> pd.DataFrame:
     """
     基于ATR计算动态止损止盈位
     :param atr_multiplier_stop: 止损 = 入场价 - N * ATR
-    :param risk_reward: 盈亏比，止盈 = 入场价 + risk_reward * 风险
+    :param risk_reward: 盈亏比，止盈 = 入场价 + risk_reward * 风险；
+                        None 时读 TUNABLE_PARAMS.mid_risk_reward（T11 S5 收口，默认 2.5）
     """
+    # 惰性读取：默认参数不在 def 处绑定配置值，保证运行期参数覆盖/冻结快照即时生效
+    if risk_reward is None:
+        from config.strategy_params import get_param
+        risk_reward = float(get_param("mid_risk_reward"))
     d = df.copy()
     d["STOP_LOSS"] = d["close"] - atr_multiplier_stop * d["ATR"]
     risk = atr_multiplier_stop * d["ATR"]

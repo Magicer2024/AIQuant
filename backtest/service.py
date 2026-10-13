@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional
 from core.db import get_conn
 from backtest.engine import VisualBacktestEngine, BacktestParams
 from config.personal_config import RESEARCH_CAPITAL
+# T8（S5）：费率默认值与最低佣金读唯一来源，不再在本文件硬编码 0.0003/0.001/5.0
+from config.strategy_params import BACKTEST_COST
 
 
 # ──────────── 内存任务状态 ────────────
@@ -99,9 +101,9 @@ def _build_params(payload: Dict[str, Any]) -> BacktestParams:
         take_profit_pct=_to_float_or_none(p.get("take_profit_pct")),
         stop_loss_pct=_to_float_or_none(p.get("stop_loss_pct")),
         max_hold_days=_to_int_or_none(p.get("max_hold_days")),
-        commission_rate=float(p.get("commission_rate", 0.0003)),
-        stamp_tax_rate=float(p.get("stamp_tax_rate", 0.001)),
-        slippage_rate=float(p.get("slippage_rate", 0.001)),
+        commission_rate=float(p.get("commission_rate", BACKTEST_COST["commission_rate"])),
+        stamp_tax_rate=float(p.get("stamp_tax_rate", BACKTEST_COST["stamp_tax_rate"])),
+        slippage_rate=float(p.get("slippage_rate", BACKTEST_COST["slippage_rate"])),
         exclude_st=bool(p.get("exclude_st", True)),
         exclude_kcb=bool(p.get("exclude_kcb", True)),
         exclude_cyb=bool(p.get("exclude_cyb", False)),
@@ -157,7 +159,7 @@ def _execution_config(p: Optional[BacktestParams]) -> Optional[Dict[str, Any]]:
         "take_profit_pct": p.take_profit_pct,
         "max_hold_days": p.max_hold_days,
         "commission_rate": p.commission_rate,
-        "min_commission": 5.0,
+        "min_commission": BACKTEST_COST["min_commission"],
         "stamp_tax_rate": p.stamp_tax_rate,
         "slippage_rate": p.slippage_rate,
         "lot_size": 100,
