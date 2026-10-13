@@ -10,7 +10,8 @@ import pandas as pd
 from datetime import timedelta
 
 import core.sync as s
-from core.db import get_conn, get_market_cap_map, get_all_stocks
+from core.db import get_conn
+from core.repository.stock_repo import get_market_cap_map, get_all_stocks
 from config.strategy_params import get_param
 
 KEYS = ["scan_date", "code", "price", "stop_loss", "take_profit", "horizon", "strategy"]

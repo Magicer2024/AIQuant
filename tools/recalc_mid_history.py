@@ -32,7 +32,9 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from core.db import get_conn, get_daily_price, get_all_stocks, get_market_cap_map
+from core.db import get_conn  # 连接基础设施
+from core.repository.price_repo import get_daily_price
+from core.repository.stock_repo import get_all_stocks, get_market_cap_map
 from core.sync import _mid_weak_market_ok, _SIGNAL_INSERT_SQL
 from strategy.mid_long import scan_mid_term, scan_long_term
 from strategy.rec_filters import passes_quality, chase_filter

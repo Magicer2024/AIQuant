@@ -38,12 +38,12 @@ def main():
     print(f"阈值 {sig_th}  止损 {stop}  止盈 {take}")
 
     try:
-        from core.db import get_all_stocks
+        from core.repository.stock_repo import get_all_stocks
         df0 = get_all_stocks()
         name_map = dict(zip(df0["code"], df0["name"])) if not df0.empty else {}
     except Exception:
         name_map = {}
-    from core.db import get_market_cap_map
+    from core.repository.stock_repo import get_market_cap_map
     mcap = get_market_cap_map()
 
     ok = True

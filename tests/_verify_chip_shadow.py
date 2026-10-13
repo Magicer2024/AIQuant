@@ -60,7 +60,8 @@ except ImportError:
     sys.modules.setdefault("qlib", _q)
     sys.modules.setdefault("qlib.constant", _qc)
 
-from core.db import get_conn, get_daily_price, init_db        # noqa: E402
+from core.db import get_conn, init_db                          # noqa: E402
+from core.repository.price_repo import get_daily_price         # noqa: E402
 from core import sync as s                                    # noqa: E402
 from core import outcome_tracker as ot                        # noqa: E402
 from config.strategy_params import get_param                  # noqa: E402

@@ -48,7 +48,8 @@ from requests.adapters import HTTPAdapter
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.db import get_conn, init_db, get_all_stocks
+from core.db import get_conn, init_db  # 连接/DDL 基础设施
+from core.repository.stock_repo import get_all_stocks  # T12：业务访问走 repository
 
 logger = logging.getLogger("fix_history")
 

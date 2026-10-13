@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 
-from core.db import get_conn, get_market_cap_map
+from core.db import get_conn
+from core.repository.stock_repo import get_market_cap_map
 from backtest.engine import (
     BacktestParams,
     VisualBacktestEngine,

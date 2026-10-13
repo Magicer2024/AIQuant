@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 
 import core.sync as s
-from core.db import get_conn, get_market_cap_map, get_all_stocks
+from core.db import get_conn
+from core.repository.stock_repo import get_market_cap_map, get_all_stocks
 from config.strategy_params import get_param
 from strategy.indicators import calc_atr
 

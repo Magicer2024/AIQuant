@@ -34,7 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
-from core.db import get_conn, get_market_cap_map
+from core.db import get_conn
+from core.repository.stock_repo import get_market_cap_map
 from config.strategy_params import QUALITY_FILTER
 
 pd.set_option("display.width", 160)

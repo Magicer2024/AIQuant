@@ -2,7 +2,7 @@
 core/market_regime.py —— 大盘冷热 regime（日期参数化，可对任意历史日复现）
 ========================================================================
 
-与前端信号灯（routes/investor.py _compute_market_regime）同一口径：
+与前端信号灯（strategy/market_regime.py compute_market_regime）同一口径：
 多日宽度 composite = 50 + 三项贡献：
   1) 近 5 个交易日涨跌家数比（±20）
   2) 全市场站上 MA20 占比（近 5 日均值，±20）
@@ -49,7 +49,7 @@ def compute_regime_series(conn, start_date: str,
 
     返回 {trade_date: regime}；lookback（涨跌比 12 天 / 宽度 30 天 /
     指数 20 天）在函数内部自动前推，调用方无需处理。
-    口径与 routes/investor._compute_market_regime 完全一致（含 rolling 5
+    口径与 strategy/market_regime.compute_market_regime 完全一致（含 rolling 5
     窗口与 0.5 兜底），异常时整体回退单日均值口径。
     """
     end_filter = " AND trade_date <= ?" if end_date else ""

@@ -34,7 +34,8 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from config.personal_config import EXIT_TRACK_START_DATE  # noqa: E402
 from config.strategy_params import FIRST_REVERSAL  # noqa: E402
-from core.db import get_all_stocks, get_conn, get_market_cap_map  # noqa: E402
+from core.db import get_conn  # noqa: E402  # 连接基础设施；业务访问走 repository（T12 收敛）
+from core.repository.stock_repo import get_all_stocks, get_market_cap_map  # noqa: E402
 from strategy.first_reversal import scan_first_reversal  # noqa: E402
 from strategy.indicators import calc_true_ret  # noqa: E402
 from strategy.rec_filters import passes_quality  # noqa: E402

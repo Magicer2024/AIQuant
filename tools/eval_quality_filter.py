@@ -28,7 +28,7 @@ import pandas as pd
 
 from tools.eval_fusion_mode import load_daily, add_features, load_index_regime, stat
 from tools.eval_bottom_reentry import chase_mask
-from core.db import get_market_cap_map
+from core.repository.stock_repo import get_market_cap_map
 from config.strategy_params import (
     QUALITY_FILTER, DEFAULT_SIG_THRESHOLD, HIGH_VOL_THRESHOLD, HIGH_VOL_SIG_THRESHOLD,
 )
