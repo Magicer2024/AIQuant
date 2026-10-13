@@ -34,6 +34,8 @@
 23. ⚠ **改完后端必须重启 `start.bat`，否则当晚 19:00 调度用「进程内存里的旧代码」重算复盘表**。2026-09-24 事故：进程 09:40 启动时 `sync.py` 已有反转首日接线、`outcome_tracker.py` 还没有 ⇒ 19:00 `insert_new_outcomes(days_back=60)` **先删 `scan_date>=今天-60` 再按 `stock_signal` 回填**，缺了反转首日分支 ⇒ **静默净删 424 行**（951→485→61），成绩单无人察觉。⇒ 凡是「先删窗口再重建」的函数，**任何再插入分支的缺失都会变成静默净删除**；加了 `_rev_before/_rev_after` 告警，但护栏挡不住旧代码，**只有重启**。诊断入口：`evaluated_at` 分布 + `logs/aiquant.log` 的 `Running job _job_sync` 时间戳。
 24. ⚠ **前端交互逻辑不能用「语法通过」当验收**：`tools/_smoke_reversal_history.mjs` 是**迷你 DOM 冒烟测试**范式（把 dashboard.html 里那段真实 JS 抽进 node `vm`，用只含 `id/style/innerHTML/checked/value` 的假 DOM 承接）。⚠ 假 DOM **必须解析 id 标签的内联 `style="..."`**，否则 `el.style.display` 恒 `undefined`、断言假失败/假通过。⚠ 测试里换数据别用 `toggle*()`（可能已是展开态 ⇒ 变成收起拿到旧缓存）。
 
+**三重滤网（2026-09-27 检验，结论 ❌ 不上线）**：用户提的「40/160 趋势 → 等回踩 → MACD(10,20,5) 金叉+站上 MA10」。长样本 7 年（2020-2026）超额 **-0.014pp(t=-0.42)**、5/7 年为负；挂现有 short 推荐 Δ**+0.004pp**、long Δ**-0.392pp**（反向）；LOO 无互补性（去掉任一重，超额只是从「负」变「≈0」）。⚠ **「等回踩」是负贡献不是中性**：趋势前提下按距 MA40 分档**单调** —— `>10%` 档 **+0.102(t=2.19)** 最好、`-2~0%` 档 **-0.060(t=-2.24)** 最差，而三重滤网信号恰落在 `0~2%`（-0.045）⇒ **"避免买在高点"的设计把自己锁死在最差位置区间**（且胜率与收益反向：>10% 档胜率 47.1% 最低但收益最高，典型动量特征）。2:1 盈亏比实测仅 **1.48**、胜率 43.8%、同期市场 +1.13% ⇒ 扣基线 **-0.649pp(t=-3.84)**（"胜率>33% 即正期望"前提是盈亏比真 2:1，跳空使其失效）。现网 `pullback_dip.py`（MA10/MA20+量缩+前期涨幅）超额 -0.011 **优于**它。📄 docs/triple-screen-verification.md
+
 ## ⚑ 开放待办
 - **筹码排序上线前置（步骤④）**：① 历史 `chip_conc` 回填（必须传 `as_of`）② 同步 `H.portfolio()` 硬编码 `ext ASC+fusion DESC` ③ 再开 `short_chip_sort_prioritize=1`。
 - **待决策**：`short_ext_sort_desc` 升序→降序（样本内 +1.15%/样本外 +1.90%）。⚠ 与 ext≥5.5% 互为替代；ATR 三向交互未测。
@@ -84,4 +86,4 @@
 - 面板加可折叠/懒加载区块时，状态必须**收口到单一注入口**（如 `_hydrateRevHist()`）：面板整体 `innerHTML = …` 重绘会冲掉展开态 DOM，否则出现「按钮写『收起』但内容是空的」。回归入口：`tools/_verify_first_reversal.py`（A~F + D3/D4/D5）已把 `tools/_check_dashboard_js.mjs` 与 `tools/_smoke_reversal_history.mjs` 一并串起来。
 
 ---
-*最后更新: 2026-09-24*
+*最后更新: 2026-09-27*
