@@ -9,28 +9,10 @@ routes/investor.py —— 个人投资者专属 API
 - 量化指标白话解释（教育散户）
 - 风险告警（接近止损/单股集中度过高等）
 """
-import json
-import os
-import re
-import subprocess
-import sys
-import time
-from collections import Counter
-from datetime import date, datetime
-from typing import Optional
-
 from flask import Blueprint, request
 
-from core.db import get_conn, _safe_add_column, init_db
-from utils.api import ok, fail, identity_meta
-from utils.serialization import sanitize_numeric as _sanitize
-from config.personal_config import (
-    POSITION_PLAN_ACCOUNT, POSITION_PLAN_MAX_PCT,
-    MAIN_BOARD_ONLY, main_board_filter,
-    EXIT_TRACK_START_DATE,
-)
-from config.strategy_params import (T1_GAP_GUARD, RECO_REGIME_CAP, get_param,
-                                    SURGE_BREAKOUT, FIRST_REVERSAL)
+from core.db import get_conn, _safe_add_column
+from utils.api import ok, fail
 
 
 investor_bp = Blueprint("investor", __name__, url_prefix="/api/investor")
@@ -47,133 +29,10 @@ def account_config():
                "budget_kind": "reference_budget", "available_cash": None})
 
 
-# ─────────────────────────────────────────────
-# 信号灯判定（散户最关心的"今天能不能动手"）
-# ─────────────────────────────────────────────
-REGIME_LABEL = {
-    "hot": "火热", "warm": "偏暖", "neutral": "震荡",
-    "cool": "偏冷", "cold": "冰点", "unknown": "数据不足",
-}
-
-
-# ─────────────────────────────────────────────
-# 大盘冷热：多日宽度 composite（替代单日均值，抗单日噪音）
-# 计算口径在 core/market_regime.py（日期参数化，历史可复现），此处仅加缓存
-# ─────────────────────────────────────────────
-_regime_cache = {"ts": 0.0, "regime": None}
-_REGIME_CACHE_TTL = 600  # 10 分钟（盘中数据低频变化）
-
-
-def _compute_market_regime(conn):
-    """
-    多日宽度 composite 市场冷热（10 分钟缓存）。
-
-    综合三项（替代原单日 AVG(pct_change) 的"一天定生死"，避免冰点↔火热来回跳）：
-      1) 近 5 个交易日涨跌家数比（多日均值，抗单日暴涨暴跌）
-      2) 全市场站上 MA20 的个股占比（真实宽度，近 5 日均值）
-      3) 沪深300 / 中证500 近 5 日斜率均值
-    composite = 50 + 三项贡献（各 ±20 / ±20 / ±15），正常区间约 25~75。
-    档位：>=60 hot / >=55 warm / >=45 neutral / >=40 cool / else cold。
-    任一环节异常时回退单日均值逻辑（core.market_regime 内部处理）。
-    """
-    from core.market_regime import compute_regime_on
-    now = time.time()
-    if _regime_cache["regime"] and (now - _regime_cache["ts"]) < _REGIME_CACHE_TTL:
-        return _regime_cache["regime"]
-
-    latest_td = conn.execute(
-        "SELECT MAX(trade_date) FROM daily_price").fetchone()[0]
-    regime = compute_regime_on(conn, latest_td) if latest_td else "unknown"
-    _regime_cache.update({"ts": now, "regime": regime})
-    return regime
-
-
-def _calc_signal(*, score, risk_reward, risk_pct, market_regime, is_held, trend_up,
-                 horizon=None):
-    """根据评分 / 盈亏比 / 大盘冷热 / 持仓联动 / 趋势，返回操作信号灯。
-
-    注意：fusion_score 量纲为 0~50（strategies.py 中 clip(upper=50)），
-    门槛按此量纲设定：30 分≈百分制 60，40 分≈百分制 80。
-
-    返回 dict: { level, emoji, label, reasons: list, warnings: list }
-    """
-    reasons: list = []
-    warnings: list = []
-
-    # 0. 盈亏比太差（一票否决）
-    if risk_reward is not None and risk_reward < 1.5:
-        return {
-            "level": "avoid",
-            "emoji": "⛔",
-            "label": "避免",
-            "reasons": [f"盈亏比仅 {risk_reward:.2f}，性价比差"],
-            "warnings": ["止损距离过近或止盈空间不足，建议放弃"],
-        }
-
-    # 1. 评分门槛（30/50 ≈ 百分制 60）
-    #    2026-08 回测验证：fs≥30 + 低扩展度组合 +0.468%/笔（正期望，累计+146%），
-    #    22~30 区间 -0.149%/笔（负期望）→ 可建仓门槛保持 30，不随门控(22)下调，
-    #    否则把历史负期望的票标成「可建仓」误导用户。
-    if score < 30:
-        return {
-            "level": "wait",
-            "emoji": "🔴",
-            "label": "观望",
-            "reasons": [f"综合评分 {score:.0f}（满分 50），低于 30 分门槛"],
-            "warnings": ["等评分回升或换标的"],
-        }
-
-    # 2. 大盘冷热权重
-    if market_regime in ("cold", "cool"):
-        # 大盘冷：要评分 ≥ 40（≈百分制 80）才“可小仓”
-        if score >= 40:
-            reasons.append(f"大盘{REGIME_LABEL.get(market_regime, '')}，但个股独立强势")
-            warnings.append("建议仓位 ≤ 10%，抢反弹思路")
-        else:
-            return {
-                "level": "wait",
-                "emoji": "🔴",
-                "label": "观望",
-                "reasons": [f"大盘{REGIME_LABEL.get(market_regime, '')}，评分 {score:.0f} 不算高"],
-                "warnings": ["大盘弱势时减少开仓"],
-            }
-    else:
-        reasons.append(f"大盘{REGIME_LABEL.get(market_regime, '')}配合")
-
-    # 3. 止损位检查
-    if risk_pct is not None and risk_pct < 3:
-        warnings.append(f"止损位仅 -{risk_pct:.1f}%，易被洗出，可放宽至 -5%")
-
-    # 4. 持仓联动 + 趋势
-    if is_held:
-        if trend_up:
-            return {
-                "level": "add",
-                "emoji": "🟡",
-                "label": "可加仓",
-                "reasons": reasons + ["你已持有，趋势确认向上"],
-                "warnings": warnings + ["加仓不破止损位"],
-            }
-        else:
-            return {
-                "level": "hold_watch",
-                "emoji": "🟡",
-                "label": "持仓观察",
-                "reasons": reasons + ["你已持有，评分未继续走高"],
-                "warnings": warnings + ["不操作，等趋势明朗"],
-            }
-    else:
-        _extra = ["未持仓，可建仓"]
-        if horizon == "short":
-            # P0-1.1 改动 C：短线快进快出提示（持仓上限 1 天，买入次日收盘了结）
-            _extra.append("短线快进快出：买入次日收盘了结，不恋战")
-        return {
-            "level": "buy",
-            "emoji": "🟢",
-            "label": "可建仓",
-            "reasons": reasons + _extra,
-            "warnings": warnings,
-        }
+# 信号灯判定与今日推荐编排已下沉（T7）：
+#   REGIME_LABEL / calc_signal → strategy/recommendation.py
+#   大盘冷热「最新交易日 + 10 分钟缓存」→ strategy/market_regime.py
+from strategy.recommendation import build_today_payload
 
 
 # ─────────────────────────────────────────────
@@ -241,724 +100,27 @@ def _ensure_personal_tables():
 # ─────────────────────────────────────────────
 
 
-def _exit_trailing_params(horizon: str) -> tuple:
-    """按周期取移动止盈参数 (trailing_pct, partial_tp, stop_cap_pct)。
-
-    2026-08 落地：short/mid/long 三周期全部启用移动止盈（让利润奔跑，不轻易止盈）。
-    partial_tp（启动线）覆盖 stock_signal.take_profit 作启动线——long 自带的
-    take_profit=现价×1.5（+50% 目标价）不宜直接当启动线；short 用 short_take_profit。
-    stop_cap_pct：止损宽度上限（2026-08-19 落地）——仅中线叠加，信号自带 k×ATR
-    止损可达 -20%，收窄到 -12% 消除深浮亏尾部；short/long 传 None 不叠加。
-    参数均来自 TUNABLE_PARAMS（DB 可覆盖，60s TTL）。
-    """
-    if horizon == "short":
-        return get_param("short_trailing_pct"), get_param("short_take_profit"), None
-    if horizon == "mid":
-        return (get_param("mid_trailing_pct"), get_param("mid_partial_tp"),
-                get_param("mid_stop_max_width"))
-    return get_param("long_trailing_pct"), get_param("long_partial_tp"), None
-
-
-def _short_pullback_enabled() -> bool:
-    """抄底类短线「回踩确认入场」开关（2026-09-05 落地，deep_track 实证口径）。"""
-    try:
-        return bool(int(get_param("short_pullback_entry")))
-    except Exception:
-        return False
-
-
-def _is_pullback_line(horizon: str, strategy) -> bool:
-    """该信号是否走回踩确认入场：仅抄底类短线（strategy != '隔日动量'）。
-
-    隔日动量豁免——动量 alpha 依赖次日开盘建仓，等回踩会直接错过行情；
-    参数 short_pullback_entry=0 时整体回退次日开盘口径。
-    """
-    return (horizon == "short" and _short_pullback_enabled()
-            and (strategy or "") != "隔日动量")
-
-
-def _short_pullback_fill(df, scan_date, buy_price, window: int):
-    """回踩成交模拟：信号日后 window 个交易日内 low 触及买点才成交。
-
-    买点 = 信号日收盘价（stock_signal.buy_price）；成交价 = min(买点, 当日开盘)。
-    口径与 strategy/deep_tracker._try_fill 一致（个股深度跟踪已实证
-    +1.32%/胜率61.5% 的入场纪律）。
-    返回 (fill_ts, fill_price, pending)：
-      - 成交           → (ts, price, False)
-      - 未成交+窗口走完 → (None, None, False)  → 放弃（expired，不计入收益统计）
-      - 未成交+窗口未走完 → (None, None, True) → 等待（watching）
-    """
-    import pandas as pd
-    if df is None or df.empty or not buy_price or float(buy_price) <= 0:
-        return None, None, False
-    if hasattr(df.index, "strftime"):
-        after = df[df.index > pd.Timestamp(str(scan_date)[:10])]
-    else:
-        after = df[df.index > str(scan_date)[:10]]
-    if after.empty:
-        return None, None, True
-    for ts, row in after.head(window).iterrows():
-        low = row.get("low")
-        if low is None or pd.isna(low):
-            continue
-        if float(low) <= float(buy_price):
-            open_ = row.get("open")
-            if open_ is None or pd.isna(open_):
-                open_ = buy_price
-            return ts, round(min(float(buy_price), float(open_)), 2), False
-    return None, None, len(after) < window
-
-
-def _df_prev_day(df, ts):
-    """df 中 ts 的前一个交易日（str）。用于 evaluate_exit_by_prices 的
-    entry_date 传参：传 fill 日的前一交易日 → 其 after 首行恰为 fill 日，
-    与 deep_tracker「j=1 = 建仓日，T+1 不判出场」语义完全对齐。"""
-    try:
-        pos = df.index.get_loc(ts)
-    except Exception:
-        return None
-    if isinstance(pos, int) and pos > 0:
-        return str(df.index[pos - 1])[:10]
-    return None
-
-
-def _split_continuous_segments(seg: list, df, horizon: str, entry_mode: str = "open") -> list:
-    """将一段连续推荐按卖出断点拆分。
-
-    段内持仓若已在某交易日卖出（触发止损/止盈/到期），卖出日（含）之后的新推荐
-    属于新一轮交易，不能与卖出前的推荐合并展示（如：07-31 推荐、08-03 更新止损、
-    08-04 触发止损卖出，则 08-04 的新推荐应独立成段）。递归拆分直至无断点。
-
-    entry_mode="pullback"（抄底类短线回踩确认入场，2026-09-05）：
-      - 段首推荐起 window 个交易日内未回踩买点 → 整段未成交（expired/watching），
-        标记记在 seg[0]["_pullback_state"]，不做卖出拆分；
-      - 成交 → 以回踩成交价为建仓价、建仓日为持仓起点评估出场（entry_date 传
-        建仓日前一交易日，使 evaluate_exit_by_prices 的 j=1 恰为建仓日），
-        卖出日（含）后的新推荐拆为新一轮（新一轮重新等回踩）。
-    """
-    if len(seg) <= 1 or df is None or df.empty:
-        return [seg]
-    import pandas as pd
-    from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
-
-    # 复制为 dict（元素可能是只读 sqlite3.Row；回踩状态标记需可写）
-    seg = [dict(s) for s in seg]
-    first, last = seg[0], seg[-1]
-
-    entry_date_arg = first["scan_date"]
-    if entry_mode == "pullback":
-        from config.strategy_params import get_param as _gp
-        window = max(1, int(_gp("short_entry_window_days")))
-        fill_ts, fill_price, pending = _short_pullback_fill(
-            df, first["scan_date"], first["buy_price"], window)
-        if fill_ts is None:
-            seg[0]["_pullback_state"] = "watching" if pending else "expired"
-            return [seg]
-        prev_day = _df_prev_day(df, fill_ts)
-        if prev_day is None:
-            entry_mode = "open"   # 极端情形（df 首行即成交日）回退开盘口径
-        else:
-            entry_price = fill_price
-            entry_date_arg = prev_day
-
-    if entry_mode == "open":
-        if hasattr(df.index, 'strftime'):
-            after = df[df.index > pd.Timestamp(first["scan_date"])]
-        else:
-            after = df[df.index > first["scan_date"]]
-        if after.empty:
-            return [seg]
-        _f = after.iloc[0]
-        entry_price = float(_f["open"]) if _f["open"] else (
-            float(_f["close"]) or first["buy_price"])
-
-    # 用段内最新止损/止盈评估整段持仓（三周期均开启移动止盈，与出场跟踪同口径）
-    _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
-    adv = evaluate_exit_by_prices(
-        entry_price=entry_price,
-        entry_date=entry_date_arg,
-        df=df,
-        stop_loss=last["stop_loss"],
-        take_profit=last["take_profit"],
-        max_hold_days=get_max_hold(horizon),
-        trailing_pct=_trail,
-        partial_tp=_partial,
-        stop_cap_pct=_stop_cap,
-    )
-    exit_date = (adv.get("detail") or {}).get("exit_date")
-    if not exit_date:
-        return [seg]   # 未卖出，整段保留
-
-    # 卖出日（含）当天及之后的新推荐 → 新一轮交易，从该处拆开
-    split_at = None
-    for i, s in enumerate(seg):
-        if s["scan_date"] >= exit_date:
-            split_at = i
-            break
-    if split_at is None or split_at == 0:
-        return [seg]
-    # 注意：返回的是「段列表」——前半段包成单元素列表再与递归结果拼接
-    return [seg[:split_at]] + _split_continuous_segments(seg[split_at:], df, horizon, entry_mode)
-
-
-def _get_exit_advice(d: dict) -> Optional[dict]:
-    """P0: 对推荐日后 14 天内的票评估出场状态（与出场跟踪同口径）。
-
-    买入价 = 推荐日后首个交易日开盘价；卖出条件 = 推荐自带止损/止盈价 + 周期持仓上限。
-    返回 None（新推荐，无需出场评估）或 {status, reason, detail}。
-    """
-    scan_date = d.get("scan_date")
-    code = d.get("code")
-    if not scan_date or not code:
-        return None
-
-    # 只对推荐日后 14 天内的票评估
-    try:
-        from datetime import datetime as _dt
-        scan_dt = _dt.strptime(str(scan_date)[:10], "%Y-%m-%d")
-        days_since = (_dt.now() - scan_dt).days
-        if days_since > 14 or days_since < 0:  # 超过 14 天不再评估
-            return None
-    except (ValueError, TypeError):
-        return None
-
-    try:
-        from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
-        import pandas as pd
-        with get_conn() as conn:
-            rows = conn.execute("""
-                SELECT trade_date, open, close, high, low
-                FROM daily_price WHERE code = ?
-                ORDER BY trade_date ASC
-            """, (code,)).fetchall()
-        if not rows:
-            return None
-        df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
-        if hasattr(df.index, 'strftime'):
-            after = df[df.index > pd.Timestamp(str(scan_date)[:10])]
-        else:
-            after = df[df.index > str(scan_date)[:10]]
-        if after.empty:
-            entry_price = d.get("buy_price") or d.get("signal_price") or 0
-        else:
-            first = after.iloc[0]
-            entry_price = float(first["open"]) if first["open"] else (
-                float(first["close"]) or d.get("buy_price") or 0)
-        if not entry_price or entry_price <= 0:
-            return None
-        hz = d.get("horizon") or "short"
-        # 抄底类短线：回踩确认入场（2026-09-05，与出场跟踪/复盘同口径）
-        if _is_pullback_line(hz, d.get("strategy")):
-            from config.strategy_params import get_param as _gp
-            window = max(1, int(_gp("short_entry_window_days")))
-            fill_ts, fill_price, pending = _short_pullback_fill(
-                df, scan_date, d.get("buy_price"), window)
-            if fill_ts is None:
-                if pending:
-                    return {"status": "watching",
-                            "reason": (f"等待回踩买点 {d.get('buy_price')}"
-                                       f"（{window} 个交易日内触及才建仓）"),
-                            "detail": {}}
-                return {"status": "expired",
-                        "reason": "回踩窗口内未触及买点，未成交（放弃）",
-                        "detail": {}}
-            prev_day = _df_prev_day(df, fill_ts)
-            if prev_day is not None:
-                _trail, _partial, _stop_cap = _exit_trailing_params(hz)
-                return evaluate_exit_by_prices(
-                    entry_price=fill_price,
-                    entry_date=prev_day,
-                    df=df,
-                    stop_loss=d.get("stop_loss"),
-                    take_profit=d.get("take_profit"),
-                    max_hold_days=get_max_hold(hz),
-                    trailing_pct=_trail,
-                    partial_tp=_partial,
-                    stop_cap_pct=_stop_cap,
-                )
-            # 极端情形（df 首行即成交日）→ 落到下方开盘口径
-        _trail, _partial, _stop_cap = _exit_trailing_params(hz)
-        advice = evaluate_exit_by_prices(
-            entry_price=entry_price,
-            entry_date=str(scan_date)[:10],
-            df=df,
-            stop_loss=d.get("stop_loss"),
-            take_profit=d.get("take_profit"),
-            max_hold_days=get_max_hold(hz),
-            # 三周期均开启移动止盈：浮盈达启动线后不再达价即卖，回撤才清仓
-            trailing_pct=_trail,
-            partial_tp=_partial,
-            stop_cap_pct=_stop_cap,
-        )
-        return advice
-    except Exception:
-        return None
+# 出场跟踪编排已下沉 core/services/exit_tracking.py（T7）
+from core.services.exit_tracking import build_exit_advice_payload
 
 
 @investor_bp.route("/today", methods=["GET"])
 def today_recommendations():
-    """今日推荐（action plan）—— 按 short/mid/long 三周期分组
-
-    来源：stock_signal 表（融合分高 + 已有明确买入价/止损/止盈）
-    分组：mid/long 按 fusion_score DESC；short 先 fusion≥门控、再按低扩展度排序，
-          各取 limit 条（默认 4）；short 组另受 short_top_n=3 约束（2026-08-20 收缩）；
-          regime 天花板（RECO_REGIME_CAP 单一来源）：short cold→0/cool→2；
-          mid/long cool→2/1 收缩、cold 不归零（2026-09-15，实测 cold 是 mid/long
-          唯一正期望档）；其余 regime 走各周期默认上限
-    支持 ?date=2026-06-18 查看指定日期；?horizon=short 只看单组
-    返回 {date, market_regime, count, groups:{short,mid,long}, items(=short 组别名，兼容旧前端)}
+    """今日推荐（三周期 action plan）—— 薄路由：参数解析 + ok/fail。
+    取数/门控/regime 天花板/推荐卡片组装见 strategy.recommendation.build_today_payload。
+    支持 ?date=YYYY-MM-DD 指定日期、?horizon=short|mid|long 单组过滤、?limit=0..8。
     """
-    limit = request.args.get("limit", default=4, type=int)
-    limit = max(0, min(limit, 8))   # 允许 0：cold 大盘由 regime 设为 0
-    # short 组上限：short_top_n（2026-08-20 由 4 → 3，精选；mid/long 仍用原 limit 逻辑）
-    SHORT_CAP = min(limit, max(1, int(get_param("short_top_n"))))
+    limit = max(0, min(request.args.get("limit", default=4, type=int), 8))
     horizon_filter = (request.args.get("horizon") or "").strip().lower() or None
     if horizon_filter not in (None, "short", "mid", "long"):
         return fail("horizon 仅支持 short / mid / long")
-    target_date = request.args.get("date")
+    return ok(build_today_payload(
+        limit=limit,
+        horizon_filter=horizon_filter,
+        target_date=request.args.get("date"),
+    ))
 
-    with get_conn() as conn:
-        # 如果指定了日期，用指定日期；否则用最新日期
-        if target_date:
-            scan_date = target_date
-        else:
-            row = conn.execute("SELECT MAX(scan_date) AS d FROM stock_signal").fetchone()
-            scan_date = row["d"] if row else None
 
-        if not scan_date:
-            return ok({
-                "date": None, "count": 0, "items": [],
-                "groups": {"short": [], "mid": [], "long": []},
-                "market_regime": "unknown",
-                "meta": identity_meta(cohort="production", data_as_of=None, conn=conn),
-            })
-
-        # stock_info.pe_ttm 可能不存在（老库）—— 降级：有才启用长线估值过滤
-        has_pe_ttm = False
-        try:
-            cols = {r["name"] for r in conn.execute("PRAGMA table_info(stock_info)").fetchall()}
-            has_pe_ttm = "pe_ttm" in cols
-        except Exception:
-            has_pe_ttm = False
-
-        horizons = [horizon_filter] if horizon_filter else ["short", "mid", "long"]
-        # 板块限制：仅推主板（白名单沪 60x / 深 00x，与 is_main_board 同口径，方案 E2）
-        board_filter = main_board_filter("s.code")
-        rows_by_horizon: dict = {}
-        # 短线置信门控（S4 口径，默认 22，可 DB 覆盖）：低于门控不推荐，弱日自然出 0
-        gate = float(get_param("short_conf_gate"))
-        # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按当日 regime 自动切换，
-        # 隔日动量豁免；参数 >=99 禁用）
-        from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
-                                          short_market_gate_sql,
-                                          short_observe_bottom_sql,
-                                          long_order_clause,
-                                          long_second_order_clause,
-                                          long_pool_filter_sql,
-                                          long_sort_pool_mult)
-        t1_cond, t1_params = short_t1_filter_sql(conn, scan_date, scan_date)
-        # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量（正期望 alpha 线），
-        # 抄底/回踩类一律不推；与出场跟踪/复盘入库同口径。
-        mk_cond, mk_params = short_market_gate_sql(conn, scan_date, scan_date)
-        # 抄底融合线降观察（2026-09-06）：不占短线名额（三处出口同口径）
-        ob_cond, ob_params = short_observe_bottom_sql()
-        for hz in horizons:
-            pe_filter = ""
-            if hz == "long" and has_pe_ttm:
-                # 长线降级财务过滤：pe_ttm 有值时剔除亏损股（<=0）与明显高估股（>100）
-                pe_filter = " AND (i.pe_ttm IS NULL OR (i.pe_ttm > 0 AND i.pe_ttm <= 100))"
-            gate_sql = ""
-            gate_params: list = []
-            if hz == "short":
-                gate_sql = f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond} AND {ob_cond}"
-                gate_params = [gate, *t1_params, *mk_params, *ob_params]
-            # short 组选择标准（S4 口径 + 龙虎榜动量优先）：
-            #   1) 隔日动量信号（独立正期望 alpha 线，fusion≥30 天然过门控）优先占名额；
-            #   2) 抄底票按扩展度排序补足剩余名额（方向由 short_ext_sort_desc 控制，
-            #      当前升序=低扩展优先；2026-08-22 降序实验被真实复盘口径推翻回退，
-            #      见 short_order_clause 注释）。
-            # mid 保持融合分排序；long 2026-09-19 起用两层排序（波动收敛池 → 不追高），
-            # 见 long_order_clause 注释（原 fusion DESC 只有 3 个离散值，top4 等价随机）
-            if hz == "short":
-                order_clause = short_order_clause()
-            elif hz == "long":
-                order_clause = long_order_clause()
-            else:
-                order_clause = "COALESCE(s.fusion_score, 0) DESC"
-            # long 两层排序：先按 vol_ratio 取池，再在池内按扩展度升序取名额
-            # 第二层作用于第一层的派生表，无表别名 ⇒ 必须传空串（见函数注释）
-            _long_second = long_second_order_clause("") if hz == "long" else None
-            # long 票池过滤（趋势+斜率+低波三项必需），与复盘入库/出场跟踪同口径。
-            # 2026-09-20：票池本身长期负 alpha（−0.92%/t=−7.30），必须过滤而非只换排序键
-            _long_pool = long_pool_filter_sql() if hz == "long" else ""
-            # 今日推荐多取 3 倍候选（盈亏比不达标的「避免」级会被剔除，由替补顶上）
-            _want = limit * 3
-            _inner = f"""
-                SELECT
-                    s.code, s.name, s.price AS signal_price,
-                    s.buy_price, s.stop_loss, s.take_profit,
-                    s.fusion_score, s.vol_score, s.ma_score,
-                    s.diverge_score, s.bottom_score, s.whale_score,
-                    s.trigger_list, s.scan_date, s.trade_date,
-                    COALESCE(s.horizon, 'short') AS horizon,
-                    s.strategy,
-                    COALESCE(s.pct_above_ma20, 0) AS pct_above_ma20,
-                    -- 优先取 daily_price 最新交易日（与 confirm_trigger 同源）；
-                    -- latest_price 物化表可能滞后（增量路径曾不刷新），兜底防过期价误判突破确认
-                    COALESCE((SELECT d.close FROM daily_price d
-                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
-                             lp.close) AS latest_close,
-                    COALESCE((SELECT d.pct_change FROM daily_price d
-                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
-                             lp.pct_change) AS latest_pct,
-                    COALESCE((SELECT d.high FROM daily_price d
-                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
-                             lp.high) AS latest_high,
-                    COALESCE((SELECT d.low FROM daily_price d
-                              WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1),
-                             lp.low) AS latest_low,
-                    -- 最新价所属的行情日：前端据此提示"最新价是哪天的"，
-                    -- 停牌 / 数据滞后的票一眼可辨（2026-09-11 新增，配合最新价列展示）
-                    (SELECT d.trade_date FROM daily_price d
-                     WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1) AS latest_date,
-                    i.industry
-                FROM stock_signal s
-                LEFT JOIN latest_price lp ON lp.code = s.code
-                LEFT JOIN stock_info i ON i.code = s.code
-                WHERE s.scan_date = ?
-                  AND COALESCE(s.horizon, 'short') = ?
-                  AND (s.buy_price IS NOT NULL OR s.fusion_score IS NOT NULL)
-                  AND s.name NOT LIKE '%ST%'
-                  AND s.name NOT LIKE '%退%'
-                  -- 强势突破是首页独立栏目信号线，不占今日推荐名额
-                  AND COALESCE(s.strategy, '') != '强势突破'
-                  -- 反转首日（2026-09-24）同为独立观察栏目线，不占今日推荐名额
-                  AND COALESCE(s.strategy, '') != '反转首日'
-                  -- 缩量回踩 2026-08-26 停用（出场跟踪实证负期望，挤占正期望动量名额），
-                  -- 与退出跟踪/复盘入库同口径不占名额
-                  AND COALESCE(s.strategy, '') != '缩量回踩'
-                  {board_filter}
-                  {pe_filter}
-                  {gate_sql}
-                  {_long_pool}
-                ORDER BY {order_clause}
-                LIMIT ?
-                """
-            if _long_second:
-                # 两层：内层按波动收敛取池，外层在池内按扩展度升序取名额。
-                # ⚠ 不能写成单层字典序 ORDER BY vol_ratio ASC, pct_above_ma20 ASC
-                # （两者皆连续值 ⇒ 退化成 vol_ratio 单键，2026 年 Δ=−5.62%）。
-                _sql = (f"SELECT * FROM ({_inner}) "
-                        f"ORDER BY {_long_second} LIMIT ?")
-                _params = (scan_date, hz, *gate_params,
-                           _want * long_sort_pool_mult(), _want)
-            else:
-                _sql, _params = _inner, (scan_date, hz, *gate_params, _want)
-            rows_by_horizon[hz] = conn.execute(_sql, _params).fetchall()
-        all_rows = [r for hz in horizons for r in rows_by_horizon[hz]]
-
-        # ── 联动查询 1：当前大盘冷热（影响信号灯；多日宽度 composite，10 分钟缓存） ──
-        market_regime = _compute_market_regime(conn)
-        # 最新交易日（供前端判断推荐是否已是最新，避免盘前/非交易日反复触发重算）
-        _latest_td = conn.execute(
-            "SELECT MAX(trade_date) AS d FROM daily_price"
-        ).fetchone()["d"]
-
-        # ── 联动查询 2：当前持仓（影响"可加仓/可减仓"信号） ──
-        held_codes = {r["code"] for r in conn.execute(
-            "SELECT DISTINCT code FROM personal_position WHERE status='holding'"
-        ).fetchall()}
-
-        # ── 联动查询 3：每只推荐票近 5 个交易日的打分（趋势判断） ──
-        code_list = [r["code"] for r in all_rows]
-        score_trend: dict = {}
-        if code_list:
-            placeholders = ",".join("?" * len(code_list))
-            trend_rows = conn.execute(
-                f"""
-                SELECT code, trade_date, fusion_score AS score FROM daily_price
-                WHERE code IN ({placeholders})
-                  AND trade_date >= date('now', '-7 days')
-                ORDER BY code, trade_date DESC
-                """,
-                code_list,
-            ).fetchall()
-            for tr in trend_rows:
-                score_trend.setdefault(tr["code"], []).append(tr["score"] or 0)
-
-        def _build_item(d: dict) -> dict:
-            """把一行 stock_signal 记录加工成散户可执行的推荐卡片"""
-            # 散户视角的"建议价位"
-            entry = d.get("buy_price") or d.get("signal_price") or d.get("latest_close") or 0
-            stop = d.get("stop_loss") or 0
-            tp = d.get("take_profit") or 0
-            latest = d.get("latest_close") or 0
-            risk_pct = round(((entry - stop) / entry * 100), 1) if entry > 0 and stop > 0 else None
-            reward_pct = round(((tp - entry) / entry * 100), 1) if entry > 0 and tp > 0 else None
-            risk_reward = None
-            if risk_pct and reward_pct and risk_pct > 0:
-                risk_reward = round(reward_pct / risk_pct, 2)
-
-            # 散户可读的中文评分理由（基于 5 个子分，量纲 0~10，见 strategies.py 的 0-3→0-10 映射）
-            reasons = []
-            weaknesses = []
-            is_momo = (d.get("strategy") == "隔日动量")
-            if is_momo:
-                # 龙虎榜动量：子分（vol/ma/bottom 等）恒 0，形态类理由会误导（"量能不足/
-                # 均线未多头"与动量信号无关）。改用龙虎榜净买理由 + T+1 快进快出提示。
-                reasons.append("龙虎榜主力净买，隔日动量信号（正期望在次日）")
-                weaknesses.append(
-                    "T+1 快进快出：次日开盘买入、次日收盘了结，不恋战（持仓超 1 天易回吐）")
-            else:
-                sub_scores = [
-                    ("vol_score",     "成交量放大",   "量能不足，未出现放量突破"),
-                    ("ma_score",      "均线多头",     "均线未形成多头排列"),
-                    ("diverge_score", "量价背离修复", "量价结构未现背离修复信号"),
-                    ("bottom_score",  "底部企稳",     "底部形态尚未确认"),
-                    ("whale_score",   "主力资金流入", "未检测到主力资金明显流入"),
-                ]
-                for key, good_label, weak_label in sub_scores:
-                    val = d.get(key) or 0
-                    if val >= 6:      # 6/10 ≈ 百分制 60，认定为亮点
-                        reasons.append(good_label)
-                    elif val > 0:
-                        weaknesses.append(weak_label)
-                if not weaknesses:
-                    weaknesses.append("综合评分达标，暂无明显短板")
-
-            # 触发策略列表（解析 trigger_list 字符串）
-            triggers = []
-            tl = d.get("trigger_list")
-            if tl:
-                try:
-                    parsed = json.loads(tl)
-                    if isinstance(parsed, list):
-                        triggers = [str(x) for x in parsed]
-                except (json.JSONDecodeError, TypeError):
-                    triggers = [s.strip() for s in str(tl).split(",") if s.strip()]
-
-            # ── 新增 1：3 个挂单位置（激进/稳健/保守） ──
-            entry_strategy = None
-            if entry > 0 and latest > 0:
-                # 激进：现价 × 0.99（给 1% 折让，盘中可买到）
-                # 稳健：现价 × 0.97（小幅回踩 3%）
-                # 保守：max(建议价 × 0.94, 止损位 × 1.01)（深度回踩但不破止损）
-                aggressive = round(latest * 0.99, 2)
-                stable     = round(latest * 0.97, 2)
-                conservative_floor = max(entry * 0.94, stop * 1.01) if stop > 0 else entry * 0.94
-                conservative = round(conservative_floor, 2)
-                # 推荐挂单：默认稳健（最常见的小回踩买点）
-                recommend = "stable"
-                recommend_label = "建议挂 稳健价"
-                # 如果止损位离现价很近（< 4%），保守价 = 止损位 × 1.01 容易比稳健价高，回退到稳健
-                if conservative > stable and stop > 0 and (latest - stop) / latest < 0.05:
-                    conservative = round(stop * 1.02, 2)
-                # 推荐文案
-                pct_to_stable = round((latest - stable) / latest * 100, 1) if latest > 0 else None
-                recommend_hint = (
-                    f"挂 {stable}（较现价-{pct_to_stable}%）"
-                    if pct_to_stable is not None else f"挂 {stable}"
-                )
-                entry_strategy = {
-                    "aggressive": aggressive,
-                    "stable": stable,
-                    "conservative": conservative,
-                    "recommend": recommend,
-                    "recommend_label": recommend_label,
-                    "recommend_hint": recommend_hint,
-                }
-
-            # ── 建仓分批建议（账户规模/占比见 config.personal_config；约束口径见 utils.trade_constraints）──
-            # 静态参考预算，非账户可用现金：budget_kind=reference_budget、available_cash=None。
-            position_plan = None
-            if entry > 0:
-                from utils import trade_constraints as _tc
-                from config.personal_config import PLAN_BATCH_WEIGHTS as _BW
-                # 总金额上限：账户 × 仓位占比
-                max_amount = int(POSITION_PLAN_ACCOUNT * POSITION_PLAN_MAX_PCT)
-                # 用激进价（最保守可成交价）估算最大可买，计入 100 股整手与最低佣金
-                est_price = aggressive if entry_strategy else entry
-                afford = _tc.max_affordable_shares(max_amount, est_price)
-                _notes = ("试仓", "回踩加仓", "深度回踩加仓")
-                _triggers = ("现价附近直接买入 {n} 股", "回踩 -3% 买入 {n} 股",
-                             "深度回踩 -6% 买入 {n} 股")
-                _warning = ("静态参考预算，非账户可用现金；"
-                            "分批为 50/30/20 最大余数法整手分配")
-                if not afford["executable"] or not entry_strategy:
-                    # 1 手也买不起（或缺挂单价）：明确标记不可执行 + 原因，不生成虚构仓位
-                    position_plan = {
-                        "account_size": POSITION_PLAN_ACCOUNT,
-                        "max_position_pct": int(POSITION_PLAN_MAX_PCT * 100),
-                        "max_amount": max_amount,
-                        "executable": False,
-                        "reason": afford["reason"] or "资金不足 1 手（100 股）",
-                        "budget_kind": "reference_budget",
-                        "available_cash": None,
-                        "total_shares": 0,
-                        "total_cost_est": 0,
-                        "batches": [],
-                        "warning": _warning,
-                    }
-                else:
-                    total_shares = afford["shares"]
-                    # 50/30/20 最大余数法分配整手；keep_zeros 保证价格/备注按原始权重索引对齐
-                    per_batch = _tc.allocate_batches(total_shares, _BW, keep_zeros=True)
-                    prices = (entry_strategy["aggressive"], entry_strategy["stable"],
-                              entry_strategy["conservative"])
-                    batches = []
-                    total_cost = 0.0
-                    total_commission = 0.0
-                    for i, sh in enumerate(per_batch):
-                        if sh <= 0:
-                            continue  # 删除 0 股批次
-                        price = prices[i] if i < len(prices) else prices[-1]
-                        amount = sh * price
-                        commission = _tc.buy_commission(amount)
-                        total_cost += amount
-                        total_commission += commission
-                        batches.append({
-                            "ratio": _BW[i] if i < len(_BW) else 0,
-                            "shares": sh,
-                            "price": price,
-                            "amount": round(amount, 0),
-                            "commission": round(commission, 2),
-                            "total": round(amount + commission, 2),
-                            "note": _notes[i] if i < len(_notes) else "",
-                            "trigger": (_triggers[i] if i < len(_triggers)
-                                        else "买入 {n} 股").format(n=sh),
-                        })
-                    position_plan = {
-                        "account_size": POSITION_PLAN_ACCOUNT,
-                        "max_position_pct": int(POSITION_PLAN_MAX_PCT * 100),
-                        "max_amount": max_amount,
-                        "executable": True,
-                        "budget_kind": "reference_budget",
-                        "available_cash": None,
-                        "total_shares": total_shares,
-                        # 重新检查各批最低佣金后的总金额
-                        "total_cost_est": round(total_cost + total_commission, 0),
-                        "total_commission_est": round(total_commission, 2),
-                        "batches": batches,
-                        "warning": _warning,
-                    }
-
-            # ── 突破确认买点（回放验证：推荐后等收盘突破推荐日以来最高价再入场，
-            #    隔日胜率 45.2%→46.5%、均值 0.00%→+0.24%，是唯一正向的时机确认信号）──
-            confirm_trigger = None
-            # 隔日动量本身就是突破日盘后信号，次日开盘即入场，不适用突破确认
-            if d.get("strategy") != "隔日动量":
-                try:
-                    hi_row = conn.execute(
-                        "SELECT MAX(high) AS hi FROM daily_price WHERE code=? AND trade_date>=?",
-                        (d.get("code"), d.get("scan_date")),
-                    ).fetchone()
-                    if hi_row and hi_row["hi"]:
-                        confirm_trigger = round(hi_row["hi"] * 1.002, 2)  # 高点上方 0.2%，避免假突破
-                except Exception:
-                    confirm_trigger = None
-
-            # ── 新增 3：操作信号灯（持仓联动 + 大盘冷热 + 盈亏比） ──
-            score = d.get("fusion_score") or 0
-            is_held = d["code"] in held_codes
-            trend = score_trend.get(d["code"], [])
-            trend_up = len(trend) >= 2 and trend[0] > trend[1]  # 今日 > 昨日
-
-            signal = _calc_signal(
-                score=score,
-                risk_reward=risk_reward,
-                risk_pct=risk_pct,
-                market_regime=market_regime,
-                is_held=is_held,
-                trend_up=trend_up,
-                horizon=d.get("horizon"),
-            )
-            # ── 追高守卫（P2-3.2 重做，2026-08）：跳空过大才放弃，平开按原计划买 ──
-            # 旧语义：T+1 相对信号日收盘涨 >2.5% → 降级 wait。但隔夜跳空恰是唯一正
-            # edge（diag：T+1 OC +0.08% vs CC -0.82%，差 0.9pct 全在跳空上），好日子里
-            # 它砍掉该赚的钱。新语义：相对信号日收盘涨幅 > 止盈价（≈+8%）→ 已错过，
-            # level=sell 不追；平开/小涨保持原 buy（挂信号价/回踩支撑，不再 wait）。
-            gap_pct = None
-            if entry > 0 and latest > 0 and T1_GAP_GUARD.get("enabled", True):
-                gap_pct = (latest - entry) / entry * 100
-                # 跳空上限：优先用推荐自带止盈价（tp>entry 时 ≈ +8%）；止盈缺失回退旧阈值
-                gap_limit = ((tp / entry - 1) * 100
-                             if tp and entry > 0 and tp > entry
-                             else float(T1_GAP_GUARD.get("max_gap_pct", 2.5)))
-                if gap_pct > gap_limit:
-                    signal["level"] = "sell"
-                    signal["emoji"] = "🔴"
-                    signal["label"] = "止盈离场"
-                    signal["warnings"] = signal["warnings"] + [
-                        f"相对信号日收盘已涨 +{gap_pct:.1f}%（{entry:.2f} → {latest:.2f}），"
-                        f"已越过止盈位 +{gap_limit:.1f}%，错过买点不追，等回踩"
-                    ]
-            # 可建仓但现价还在确认线下方 → 提示等突破确认再入场
-            if signal["level"] == "buy" and confirm_trigger and latest > 0 and latest < confirm_trigger:
-                signal["warnings"] = signal["warnings"] + [
-                    f"建议等收盘站上 {confirm_trigger}（推荐后高点）再入场，突破确认后隔日胜率更高"
-                ]
-
-            return {
-                "code": d.get("code"),
-                "name": d.get("name"),
-                "industry": d.get("industry"),
-                "horizon": d.get("horizon") or "short",
-                "strategy": d.get("strategy"),
-                "fusion_score": round(d.get("fusion_score") or 0, 1),
-                "pct_above_ma20": d.get("pct_above_ma20"),
-                "latest_close": d.get("latest_close"),
-                "latest_pct": d.get("latest_pct"),
-                "latest_date": d.get("latest_date"),
-                "action_plan": {
-                    "entry_price": round(entry, 2) if entry else None,
-                    "stop_loss": round(stop, 2) if stop else None,
-                    "take_profit": round(tp, 2) if tp else None,
-                    "risk_pct": risk_pct,
-                    "reward_pct": reward_pct,
-                    "risk_reward_ratio": risk_reward,
-                },
-                "entry_strategy": entry_strategy,   # 新增
-                "position_plan": position_plan,     # 新增
-                "signal": signal,                   # 新增
-                "confirm_trigger": confirm_trigger,  # 突破确认买点（推荐日以来最高价上方）
-                "exit_advice": _get_exit_advice(d),  # P0: 出场建议
-                "reasons": reasons,
-                "weaknesses": weaknesses,
-                "triggers": triggers,
-                "scan_date": d.get("scan_date"),
-                "trade_date": d.get("trade_date"),
-            }
-
-        # 展示层 regime 天花板（config.RECO_REGIME_CAP 单一来源）：
-        #   short: cold→0 / cool→2 / 其余→short_top_n；
-        #   mid/long: cool 收缩（2/1），cold 不再归零 —— 2026-09-14 实测 cold 是
-        #   mid/long 唯一正期望档（long T+60 +2.96% n=2328），归零前提与数据相反，
-        #   且当日曾致三档全空（mid 11 条 / long 345 条达标被丢）；其余 → limit。
-        groups = {}
-        for hz in horizons:
-            items = [_build_item(dict(r)) for r in rows_by_horizon[hz]]
-            # 剔除「避免」（盈亏比<1.5 一票否决）与「止盈离场」（gap guard：
-            # 现价相对信号价已超止盈价，错过买点不追）——sell 级不占推荐名额，
-            # 由后续候选顶上或数量减少（宁缺毋滥）。
-            items = [it for it in items
-                     if it["signal"]["level"] not in ("avoid", "sell")]
-            default_cap = SHORT_CAP if hz == "short" else limit
-            cap = RECO_REGIME_CAP.get(hz, {}).get(market_regime, default_cap)
-            items = items[:cap] if cap > 0 else []
-            groups[hz] = items
-        for hz in ("short", "mid", "long"):
-            groups.setdefault(hz, [])
-        short_items = groups.get("short", [])
-        return ok({
-            "date": scan_date,
-            "latest_trade_date": _latest_td,  # 推荐是否为最新交易日由前端据此判断
-            "count": sum(len(v) for v in groups.values()),
-            "groups": _sanitize(groups),
-            "items": _sanitize(short_items),   # 兼容旧前端：items = short 组
-            "market_regime": market_regime,  # 让前端知道当前大盘冷热
-            # 身份链元数据（方案 F1）：正式主榜、数据日期、参数版本、信号模型模式
-            "meta": identity_meta(cohort="production", data_as_of=scan_date, conn=conn),
-        })
 
 
 @investor_bp.route("/today/dates", methods=["GET"])
@@ -972,2386 +134,211 @@ def available_dates():
         return ok({"dates": dates})
 
 
-def _surge_history(conn, before_scan_date, board_filter, days):
-    """次日强势观察 · 历史表现：过去 days 天内全部强势突破信号，按现实口径逐条回放。
-
-    呈现格式与「推荐复盘」一致：T+1~T+5 多期持有漂移 + 结算成绩单。
-    入场 = 信号日次日开盘价（信号收盘后才产生，只能 T+1 开盘买）；
-    出场 = **隔日了结**（`SURGE_BREAKOUT["max_hold_days"]` = 1）：
-      次日（T+1）收盘为最终出场基准 —— 收盘 ≤ 止损 → 止损、收盘 ≥ 止盈 → 止盈、
-      否则收盘了结。`judge_entry_day` 开启时建仓当日即纳入判定（跳空破位的票当天就出）。
-    次日开盘已高开越过止盈 → 放弃追高（与卡片「错过不追」同口径，不计盈亏）。
-    T+n = 买入后第 n 个交易日收盘相对买入价的涨幅**（与出场规则无关的持有漂移对照，
-    用于观察「拿更久是更好还是更差」；放弃/待买入为 None，不进统计）**。
-
-    2026-09-22 由「5 日持有 + 建仓当日不判出场」改为隔日了结（见 reference/surge-observation.md §7）。
-    全族 544 日 n=1695 实测：胜率 36.9% → 45.6%、均值 -0.19% → +0.09%、最差 -26.28% → -12.47%。
-
-    返回 (history, history_summary)。
-    """
-    max_hold = max(1, int(SURGE_BREAKOUT.get("max_hold_days", 1)))
-    judge_entry_day = bool(SURGE_BREAKOUT.get("judge_entry_day", True))
-    drift_days = max(5, max_hold)      # T+1~T+5 持有漂移始终算满 5 期，便于对比
-    # 不含当日信号日：当日那批在卡片区展示，避免同一信号双份计数
-    upper = before_scan_date or "9999-12-31"
-    hist_rows = conn.execute(
-        f"""
-        SELECT s.code, s.name, s.price AS signal_price,
-               s.stop_loss, s.take_profit, s.scan_date, s.trade_date
-        FROM stock_signal s
-        WHERE s.strategy = '强势突破'
-          AND s.scan_date < ?
-          AND s.scan_date >= date('now', ?)
-          AND s.buy_price IS NOT NULL
-          AND s.name NOT LIKE '%ST%'
-          AND s.name NOT LIKE '%退%'
-          {board_filter}
-        ORDER BY s.scan_date DESC, COALESCE(s.fusion_score, 0) DESC
-        LIMIT 300
-        """,
-        (upper, f"-{days} days"),
-    ).fetchall()
-
-    history = []
-    for r in hist_rows:
-        d = dict(r)
-        sig_day = d.get("trade_date") or d.get("scan_date")
-        stop = d.get("stop_loss")
-        tp = d.get("take_profit")
-        h = {
-            "code": d.get("code"), "name": d.get("name"),
-            "signal_date": d.get("scan_date"), "signal_price": d.get("signal_price"),
-            "stop_loss": stop, "take_profit": tp,
-            "t1_return": None, "t2_return": None,
-            "t3_return": None, "t4_return": None, "t5_return": None,
-        }
-        px = conn.execute(
-            """SELECT trade_date, open, close, high, low FROM daily_price
-               WHERE code = ? AND trade_date > ? ORDER BY trade_date ASC LIMIT ?""",
-            (d["code"], sig_day, drift_days + 1),
-        ).fetchall()
-        if not px:
-            h.update(status="pending", status_label="待买入",
-                     entry_date=None, entry_price=None,
-                     exit_date=None, exit_price=None, exit_reason=None,
-                     hold_days=None, return_pct=None)
-            history.append(h)
-            continue
-        entry_price = px[0]["open"]
-        if not entry_price or entry_price <= 0:
-            continue   # 停牌/数据缺口，无法回放也不该假装有结果
-        h["entry_date"] = px[0]["trade_date"]
-        h["entry_price"] = round(entry_price, 2)
-        if stop and entry_price <= stop:
-            # 次日开盘已跌破止损线（跳空破位）→ 买入即亏，现实不会买（开盘即可见，无前视）
-            h.update(status="skipped", status_label="放弃·开盘破止损",
-                     exit_date=None, exit_price=None, exit_reason=None,
-                     hold_days=None, return_pct=None)
-            history.append(h)
-            continue
-        if tp and entry_price > tp:
-            # 高开直接越过止盈位 → 现实中不会追，放弃（不给 T+n：根本没持仓）
-            h.update(status="skipped", status_label="放弃·高开越过止盈",
-                     exit_date=None, exit_price=None, exit_reason=None,
-                     hold_days=None, return_pct=None)
-            history.append(h)
-            continue
-        # T+n：买入后第 n 个交易日收盘相对买入价的涨幅（px[0] 即买入当日 = T+1）
-        # 与出场规则无关的「持有漂移」对照：用来观察拿更久是更好还是更差
-        for n in range(1, drift_days + 1):
-            close_n = px[n - 1]["close"] if len(px) >= n else None
-            h[f"t{n}_return"] = (round((close_n - entry_price) / entry_price * 100, 2)
-                                 if close_n and close_n > 0 else None)
-        exit_date = exit_price = exit_reason = None
-        exit_j = None
-        for j, p in enumerate(px[:max_hold], start=1):
-            close = p["close"]
-            if not close or close <= 0:
-                break
-            if j == 1 and not judge_entry_day:
-                continue   # 建仓当日不判出场（多日持仓模式；隔日了结时此分支不生效）
-            if stop and close <= stop:
-                exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "stop_loss", j
-                break
-            if tp and close >= tp:
-                exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "take_profit", j
-                break
-            if j >= max_hold:
-                exit_date, exit_price, exit_reason, exit_j = p["trade_date"], close, "max_hold_days", j
-                break
-        if exit_reason:
-            h.update(status="clear",
-                     status_label={"stop_loss": "止损", "take_profit": "止盈",
-                                   "max_hold_days": ("次日了结" if max_hold == 1 else "到期了结")}[exit_reason],
-                     exit_date=exit_date, exit_price=round(exit_price, 2),
-                     exit_reason=exit_reason,
-                     hold_days=exit_j,
-                     return_pct=round((exit_price - entry_price) / entry_price * 100, 2))
-        else:
-            last = px[min(len(px), max_hold) - 1]
-            h.update(status="hold", status_label="持有中",
-                     exit_date=None, exit_price=None, exit_reason=None,
-                     hold_days=min(len(px), max_hold),
-                     return_pct=round((last["close"] - entry_price) / entry_price * 100, 2),
-                     last_close=round(last["close"], 2))
-        history.append(h)
-
-    # —— 成绩单：仅已结算进胜率/均值（持有中、放弃不算成绩）——
-    # ⚠ 不提供「单笔收益率累加」：百分比直接相加无资金含义，且与平均值重复表达同一批数据。
-    closed = [x for x in history if x["status"] == "clear"]
-    wins = [x for x in closed if (x["return_pct"] or 0) > 0]
-    losses = [x for x in closed if (x["return_pct"] or 0) <= 0]
-    gain = sum(x["return_pct"] for x in wins)
-    absloss = abs(sum(x["return_pct"] for x in losses))
-
-    def _period(key):
-        vals = [x[key] for x in history if x.get(key) is not None]
-        if not vals:
-            return {"n": 0, "win": 0, "win_rate": None, "avg_return": None}
-        w = sum(1 for v in vals if v > 0)
-        return {"n": len(vals), "win": w,
-                "win_rate": round(w / len(vals) * 100, 1),
-                "avg_return": round(sum(vals) / len(vals), 2)}
-
-    history_summary = {
-        "total": len(history),
-        "closed": len(closed),
-        "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
-        "avg_return": round(sum(x["return_pct"] for x in closed) / len(closed), 2) if closed else None,
-        "profit_factor": round(gain / absloss, 2) if absloss > 0 else None,
-        "best_return": round(max(x["return_pct"] for x in closed), 2) if closed else None,
-        "worst_return": round(min(x["return_pct"] for x in closed), 2) if closed else None,
-        "stop_loss_count": sum(1 for x in closed if x["exit_reason"] == "stop_loss"),
-        "take_profit_count": sum(1 for x in closed if x["exit_reason"] == "take_profit"),
-        "expire_count": sum(1 for x in closed if x["exit_reason"] == "max_hold_days"),
-        "holding": sum(1 for x in history if x["status"] == "hold"),
-        "skipped": sum(1 for x in history if x["status"] == "skipped"),
-        "pending": sum(1 for x in history if x["status"] == "pending"),
-        "t1": _period("t1_return"), "t2": _period("t2_return"),
-        "t3": _period("t3_return"), "t4": _period("t4_return"),
-        "t5": _period("t5_return"),
-        "max_hold_days": max_hold,
-        "judge_entry_day": judge_entry_day,
-        "exit_mode_label": "隔日了结（T+1 收盘）" if max_hold == 1 else f"{max_hold} 日到期了结",
-        "window_days": days,
-    }
-    return history, history_summary
+# 观察信号线编排（强势突破/反转首日/反转历史/龙虎榜机构席位）已下沉
+# core/services/signal_picks.py（T7）
+from core.services.signal_picks import (
+    build_surge_picks_payload,
+    build_reversal_picks_payload,
+    build_reversal_history_payload,
+    build_lhb_jg_track_payload,
+)
 
 
 @investor_bp.route("/surge_picks", methods=["GET"])
 def surge_picks():
-    """次日强势观察（强势突破信号线）—— 首页独立栏目，不混入今日推荐
+    """次日强势观察（强势突破信号线）—— 薄路由；卡片+历史回放见 signal_picks。
 
-    目标：次日（T+1）可能涨停或大涨的高弹性观察池。
-    来源：stock_signal 表 strategy='强势突破'（盘后大阳突破扫描，仅最新交易日）。
-    验证口径（主板 OC 现实口径）：基础条件验证窗大涨率 12.9%；叠加龙虎榜
-    硬过滤（同日上榜且净买>0，用户确认宁缺毋滥）后验证窗大涨率 25%、
-    盘中触涨停 21.4%（tools/eval_lhb_surge_boost.py 两窗验证）——高风险
-    博弈型信号，前端需展示风险提示。
-    支持 ?date=2026-08-18 查看指定日期；?limit 默认 6、上限 12。
-    另返回 history / history_summary =「历史表现」（推荐复盘格式）：过去
-    ?days 天（默认 60、上限 180，与 recommend_outcome 回补窗口同尺度）全部
-    强势突破信号的逐条真实回放 + T+1~T+5 多期收益与结算成绩单；无信号日
-    也照常返回，保证成绩单不随当日有无信号消失。
+    ⚠ 2026-10-12 首页栏目已下线（面板与前端函数移除、SURGE_BREAKOUT["enabled"]=False
+      停止每日生成），本接口**保留**：历史信号仍可查成绩单，复活时无需改后端。
     """
-    limit = request.args.get("limit", default=6, type=int)
-    limit = max(0, min(limit, 12))
-    days = request.args.get("days", default=60, type=int)
-    days = max(1, min(days, 180))
-    target_date = request.args.get("date")
-
-    board_filter = main_board_filter("s.code")
-
-    with get_conn() as conn:
-        if target_date:
-            scan_date = target_date
-        else:
-            row = conn.execute(
-                "SELECT MAX(scan_date) AS d FROM stock_signal "
-                "WHERE strategy = '强势突破'"
-            ).fetchone()
-            scan_date = row["d"] if row else None
-
-        # 历史成绩单先算：它不依赖当日有无信号
-        history, history_summary = _surge_history(
-            conn, scan_date, board_filter, days)
-
-        if not scan_date or limit == 0:
-            return ok({
-                "date": scan_date, "count": 0, "items": [],
-                "history": _sanitize(history),
-                "history_summary": history_summary,
-                "days": days,
-                "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
-                        "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
-                "meta": identity_meta(cohort="observation", list_key="observe_surge",
-                                      data_as_of=scan_date, conn=conn),
-            })
-
-        rows = conn.execute(
-            f"""
-            SELECT s.code, s.name, s.price AS signal_price,
-                   s.buy_price, s.stop_loss, s.take_profit,
-                   s.fusion_score, s.trigger_list, s.scan_date, s.trade_date,
-                   -- 信号日当日涨幅（栏目卡片展示用）
-                   (SELECT d.pct_change FROM daily_price d
-                    WHERE d.code = s.code AND d.trade_date = s.trade_date) AS pct_day,
-                   -- 最新收盘/日期（判断次日是否已开盘/错过）
-                   (SELECT d.close FROM daily_price d
-                    WHERE d.code = s.code ORDER BY d.trade_date DESC LIMIT 1) AS latest_close,
-                   (SELECT MAX(d.trade_date) FROM daily_price d
-                    WHERE d.code = s.code) AS latest_date,
-                   i.industry
-            FROM stock_signal s
-            LEFT JOIN stock_info i ON i.code = s.code
-            WHERE s.scan_date = ?
-              AND s.strategy = '强势突破'
-              AND s.buy_price IS NOT NULL
-              AND s.name NOT LIKE '%ST%'
-              AND s.name NOT LIKE '%退%'
-              {board_filter}
-            ORDER BY COALESCE(s.fusion_score, 0) DESC
-            LIMIT ?
-            """,
-            (scan_date, limit),
-        ).fetchall()
-
-        items = []
-        for r in rows:
-            d = dict(r)
-            entry = d.get("buy_price") or d.get("signal_price") or 0
-            stop = d.get("stop_loss") or 0
-            tp = d.get("take_profit") or 0
-            risk_pct = round((entry - stop) / entry * 100, 1) if entry > 0 and stop > 0 else None
-            reward_pct = round((tp - entry) / entry * 100, 1) if entry > 0 and tp > 0 else None
-            risk_reward = round(reward_pct / risk_pct, 2) if risk_pct and reward_pct and risk_pct > 0 else None
-            triggers = []
-            tl = d.get("trigger_list")
-            if tl:
-                try:
-                    parsed = json.loads(tl)
-                    if isinstance(parsed, list):
-                        triggers = [str(x) for x in parsed]
-                except (json.JSONDecodeError, TypeError):
-                    triggers = [s.strip() for s in str(tl).split(",") if s.strip()]
-            # 错过判定：次日已收盘且收盘价越过止盈价（追高无意义）
-            latest_close = d.get("latest_close")
-            started = bool(d.get("latest_date") and d["latest_date"] > (d.get("trade_date") or ""))
-            missed = bool(started and latest_close and tp and latest_close > tp)
-            items.append({
-                "code": d.get("code"),
-                "name": d.get("name"),
-                "industry": d.get("industry"),
-                "fusion_score": round(d.get("fusion_score") or 0, 1),
-                "pct_day": round(d["pct_day"], 2) if d.get("pct_day") is not None else None,
-                "signal_price": entry,
-                "stop_loss": stop,
-                "take_profit": tp,
-                "risk_pct": risk_pct,
-                "reward_pct": reward_pct,
-                "risk_reward_ratio": risk_reward,
-                "latest_close": latest_close,
-                "started": started,
-                "missed": missed,
-                "triggers": triggers,
-                "scan_date": d.get("scan_date"),
-                "trade_date": d.get("trade_date"),
-            })
-
-        # 历史成绩单已在上方 `_surge_history()` 中构建完毕（推荐复盘格式：T+1~T+5 + 结算统计）
-
-        return ok({
-            "date": scan_date,
-            "count": len(items),
-            "items": _sanitize(items),
-            "history": _sanitize(history),
-            "history_summary": history_summary,
-            "days": days,
-            "note": "高风险博弈型信号（龙虎榜净买硬过滤）：验证窗次日大涨率 25%、"
-                    "触涨停 21.4%；次日开盘买入、严守止损，仓位从轻；无信号日属正常严格筛选",
-            "meta": identity_meta(cohort="observation", list_key="observe_surge",
-                                  data_as_of=scan_date, conn=conn),
-        })
+    limit = max(0, min(request.args.get("limit", default=6, type=int), 12))
+    days = max(1, min(request.args.get("days", default=60, type=int), 180))
+    return ok(build_surge_picks_payload(
+        limit=limit, days=days, target_date=request.args.get("date")))
 
 
 @investor_bp.route("/reversal_picks", methods=["GET"])
 def reversal_picks():
-    """反转首日观察（first_reversal 信号线）—— 首页独立栏目，不混入今日推荐。
-
-    背景：用户反馈「600641 已涨 4 天才推荐，反转第一天没推荐，次日买入会挂在高位」。
-    诊断 docs/short-lhb-chase-diagnosis.md；现有短线线**结构上无法在首日响**
-    （pure_bottom_v2 奖励「刚回踩」，首日大涨必被归零；隔日动量需龙虎榜上榜）。
-
-    本栏目只回答一个问题：**今天有哪些票刚完成「首次站上 MA20 + 大阳 + 放量」**——
-    即入场位最低的那一天（实测信号日中位偏离 MA20 仅 +3.8%；600641 首日 +4.90%，
-    而被推荐的 09-23 已是 +39.93%）。
-
-    ⚠ 诚实统计（tools/_diag_reversal_first_day.py ~ _v5.py，2024-07~2026-09，
-      544 交易日 / 4500 只，OC 现实口径）：
-        · n=15841、日均 29.1 只、原始 OC +0.328%、胜率 49.5%
-        · 市场中性超额 **+0.174pp（t=+2.80）**，分年 +0.23/+0.14/+0.18pp 三年一致
-        · **但胜率 49.5% 未达报告 §6C 的 52% 门槛**；扣 A 股往返成本（约 0.1%）后
-          仅余 +0.07pp ⇒ **不构成可交易的独立 alpha**
-        · 出场纪律对本线为**负贡献**（止损把胜率换到 52.4% 但期望跑输
-          「随便买一只持有 5 天」）⇒ 定位为**首日位置观察池，不是买入推荐**
-    故本线不占今日推荐名额、不计入**推荐线**胜率（与强势突破同口径隔离）；
-    但自 2026-09-24 起**纳入推荐复盘**：recommend_outcome 中以其独立 INSERT 记录，
-    在复盘里以 strategy='反转首日' **单独成组**展示（不改动短线推荐线成绩；
-    `tracked` 字段即该组汇总）。出场跟踪（routes 内嵌）仍不含本线。
-
-    数据源 = 实时 stock_signal（当日链路）∪ first_reversal_hist（历史回填表）；
-    最新信号日取两者 scan_date 最大者，同一 (code, scan_date) 以实时行为准。
-    ⇒ 当日链路尚未产出时，面板展示历史回填信号（响应体 `source` 字段标识
-    'live'/'hist'/'mixed'），卡片右侧不再空白。
-
-    ⚠ 单位陷阱：stock_signal.pct_above_ma20 是**分数**(0.051)，first_reversal_hist.ext_pct
-      是**百分数**(5.1) ⇒ SQL 内统一 *100，前端只认一个口径。
-    ⚠ 信号日涨幅用 close/prev_close 计算，**不用** daily_price.pct_change（有大量未写入的 0）。
-
-    当前已上线（FIRST_REVERSAL["enabled"]=True）；置 False 可一键下线，
-    实时链路关闭不再产出新行（历史回填行与复盘组不受影响），不报错。
-
-    支持 ?date=2026-09-24 查看指定日期；?limit 默认 12、上限 40。
-    """
-    limit = request.args.get("limit", default=12, type=int)
-    limit = max(0, min(limit, 40))
-    target_date = request.args.get("date")
-
-    # 板块过滤作用在 UNION 合并后的外层别名 r 上（实时/历史统一口径）
-    board_filter = main_board_filter("r.code")
-
-    _stats_note = ("观察池，非买入推荐：实测市场中性超额 +0.174pp(t=+2.80)、"
-                   "分年 +0.23/+0.14/+0.18pp 三年一致，但胜率 49.5% 未达 52% 门槛，"
-                   "扣成本后不足 0.1%/笔。本线唯一确定价值＝入场位低"
-                   "（信号日中位偏离 MA20 +3.8%）且只响一次。")
-    # 长期成绩单：不随当日有无信号消失（与强势突破的 history 同定位），两分支都返回
-    _stats = {
-        "n": 15841, "per_day": 29.1,
-        "oc1_mean": 0.328, "win_rate": 49.5,
-        "excess_pp": 0.174, "t": 2.80,
-        "excess_by_year": {"2024": 0.23, "2025": 0.14, "2026": 0.18},
-        "median_ext": 3.8,
-    }
-    # 实盘前向跟踪（2026-09-24 起纳入推荐复盘，独立成组）：把 recommend_outcome 中
-    # strategy='反转首日' 的行按同一套出场数学评估后汇总。样本随交易日累积。
-    try:
-        from core.outcome_tracker import get_merged_summary
-        # ⚠ limit 必须放大：该线日均 ~20 只，90 天窗可达 1500+ 条，默认 500 会截断样本
-        _tracked = get_merged_summary(90, "short", strategy="反转首日", limit=5000)
-    except Exception:
-        _tracked = {"total": 0}
-
-    # ── 数据源：实时 stock_signal（当日链路）∪ first_reversal_hist（历史回填）──────
-    # ⚠ 实时行只有在 sync 跑到本线（enabled=True 且当日有候选）后才会出现；历史行由
-    #   tools/backfill_first_reversal.py 回填，保证「无实时信号时面板仍可浏览」。
-    #   同一 (code, scan_date) 以实时行为准（与 outcome_tracker.insert_new_outcomes 同口径，
-    #   避免回填行覆盖当日链路行）。
-    _rev_live = """
-        SELECT s.code, s.name, s.scan_date, s.trade_date,
-               s.price AS signal_price, s.buy_price, s.stop_loss, s.take_profit,
-               s.fusion_score, s.trigger_list,
-               -- ⚠ pct_above_ma20 是**分数**(0.051) 而 first_reversal_hist.ext_pct 是
-               --   百分数(5.1) ⇒ 这里统一 *100，前端只认一个口径
-               CASE WHEN s.pct_above_ma20 IS NOT NULL
-                    THEN s.pct_above_ma20 * 100 END AS ext_pct,
-               s.vol_ratio, NULL AS kdj_k, 0 AS hist_src
-        FROM stock_signal s
-        WHERE s.strategy = '反转首日'
-    """
-    _rev_hist = """
-        SELECT h.code, h.name, h.scan_date, h.scan_date AS trade_date,
-               NULL AS signal_price, h.buy_price, h.stop_loss, h.take_profit,
-               h.fusion_score, NULL AS trigger_list,
-               h.ext_pct, h.vol_ratio, h.kdj_k, 1 AS hist_src
-        FROM first_reversal_hist h
-        WHERE NOT EXISTS (
-            SELECT 1 FROM stock_signal s2
-            WHERE s2.code = h.code AND s2.scan_date = h.scan_date
-              AND s2.strategy = '反转首日')
-    """
-
-    with get_conn() as conn:
-        # 该表可能尚未创建（从未跑过回填脚本）⇒ 容错，仅用实时分支
-        _has_hist = bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='first_reversal_hist'").fetchone())
-        _rev_src = (f"{_rev_live} UNION ALL {_rev_hist}" if _has_hist else _rev_live)
-
-        if target_date:
-            scan_date = target_date
-        else:
-            # 最新信号日 = 实时 ∪ 历史 的最大 scan_date（此前只查 stock_signal，
-            # 回填的历史信号因此完全不可见）
-            row = conn.execute(
-                f"SELECT MAX(scan_date) AS d FROM ({_rev_src})"
-            ).fetchone()
-            scan_date = row["d"] if row else None
-
-        if not scan_date or limit == 0:
-            return ok({
-                "date": scan_date, "count": 0, "items": [],
-                "enabled": bool(FIRST_REVERSAL.get("enabled")),
-                "stats": _stats,
-                "tracked": _tracked,
-                "days": 0,
-                "note": _stats_note + ("（信号线当前为关闭状态，"
-                                       "上线需将 FIRST_REVERSAL['enabled'] 置 True）"
-                                       if not FIRST_REVERSAL.get("enabled") else ""),
-                "meta": identity_meta(cohort="observation",
-                                      list_key="observe_first_reversal",
-                                      data_as_of=scan_date, conn=conn),
-            })
-
-        rows = conn.execute(
-            f"""
-            SELECT r.*, i.industry,
-                   -- 信号日当日涨幅：close/prev_close 权威口径。daily_price.pct_change
-                   -- 有大量未写入的 0（铁律 19），个股价位用它会把涨幅显示成 0.00%
-                   (SELECT d.close FROM daily_price d
-                    WHERE d.code = r.code AND d.trade_date = r.trade_date) AS close_day,
-                   (SELECT d.close FROM daily_price d
-                    WHERE d.code = r.code AND d.trade_date < r.trade_date
-                    ORDER BY d.trade_date DESC LIMIT 1) AS prev_close,
-                   -- 信号日全市场平均涨幅（只用于「普涨日信号偏多」提示，非个股口径）
-                   (SELECT AVG(d.pct_change) FROM daily_price d
-                    WHERE d.trade_date = r.trade_date) AS mkt_pct_day,
-                   -- 最新收盘/日期（判断次日是否已开盘/错过）
-                   (SELECT d.close FROM daily_price d
-                    WHERE d.code = r.code ORDER BY d.trade_date DESC LIMIT 1) AS latest_close,
-                   (SELECT MAX(d.trade_date) FROM daily_price d
-                    WHERE d.code = r.code) AS latest_date
-            FROM ({_rev_src}) r
-            LEFT JOIN stock_info i ON i.code = r.code
-            WHERE r.scan_date = ?
-              AND r.buy_price IS NOT NULL
-              AND COALESCE(r.name, '') NOT LIKE '%ST%'
-              AND COALESCE(r.name, '') NOT LIKE '%退%'
-              {board_filter}
-            -- 次排序按入场偏离升序（越低越是「首日」），与报告实测的「越低并不更优」
-            -- 并不冲突——本栏目排序服务于「找最低入场位」，不服务于收益预测
-            ORDER BY COALESCE(r.fusion_score, 0) DESC,
-                     COALESCE(r.ext_pct, 999) ASC
-            LIMIT ?
-            """,
-            (scan_date, limit),
-        ).fetchall()
-
-        items = []
-        for r in rows:
-            d = dict(r)
-            entry = d.get("buy_price") or d.get("signal_price") or 0
-            stop = d.get("stop_loss") or 0
-            tp = d.get("take_profit") or 0
-            risk_pct = round((entry - stop) / entry * 100, 1) if entry > 0 and stop > 0 else None
-            reward_pct = round((tp - entry) / entry * 100, 1) if entry > 0 and tp > 0 else None
-            risk_reward = (round(reward_pct / risk_pct, 2)
-                           if risk_pct and reward_pct and risk_pct > 0 else None)
-            triggers = []
-            tl = d.get("trigger_list")
-            if tl:
-                try:
-                    parsed = json.loads(tl)
-                    if isinstance(parsed, list):
-                        triggers = [str(x) for x in parsed]
-                except (json.JSONDecodeError, TypeError):
-                    triggers = [s.strip() for s in str(tl).split(",") if s.strip()]
-            # 历史回填行没有 trigger_list（first_reversal_hist 不存文本）⇒ 用与
-            # scan_first_reversal 同口径重建，避免历史卡片信息密度低于实时卡片
-            if not triggers and d.get("hist_src"):
-                _ext = d.get("ext_pct")
-                if _ext is not None:
-                    triggers.append(
-                        f"反转首日：首次站上 MA20（偏离 {_ext:+.1f}%，入场位低）")
-                _vr = d.get("vol_ratio")
-                if _vr is not None:
-                    triggers.append(f"量比 {_vr:.1f}（放量确认）")
-                _kk = d.get("kdj_k")
-                if _kk is not None:
-                    _tag = "⚠ 高位" if _kk > 80 else ("低位" if _kk < 20 else "")
-                    triggers.append(
-                        f"KDJ K={_kk:.0f}" + (f" · {_tag}" if _tag else ""))
-            # 信号日涨幅：close/prev_close 权威口径（勿用 pct_change，铁律 19）
-            _cd, _pc = d.get("close_day"), d.get("prev_close")
-            pct_day = (round((_cd / _pc - 1) * 100, 2)
-                       if _cd and _pc and _pc > 0 else None)
-            latest_close = d.get("latest_close")
-            started = bool(d.get("latest_date") and
-                           d["latest_date"] > (d.get("trade_date") or ""))
-            # 错过判定：次日已收盘且收盘价越过止盈价（首日优势已消失）
-            missed = bool(started and latest_close and tp and latest_close > tp)
-            items.append({
-                "code": d.get("code"),
-                "name": d.get("name"),
-                "industry": d.get("industry"),
-                "fusion_score": round(d.get("fusion_score") or 0, 1),
-                "pct_day": pct_day,
-                "mkt_pct_day": (round(d["mkt_pct_day"], 2)
-                                if d.get("mkt_pct_day") is not None else None),
-                "ext_pct": (round(d["ext_pct"], 2)
-                            if d.get("ext_pct") is not None else None),
-                "vol_ratio": (round(d["vol_ratio"], 2)
-                              if d.get("vol_ratio") is not None else None),
-                "kdj_k": (round(d["kdj_k"], 1)
-                          if d.get("kdj_k") is not None else None),
-                "signal_price": entry,
-                "stop_loss": stop,
-                "take_profit": tp,
-                "risk_pct": risk_pct,
-                "reward_pct": reward_pct,
-                "risk_reward_ratio": risk_reward,
-                "latest_close": latest_close,
-                "started": started,
-                "missed": missed,
-                "triggers": triggers,
-                "scan_date": d.get("scan_date"),
-                "trade_date": d.get("trade_date"),
-                # 'live' = 当日链路产出；'hist' = 历史回填（面板据此提示来源）
-                "source": "hist" if d.get("hist_src") else "live",
-            })
-
-        _src_kinds = {it["source"] for it in items}
-        return ok({
-            "date": scan_date,
-            "count": len(items),
-            "items": _sanitize(items),
-            "enabled": bool(FIRST_REVERSAL.get("enabled")),
-            "source": (None if not _src_kinds
-                       else ("hist" if _src_kinds == {"hist"}
-                             else ("live" if _src_kinds == {"live"} else "mixed"))),
-            "stats": _stats,
-            "tracked": _tracked,
-            "note": _stats_note,
-            "meta": identity_meta(cohort="observation",
-                                  list_key="observe_first_reversal",
-                                  data_as_of=scan_date, conn=conn),
-        })
-
-
-# ── 反转首日 · 出场原因 →（中文标签, 语义色调）────────────────────────────
-# 色调只表达「这笔交易的结果性质」，由前端映射成**本项目红涨绿跌**的配色：
-#   positive = 红（止盈类，赚了）/ negative = 绿（止损，亏了）
-#   neutral  = 灰（到期了结，无所谓好坏）/ holding = 金（尚在持仓，未结算）
-# ⚠ 不要抄 `recommendations/history` 前端那套 —— 那里用 var(--green) 画「已止盈」，
-#   与本项目 A 股约定（红涨绿跌）相反，属历史遗留；本栏目一律用语义色。
-_REV_EXIT_META = {
-    "take_profit":   ("止盈离场", "positive"),
-    "trailing_stop": ("移动止盈离场", "positive"),
-    "stop_loss":     ("止损离场", "negative"),
-    "max_hold_days": ("到期了结", "neutral"),
-    "no_fill":       ("未建仓", "neutral"),
-}
-# 出场原因固定展示顺序（分布条用；未列出的原因排在末尾）
-_REV_EXIT_ORDER = ["take_profit", "trailing_stop", "stop_loss",
-                   "max_hold_days", "no_fill"]
+    """反转首日观察（first_reversal 信号线）—— 薄路由；编排见 signal_picks。"""
+    limit = max(0, min(request.args.get("limit", default=12, type=int), 40))
+    return ok(build_reversal_picks_payload(
+        limit=limit, target_date=request.args.get("date")))
 
 
 @investor_bp.route("/reversal_history", methods=["GET"])
 def reversal_history():
-    """反转首日观察 · 历史表现：近 N 天逐条明细 + 成绩单（**独立成组**）。
-
-    GET /api/investor/reversal_history?days=60&limit=600
-        ?days  统计窗口（默认 60，上限 180；与「推荐复盘」「次日强势观察」同尺度）
-        ?limit 返回明细上限（默认 600，上限 2000；取数上限恒为 5000 不受其影响）
-
-    ⚠ 与「次日强势观察」的 history 有意不同：那个接口**自己回放**（因为强势突破
-      不进复盘表）；本线已经写入 recommend_outcome，就必须**直接读复盘表** ——
-      再写一套独立回放会造出第二套出场口径，正是铁律 18 禁止的。
-      于是本列表与上方「实盘跟踪」成绩单**同源同数学**，两者数值必然一致。
-      实现上把同一份明细同时喂给成绩单（get_merged_summary 的 items 形参），
-      彻底杜绝「列表 424 条、成绩单 425 条」这类分叉。
-
-    口径（与实盘跟踪 / 今日推荐完全一致）：
-      · 板块 —— 只主板。小资金未开通科创/创业板权限（config/personal_config.py
-        的 MAIN_BOARD_ONLY），是**可交易性硬约束**而非偏好；本线收益高度集中于
-        创业板（未过滤时 n=466 胜率 58.9%/均 +2.38% vs 主板 47.1%/+0.79%），
-        不过滤等于拿买不到的票抬成绩。
-      · 入场 = 信号日**次日开盘**（本线的首日窗口就是次日的开盘那一次）；
-        出场 = 移动止盈 / 止损 / 到期。⚠ 本线**豁免回踩确认入场**，
-        否则它就不再是「首日」而是另一条线（见 _evaluate_short）。
-      · 未结算行（exit_reason 为空）仍列出并标「持仓中」，计入 total、
-        **不计入胜率**（与 get_merged_summary 的最终收益口径一致）。
-
-    ext_pct / vol_ratio / kdj_k 由 first_reversal_hist ∪ stock_signal 补
-    （复盘表不存这三列），实时行优先 ⇒ 列表能回答「这只票凭什么在列表里」。
-    ⚠ 单位：stock_signal.pct_above_ma20 是分数(0.051) ⇒ *100 后才与
-      first_reversal_hist.ext_pct（百分数）同口径。
-
-    定位提醒（务必与数据一起读）：本线**不是买入推荐**，是**入场位置观察池**。
-    实测超额 +0.174pp(t=+2.80)、胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔。
-    """
+    """反转首日历史明细（读 recommend_outcome）—— 薄路由；编排见 signal_picks。"""
     days = max(5, min(request.args.get("days", default=60, type=int), 180))
     limit = max(20, min(request.args.get("limit", default=600, type=int), 2000))
-
     try:
-        from core.outcome_tracker import (get_merged_outcome_list,
-                                          get_merged_summary)
-        # 取数上限恒 5000：本线主板口径日均约 10 条，180 天窗最多 ~1800 条，
-        # 5000 足够且不会截断（截断会静默改小样本 = 成绩单失真）。
-        merged = get_merged_outcome_list(days, "short", limit=5000,
-                                         strategy="反转首日")
-        summary = get_merged_summary(days, "short", strategy="反转首日",
-                                     limit=5000, items=merged)
+        return ok(build_reversal_history_payload(days=days, limit=limit))
     except Exception as e:
         return fail(f"反转首日复盘读取失败: {e}", 500)
-
-    # ── 补 ext/kdj：复盘表不存这三列，得回信号源取 ─────────────────────
-    # 先 hist 后 live ⇒ 同一 (code, scan_date) 以实时行为准（与
-    # outcome_tracker.insert_new_outcomes 的 NOT EXISTS 反连接同口径）。
-    meta = {}
-    try:
-        with get_conn() as conn:
-            _has_hist = bool(conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='first_reversal_hist'").fetchone())
-            if _has_hist:
-                for r in conn.execute(
-                        "SELECT code, scan_date, ext_pct, vol_ratio, kdj_k "
-                        "FROM first_reversal_hist WHERE scan_date >= date('now', ?)",
-                        (f"-{days} days",)):
-                    meta[(r["code"], r["scan_date"])] = {
-                        "ext_pct": r["ext_pct"], "vol_ratio": r["vol_ratio"],
-                        "kdj_k": r["kdj_k"]}
-            for r in conn.execute(
-                    "SELECT code, scan_date, pct_above_ma20, vol_ratio, "
-                    "       trigger_list FROM stock_signal "
-                    "WHERE strategy = '反转首日' AND scan_date >= date('now', ?)",
-                    (f"-{days} days",)):
-                # stock_signal 没有 kdj_k 列、vol_ratio 也未写入 ⇒ 从 trigger 文本兜底：
-                # 「量比 2.2（放量确认）」「KDJ K=52 / D=50」（scan_first_reversal 的固定文案）。
-                # 解析不到就留 None（前端显示 --）—— 显示层不做数值臆造。
-                _tl = r["trigger_list"] or ""
-                _vr = r["vol_ratio"]
-                if _vr is None:
-                    _m = re.search(r"量比\s*([\d.]+)", _tl)
-                    _vr = float(_m.group(1)) if _m else None
-                _mk = re.search(r"KDJ\s*K\s*=\s*([\d.]+)", _tl)
-                meta[(r["code"], r["scan_date"])] = {
-                    "ext_pct": (r["pct_above_ma20"] * 100
-                                if r["pct_above_ma20"] is not None else None),
-                    "vol_ratio": _vr,
-                    "kdj_k": float(_mk.group(1)) if _mk else None}
-    except Exception:
-        meta = {}   # 补充信息失败不得影响主列表
-
-    def _r2(v):
-        return round(v, 2) if v is not None else None
-
-    items = []
-    for it in merged[:limit]:
-        code, sd = it.get("code"), it.get("scan_date")
-        m = meta.get((code, sd), {})
-        reason = it.get("exit_reason")
-        if reason:
-            label, tone = _REV_EXIT_META.get(reason, (reason, "neutral"))
-        else:
-            label, tone = "持仓中", "holding"
-        items.append({
-            "code": code,
-            "name": it.get("name"),
-            # first_scan_date 与 scan_date 对本线恒等（同票不会连两天首破 MA20），
-            # 仍按复盘口径取 first_scan_date，便于与「推荐复盘」列表对齐
-            "scan_date": it.get("first_scan_date") or sd,
-            "entry_price": _r2(it.get("entry_price")),
-            "stop_loss": _r2(it.get("stop_loss")),
-            "take_profit": _r2(it.get("take_profit")),
-            "ext_pct": _r2(m.get("ext_pct")),
-            "vol_ratio": _r2(m.get("vol_ratio")),
-            "kdj_k": _r2(m.get("kdj_k")),
-            "fusion_score": round(it.get("fusion_score") or 0, 1),
-            "t1_return": _r2(it.get("t1_return")),
-            "t2_return": _r2(it.get("t2_return")),
-            "t3_return": _r2(it.get("t3_return")),
-            "t5_return": _r2(it.get("t5_return")),
-            "exit_return": _r2(it.get("exit_return")),
-            "exit_reason": reason,
-            "exit_date": it.get("exit_date"),
-            "exit_label": label,
-            "exit_tone": tone,
-            "hit_stop": bool(it.get("hit_stop")),
-            "hit_tp": bool(it.get("hit_tp")),
-            "settled": bool(it.get("exit_date") and reason and it.get("exit_return") is not None),
-            "signal_reference_price": _r2(it.get("entry_price")),
-            "reference_kind": "legacy_signal_reference",
-            "exec_entry_price": None,
-            "data_source": "legacy_snapshot",
-        })
-
-    # 出场原因分布。空 reason = 未结算（持仓中/待建仓），恒排最后。
-    _cnt = Counter(it["exit_reason"] for it in items)   # 含 None 键
-    breakdown = []
-    for k in _REV_EXIT_ORDER + sorted(x for x in _cnt
-                                      if x and x not in _REV_EXIT_ORDER):
-        if _cnt.get(k):
-            label, tone = _REV_EXIT_META.get(k, (k, "neutral"))
-            breakdown.append({"reason": k, "label": label,
-                              "tone": tone, "n": _cnt[k]})
-    if _cnt.get(None):
-        breakdown.append({"reason": None, "label": "持仓中/待建仓",
-                          "tone": "holding", "n": _cnt[None]})
-
-    _dates = [it["scan_date"] for it in items if it.get("scan_date")]
-    return ok(_sanitize({
-        "days": days,
-        "limit": limit,
-        "range": {"start": min(_dates) if _dates else None,
-                  "end": max(_dates) if _dates else None},
-        "total": len(items),
-        "truncated": len(merged) > len(items),
-        "summary": summary,
-        "exit_breakdown": breakdown,
-        "items": items,
-        "note": ("反转首日观察池的历史明细（主板口径，与上方实盘跟踪同源同数学）："
-                 "信号日次日开盘建仓 → 移动止盈/止损/到期。"
-                 "本线不是买入推荐 —— 实测超额 +0.174pp(t=+2.80)、"
-                 "胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔。"),
-    }))
 
 
 @investor_bp.route("/lhb_jg_track", methods=["GET"])
 def lhb_jg_track():
-    """龙虎榜「机构专用席位」建仓跟踪 —— 资金动向观察，**不是收益信号**。
-
-    ⚠ 诊断结论（tools/_diag_lhb_jg.py + _diag_lhb_jg2.py，2024-07~2026-09 / 13350 样本）：
-      机构买卖方向对次日收益**无区分度**，不要当买入信号用：
-        · 单日：机构净买 +0.72% vs 机构净卖 +0.66%，Δ=+0.058pp t=+0.53（不显著）
-        · 同「近20日上榜>=4次」下：机构净买 +0.94% vs **机构净卖 +1.19%**（方向反了）
-        · 「近20日机构净买>=4次」+1.22%（t=+2.24）看似显著，但剔除任一年即不显著（铁律 3 不过）
-      真正有效的是「**频繁上榜**」（活跃度），与机构方向无关。
-    故本接口定位为**成本位与资金动向参考**：机构在什么价位建了什么仓，
-    用于判断「现价相对机构成本的位置」（跌破成本区＝机构浮亏，是风险提示而非买点）。
-
-    数据源：stock_lhb_jg_detail 的**单日口径**（window_days=1）。
-    同一股票同日若只有「连续三个交易日」口径则不进本视图，避免把 3 日累计额当单日额。
-
-    价格分位：
-      cost_est  = Σ(机构净买额 × 当日收盘价) / Σ(机构净买额)，只对净买为正的上榜日加权
-                  ⇒ **机构建仓成本估算**（接口不提供真实成交价，此为可得的最优近似）
-      band      = 各上榜日 [最低, 最高] 的极值区间（前复权，与现价同源可比）
-      一律取 daily_price 前复权价，不用接口自带 close_price（原始价，混价源会出错）
-
-    参数：?days 回看交易日（默认 20，上限 120）/ ?min_cnt 最少净买次数（默认 2）
-          / ?limit 上限（默认 30，上限 100）/ ?sort cum_ratio|vs_cost|cost_est
-    """
+    """龙虎榜机构席位建仓跟踪（成本位参考，非收益信号）—— 薄路由；编排见 signal_picks。"""
     days = max(5, min(request.args.get("days", default=20, type=int), 120))
     min_cnt = max(1, min(request.args.get("min_cnt", default=2, type=int), 20))
     limit = max(1, min(request.args.get("limit", default=30, type=int), 100))
-    sort_key = request.args.get("sort", default="cum_ratio")
-    # 本地 daily_price 不覆盖科创板(688)/北交所(920、8xxxxx)，这些票算不出成本位；
-    # 默认只留有行情的票（成本/现价齐全才有「价位」可言），可用 only_priced=0 放开。
     only_priced = request.args.get("only_priced", default=1, type=int) == 1
-
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT MAX(trade_date) AS d FROM stock_lhb_jg_detail").fetchone()
-        as_of = row["d"] if row else None
-        if not as_of:
-            return ok({"as_of": None, "window_days": days, "count": 0, "items": [],
-                       "note": "机构席位表暂无数据，先执行 tools/backfill_lhb_jg.py"})
-
-        # 窗口起点 = 最新交易日往前 days-1 个交易日
-        start = conn.execute(
-            "SELECT MIN(trade_date) FROM (SELECT DISTINCT trade_date FROM daily_price "
-            "WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT ?)",
-            (as_of, days)).fetchone()[0] or as_of
-
-        # 一次 JOIN 取窗口内全部单日口径记录 + 当日前复权行情
-        rows = conn.execute(
-            """
-            SELECT j.trade_date, j.code, j.name, j.jg_net_buy, j.jg_net_ratio,
-                   j.buyer_jg_count, j.seller_jg_count, j.float_mkt_cap,
-                   j.reason, j.turnover_rate,
-                   d.close AS close, d.low AS low, d.high AS high,
-                   d.pct_change AS pct
-            FROM stock_lhb_jg_detail j
-            LEFT JOIN daily_price d
-                   ON d.code = j.code AND d.trade_date = j.trade_date
-            WHERE j.window_days = 1 AND j.trade_date >= ? AND j.trade_date <= ?
-            ORDER BY j.code, j.trade_date
-            """, (start, as_of)).fetchall()
-
-        latest = {r["code"]: dict(r) for r in conn.execute(
-            "SELECT code, close, trade_date, pct_change FROM latest_price")}
-        name_map = {r["code"]: r["name"] for r in conn.execute(
-            "SELECT code, name FROM stock_info")}
-
-    agg = {}
-    for r in rows:
-        code = r["code"]
-        net = r["jg_net_buy"] or 0
-        a = agg.setdefault(code, {
-            "code": code, "name": name_map.get(code) or r["name"] or code,
-            "cnt_in": 0, "cnt_total": 0, "cum_net": 0.0, "cum_out": 0.0,
-            "_wsum": 0.0, "_wpx": 0.0, "_lo": None, "_hi": None,
-            "buyers_max": 0, "sellers_max": 0, "last_net": None,
-            "first_date": r["trade_date"], "last_date": r["trade_date"],
-            "float_mkt_cap": r["float_mkt_cap"], "reasons": [], "signals": [],
-        })
-        a["cnt_total"] += 1
-        a["last_date"] = r["trade_date"]
-        a["buyers_max"] = max(a["buyers_max"], r["buyer_jg_count"] or 0)
-        a["sellers_max"] = max(a["sellers_max"], r["seller_jg_count"] or 0)
-        if r["float_mkt_cap"]:
-            a["float_mkt_cap"] = r["float_mkt_cap"]
-        if r["reason"] and r["reason"] not in a["reasons"]:
-            a["reasons"].append(r["reason"])
-        close = r["close"]
-        if close and close > 0:
-            if a["_lo"] is None or (r["low"] and r["low"] < a["_lo"]):
-                a["_lo"] = r["low"] or close
-            if a["_hi"] is None or (r["high"] and r["high"] > a["_hi"]):
-                a["_hi"] = r["high"] or close
-        if net > 0:
-            a["cnt_in"] += 1
-            a["cum_net"] += net
-            a["last_net"] = net
-            if close and close > 0:
-                a["_wsum"] += net
-                a["_wpx"] += net * close
-            a["signals"].append({
-                "date": r["trade_date"], "net": round(net, 0),
-                "close": round(close, 2) if close else None,
-                "pct": _sanitize(r["pct"]),
-                "buyers": r["buyer_jg_count"], "sellers": r["seller_jg_count"],
-                "net_ratio": round(r["jg_net_ratio"], 2) if r["jg_net_ratio"] is not None else None,
-                "reason": r["reason"],
-            })
-        else:
-            a["cum_out"] += -(net) if net < 0 else 0.0
-
-    items = []
-    n_no_price = 0
-    for code, a in agg.items():
-        if a["cnt_in"] < min_cnt:
-            continue
-        cost = (a["_wpx"] / a["_wsum"]) if a["_wsum"] > 0 else None
-        fmc = (a["float_mkt_cap"] or 0) * 1e8           # 亿元 → 元
-        lp = latest.get(code) or {}
-        last_close = lp.get("close")
-        if only_priced and not (cost and last_close):
-            n_no_price += 1
-            continue
-        items.append({
-            "code": code, "name": a["name"],
-            "cnt_in": a["cnt_in"], "cnt_total": a["cnt_total"],
-            "cum_net": round(a["cum_net"], 0),
-            "cum_out": round(-a["cum_out"], 0),
-            "cum_ratio": round(a["cum_net"] / fmc * 100, 3) if fmc > 0 else None,
-            "cost_est": round(cost, 2) if cost else None,
-            "band_low": round(a["_lo"], 2) if a["_lo"] else None,
-            "band_high": round(a["_hi"], 2) if a["_hi"] else None,
-            "last_close": round(last_close, 2) if last_close else None,
-            "last_price_date": lp.get("trade_date"),
-            "last_close_pct": _sanitize(lp.get("pct_change")),
-            "vs_cost": (round((last_close - cost) / cost * 100, 2)
-                        if (cost and last_close and cost > 0) else None),
-            "buyers_max": a["buyers_max"], "sellers_max": a["sellers_max"],
-            "float_mkt_cap": a["float_mkt_cap"],
-            "first_date": a["first_date"], "last_date": a["last_date"],
-            "reasons": a["reasons"][:3],
-            "signals": a["signals"][-8:],
-        })
-
-    def _key(it):
-        if sort_key == "vs_cost":
-            return it["vs_cost"] if it["vs_cost"] is not None else 9e9
-        if sort_key == "cost_est":
-            return it["cost_est"] if it["cost_est"] is not None else 9e9
-        return -(it["cum_ratio"] if it["cum_ratio"] is not None else 0)
-
-    items.sort(key=_key)
-    items = items[:limit]
-
-    n_above = sum(1 for x in items if (x["vs_cost"] or 0) > 0)
-    return ok({
-        "as_of": as_of, "window_days": days, "start_date": start,
-        "count": len(items), "min_cnt": min_cnt, "sort": sort_key,
-        "above_cost": n_above, "below_cost": len(items) - n_above,
-        "skipped_no_price": n_no_price,
-        "note": "资金动向与成本位参考，**非收益信号**：实测机构买卖方向对次日收益无区分度"
-                "（净买 +0.72% vs 净卖 +0.66%，Δ 不显著）；有效的是「频繁上榜」本身。"
-                "cost_est 为按净买额加权的上榜日收盘价估算，非机构真实成交价。"
-                "科创板/北交所因无本地行情未纳入。",
-        "items": _sanitize(items),
-    })
+    return ok(build_lhb_jg_track_payload(
+        days=days, min_cnt=min_cnt, limit=limit,
+        sort_key=request.args.get("sort", default="cum_ratio"),
+        only_priced=only_priced))
 
 
 @investor_bp.route("/exit_advice", methods=["GET"])
 def exit_advice():
-    """出场跟踪：对 2026-07-20 起推荐的出场状态（按 short/mid/long 三周期分组）
-
-    GET /api/investor/exit_advice
-    口径：与「推荐复盘 / 今日推荐」对齐（short 组 = 隔日动量优先 + 低扩展度补足 +
-         fusion≥short_conf_gate 门控 + 止盈离场剔除；mid/long = fusion_score 前 4）；
-         起始日为 EXIT_TRACK_START_DATE，此前的推荐放弃，无结束时间限制——未卖出的持续跟踪直到卖出；
-         同一股票同一周期在交易日上连续推荐时合并为一条：推荐日取最新一次、
-         持仓天数从最早一次累计（买入价=最早推荐日次日开盘价）、止损/止盈按最新一次判定；
-         开始持有 = 推荐日，买入价 = 推荐日之后首个交易日的开盘价；
-         卖出条件 = 推荐自带止损/止盈价 + 按周期持仓上限（短线10/中线60/长线不限）。
-         抄底类短线（strategy != '隔日动量'，short_pullback_entry=1）为回踩确认入场：
-         T+1 起 short_entry_window_days 个交易日内 low 触及买点（信号日收盘价）才成交，
-         成交价 = min(买点, 当日开盘)；未回踩 → watching/expired，不计入收益统计
-         （2026-09-05 落地，根因：次日开盘追反弹高点为负期望，见推荐复盘诊断）。
-    返回 {items(平铺), groups:{short,mid,long}, summary, start_date}，状态 hold/clear。
+    """出场跟踪（short/mid/long 分组）—— 薄路由。
+    选股口径/连续段合并/回踩入场/移动止盈/收益统计全部在
+    core.services.exit_tracking.build_exit_advice_payload（与今日推荐/复盘同口径）。
     """
     try:
-        from strategy.exit_advisor import evaluate_exit_by_prices, get_max_hold
-        from core.db import get_conn as _get_conn
-        import pandas as pd
-
-        # 板块限制：与「今日推荐」口径一致
-        board_filter = main_board_filter("s.code")
-
-        # 选股口径与「推荐复盘（recommend_outcome）/ 今日推荐」完全一致（2026-08 短线 8→4 改造）：
-        #   short = 隔日动量信号优先占名额 + 低扩展度（pct_above_ma20 升序）补足 +
-        #           fusion≥short_conf_gate 门控 + 止盈离场（gap guard）剔除；
-        #   mid/long = fusion_score 前 4。
-        # 此前 exit_advice 仍用旧 fusion 排序（无门控/无剔除），与推荐复盘不一致——旧算法残余，已对齐。
-        gate = float(get_param("short_conf_gate"))
-        # gap guard 止盈离场。
-        # ⚠ 2026-09-19：历史链路默认禁用（history_gap_guard 默认 0）——原逻辑用
-        # latest_price.close（当前最新价）回溯历史信号 = 用未来价格剔除历史样本，
-        # 使「信号发出后涨过止盈价」的赢家被系统性踢出跟踪（实测名额内 short 剔 8.9%，
-        # 被剔票 T+5 +8.49%/胜率 90% vs 保留票 -0.26%/43.9%）；且实时语义下恒不触发。
-        # 详见 config/strategy_params.py::history_gap_guard 注释。
-        gap_enabled = (bool(T1_GAP_GUARD.get("enabled", True))
-                       and bool(int(get_param("history_gap_guard") or 0)))
-        # gap guard 止盈离场（与 core/outcome_tracker.insert_new_outcomes 同口径：现价相对
-        # 信号价涨幅 > 止盈涨幅 = 已错过买点不追，不纳入出场跟踪）；T1_GAP_GUARD 关闭时恒 0
-        if gap_enabled:
-            gap_sql = ("CASE WHEN lp.close IS NOT NULL AND lp.close > 0 "
-                       "AND s.buy_price > 0 "
-                       "AND s.take_profit IS NOT NULL AND s.take_profit > s.buy_price "
-                       "AND (lp.close / s.buy_price - 1) > (s.take_profit / s.buy_price - 1) "
-                       "THEN 1 ELSE 0 END")
-        else:
-            gap_sql = "0"
-
-        with _get_conn() as conn:
-            # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
-            # 隔日动量豁免；参数 >=99 禁用）——各信号日按当天历史 regime 判定
-            from core.outcome_tracker import (short_t1_filter_sql, short_order_clause,
-                                              short_market_gate_sql,
-                                              short_observe_bottom_sql,
-                                              long_order_clause,
-                                              long_second_order_clause,
-                                              long_pool_filter_sql,
-                                              long_sort_pool_mult)
-            t1_cond, t1_params = short_t1_filter_sql(conn, EXIT_TRACK_START_DATE)
-            # 大盘走弱闸门（2026-08-26）：弱市日只保留隔日动量，与今日推荐同口径
-            mk_cond, mk_params = short_market_gate_sql(conn, EXIT_TRACK_START_DATE)
-            # 抄底融合线降观察（2026-09-06）：不占短线名额（三处出口同口径）
-            ob_cond, ob_params = short_observe_bottom_sql()
-            horizon_specs = {
-                # short：龙虎榜动量信号优先占名额，抄底票按扩展度排序补足
-                # （方向由 short_ext_sort_desc 控制，见 short_order_clause；
-                # 与今日推荐/推荐复盘同口径）
-                "short": (short_order_clause(),
-                          f" AND s.fusion_score >= ? AND {t1_cond} AND {mk_cond} AND {ob_cond}",
-                          [gate, *t1_params, *mk_params, *ob_params]),
-            "mid":   ("COALESCE(s.fusion_score, 0) DESC", "", []),
-            # long 2026-09-20 起：「低波票池过滤 + 连续排序键」（见 long_pool_filter_sql /
-            # long_order_clause 注释；原 score>=2.0 票池长期超额 −0.92%/t=−7.30）
-            "long":  (long_order_clause(), long_pool_filter_sql(), []),
-        }
-            # 每日名额上限：short 取 short_top_n（2026-08-20 由 4 → 3），mid/long 保持前 4
-            caps = {"short": max(1, int(get_param("short_top_n"))), "mid": 4, "long": 4}
-            # 2026-07-20 起的推荐记录（与「推荐复盘」同口径：每日名额 short=3 / mid/long=4）
-            signals = []
-            for hz, (order_clause, gate_sql_cond, gate_params) in horizon_specs.items():
-                _base_where = f"""
-                        FROM stock_signal s
-                        LEFT JOIN latest_price lp ON lp.code = s.code
-                        WHERE s.scan_date >= ?
-                          AND COALESCE(s.horizon, 'short') = ?
-                          AND s.buy_price IS NOT NULL
-                          AND s.buy_price > 0
-                          AND s.name NOT LIKE '%ST%'
-                          AND s.name NOT LIKE '%退%'
-                          -- 强势突破是首页独立栏目信号线，不纳入出场跟踪
-                          AND COALESCE(s.strategy, '') != '强势突破'
-                          -- 反转首日（2026-09-24）同为独立观察栏目线，不纳入出场跟踪
-                          AND COALESCE(s.strategy, '') != '反转首日'
-                          -- 缩量回踩 2026-08-26 停用（实证负期望），不纳入出场跟踪
-                          AND COALESCE(s.strategy, '') != '缩量回踩'
-                          AND ({gap_sql}) = 0
-                          {board_filter}
-                          {gate_sql_cond}"""
-                # 第二层作用于第一层的派生表，无表别名 ⇒ 必须传空串（见函数注释）
-                _long_second = (long_second_order_clause("")
-                                if hz == "long" else None)
-                if _long_second:
-                    # long 两层排序（与复盘入库 / 今日推荐同口径，见 long_order_clause）
-                    _pool = caps[hz] * long_sort_pool_mult()
-                    signals += conn.execute(f"""
-                        SELECT code, name, scan_date, buy_price,
-                               stop_loss, take_profit, fusion_score, horizon, strategy
-                        FROM (
-                            SELECT code, name, scan_date, buy_price, stop_loss,
-                                   take_profit, fusion_score, horizon, strategy,
-                                   pct_above_ma20,
-                                   ROW_NUMBER() OVER (
-                                       PARTITION BY scan_date, horizon
-                                       ORDER BY {_long_second}
-                                   ) AS rn
-                            FROM (
-                                SELECT s.code, s.name, s.scan_date, s.buy_price,
-                                       s.stop_loss, s.take_profit, s.fusion_score,
-                                       COALESCE(s.horizon, 'short') AS horizon,
-                                       s.strategy, s.pct_above_ma20,
-                                       ROW_NUMBER() OVER (
-                                           PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
-                                           ORDER BY {order_clause}
-                                       ) AS rn_pool
-                                {_base_where}
-                            )
-                            WHERE rn_pool <= ?
-                        )
-                        WHERE rn <= ?
-                    """, (EXIT_TRACK_START_DATE, hz, *gate_params,
-                          _pool, caps[hz])).fetchall()
-                else:
-                    signals += conn.execute(f"""
-                        SELECT code, name, scan_date, buy_price,
-                               stop_loss, take_profit, fusion_score, horizon, strategy
-                        FROM (
-                            SELECT s.code, s.name, s.scan_date, s.buy_price,
-                                   s.stop_loss, s.take_profit, s.fusion_score,
-                                   COALESCE(s.horizon, 'short') AS horizon,
-                                   s.strategy,
-                                   ROW_NUMBER() OVER (
-                                       PARTITION BY s.scan_date, COALESCE(s.horizon, 'short')
-                                       ORDER BY {order_clause}
-                                   ) AS rn
-                            {_base_where}
-                        )
-                        WHERE rn <= ?
-                    """, (EXIT_TRACK_START_DATE, hz, *gate_params, caps[hz])).fetchall()
-
-            if not signals:
-                return ok({"items": [], "groups": {"short": [], "mid": [], "long": []},
-                           "count": 0, "start_date": EXIT_TRACK_START_DATE,
-                           "summary": {"hold": 0, "clear": 0}})
-
-            # 按 (code, scan_date, horizon) 去重
-            seen = set()
-            unique_signals = []
-            for s in signals:
-                key = (s["code"], s["scan_date"], s["horizon"])
-                if key not in seen:
-                    seen.add(key)
-                    unique_signals.append(s)
-
-            # 按 code 缓存日线（连续分段拆分与评估复用），避免重复查询
-            _df_cache: dict = {}
-
-            # ── 连续推荐合并：同 (code, horizon) 且推荐日按交易日连续 → 合并为一段 ──
-            # 段内：推荐日展示最新一次，持仓天数从最早一次累计，止损/止盈按最新一次判定；
-            # 但段内持仓若中途已卖出，卖出日（含）之后的新推荐拆分为新一轮交易
-            trade_dates = [r["trade_date"] for r in conn.execute(
-                "SELECT DISTINCT trade_date FROM daily_price ORDER BY trade_date ASC"
-            ).fetchall()]
-            td_index = {d: i for i, d in enumerate(trade_dates)}
-
-            by_key: dict = {}
-            for s in unique_signals:
-                by_key.setdefault((s["code"], s["horizon"]), []).append(s)
-
-            raw_segments = []   # 每段 = [最早推荐 ... 最新推荐]（scan_date 升序）
-            for sigs in by_key.values():
-                sigs.sort(key=lambda x: x["scan_date"])
-                seg = [sigs[0]]
-                for s in sigs[1:]:
-                    prev = seg[-1]
-                    # 连续 = 两个推荐日在交易日历中相邻（中间没有其他交易日）
-                    consecutive = (
-                        prev["scan_date"] in td_index
-                        and s["scan_date"] in td_index
-                        and td_index[s["scan_date"]] == td_index[prev["scan_date"]] + 1
-                    )
-                    if consecutive:
-                        seg.append(s)
-                    else:
-                        raw_segments.append(seg)
-                        seg = [s]
-                raw_segments.append(seg)
-
-            # 按卖出断点拆分后展开（卖出后的新推荐独立成段）
-            segments = []
-            for seg in raw_segments:
-                code = seg[0]["code"]
-                if code not in _df_cache:
-                    rows = conn.execute("""
-                        SELECT trade_date, open, close, high, low
-                        FROM daily_price
-                        WHERE code = ?
-                        ORDER BY trade_date ASC
-                    """, (code,)).fetchall()
-                    _df_cache[code] = (
-                        pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
-                        if rows else None
-                    )
-                hz0 = seg[0]["horizon"]
-                st0 = seg[0]["strategy"]
-                mode = "pullback" if _is_pullback_line(hz0, st0) else "open"
-                segments.extend(_split_continuous_segments(
-                    seg, _df_cache.get(code), hz0, mode))
-
-            results = []
-            for seg in segments:
-                first = seg[0]      # 最早推荐：持仓起算日 + 真实建仓买入价
-                last = seg[-1]      # 最新推荐：展示推荐日 + 最新止损/止盈判定
-                code = last["code"]
-                horizon = last["horizon"]
-
-                df = _df_cache.get(code)
-                if df is None or df.empty:
-                    continue
-
-                # ── 抄底类短线：回踩确认入场（2026-09-05，与复盘/今日推荐同口径）──
-                if _is_pullback_line(horizon, last["strategy"]):
-                    from config.strategy_params import get_param as _gp
-                    window = max(1, int(_gp("short_entry_window_days")))
-                    fill_ts, fill_price, pending = _short_pullback_fill(
-                        df, first["scan_date"], first["buy_price"], window)
-                    if fill_ts is None:
-                        st = "watching" if pending else "expired"
-                        # 未成交（待回踩 / 窗口过期）也要回传最新价 + 所属行情日：
-                        # 用于判断「现价离回踩买点还差多少」（2026-09-11 新增，供前端"现价"列）
-                        _lc = df["close"].iloc[-1] if len(df) else None
-                        _lc = round(float(_lc), 2) if _lc is not None and pd.notna(_lc) else None
-                        results.append({
-                            "code": code,
-                            "name": last["name"],
-                            "scan_date": last["scan_date"],
-                            "horizon": horizon,
-                            "strategy": last["strategy"],
-                            "entry_price": round(float(first["buy_price"] or 0), 2),
-                            "fusion_score": round(last["fusion_score"] or 0, 1),
-                            "status": st,
-                            "reason": (
-                                f"等待回踩：{window} 个交易日内触及买点 "
-                                f"{first['buy_price']} 才建仓"
-                                if pending else
-                                f"{window} 个交易日内未回踩买点，未成交（放弃）"),
-                            "detail": {"entry_date": None, "hold_days": 0,
-                                       "current_pnl_pct": None,
-                                       "current_price": _lc,
-                                       "current_date": str(df.index[-1]) if len(df) else None},
-                        })
-                        continue
-                    prev_day = _df_prev_day(df, fill_ts)
-                    if prev_day is not None:
-                        _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
-                        advice = evaluate_exit_by_prices(
-                            entry_price=fill_price,
-                            entry_date=prev_day,
-                            df=df,
-                            stop_loss=last["stop_loss"],
-                            take_profit=last["take_profit"],
-                            max_hold_days=get_max_hold(horizon),
-                            trailing_pct=_trail,
-                            partial_tp=_partial,
-                            stop_cap_pct=_stop_cap,
-                        )
-                        detail = dict(advice.get("detail") or {})
-                        if len(seg) > 1:
-                            detail["first_scan_date"] = first["scan_date"]
-                        results.append({
-                            "code": code,
-                            "name": last["name"],
-                            "scan_date": last["scan_date"],
-                            "horizon": horizon,
-                            "strategy": last["strategy"],
-                            "entry_price": round(fill_price, 2),
-                            "fusion_score": round(last["fusion_score"] or 0, 1),
-                            "status": advice["status"],
-                            "reason": advice["reason"],
-                            "detail": detail,
-                        })
-                        continue
-                    # 极端情形（df 首行即成交日）→ 落到下方开盘口径
-
-                # 买入价 = 最早推荐日的下一个交易日开盘价（真实建仓成本）
-                if hasattr(df.index, 'strftime'):
-                    after = df[df.index > pd.Timestamp(first["scan_date"])]
-                else:
-                    after = df[df.index > first["scan_date"]]
-                if after.empty:
-                    # 尚未到买入日（最早推荐日即最新交易日）：还未买入，不显示
-                    continue
-                _f = after.iloc[0]
-                entry_price = float(_f["open"]) if _f["open"] else (
-                    float(_f["close"]) or first["buy_price"])
-                entry_date = str(after.index[0])[:10]
-
-                # 持仓从最早推荐日起算；止损/止盈按最新推荐判定（三周期均开启移动止盈）
-                _trail, _partial, _stop_cap = _exit_trailing_params(horizon)
-                advice = evaluate_exit_by_prices(
-                    entry_price=entry_price,
-                    entry_date=first["scan_date"],
-                    df=df,
-                    stop_loss=last["stop_loss"],
-                    take_profit=last["take_profit"],
-                    max_hold_days=get_max_hold(horizon),
-                    trailing_pct=_trail,
-                    partial_tp=_partial,
-                    stop_cap_pct=_stop_cap,
-                )
-                detail = dict(advice.get("detail") or {})
-                if entry_date is not None:
-                    detail["entry_date"] = entry_date
-                if len(seg) > 1:
-                    detail["first_scan_date"] = first["scan_date"]  # 连续推荐起点
-
-                results.append({
-                    "code": code,
-                    "name": last["name"],
-                    "scan_date": last["scan_date"],   # 推荐日 = 最新一次推荐
-                    "horizon": horizon,
-                    "strategy": last["strategy"],
-                    "entry_price": round(entry_price, 2),
-                    "fusion_score": round(last["fusion_score"] or 0, 1),
-                    "status": advice["status"],
-                    "reason": advice["reason"],
-                    "detail": detail,
-                })
-
-        # 排序：推荐日降序（最新在前），同一天内 clear > hold
-        status_order = {"clear": 0, "hold": 1}
-        results.sort(key=lambda x: (x["scan_date"], -status_order.get(x["status"], 2)), reverse=True)
-
-        # 按周期分组
-        groups = {"short": [], "mid": [], "long": []}
-        for r in results:
-            groups.setdefault(r["horizon"], []).append(r)
-
-        # ── 按周期统计持有收益（clear=已实现出场收益，hold=当前浮盈）──
-        def _seg_pnl(r):
-            v = (r.get("detail") or {}).get("current_pnl_pct")
-            return v if isinstance(v, (int, float)) else None
-
-        perf = {}
-        for hz in ("short", "mid", "long"):
-            segs = [r for r in results if r["horizon"] == hz]
-            clears = [r for r in segs if r["status"] == "clear"]
-            holds = [r for r in segs if r["status"] == "hold"]
-            watches = [r for r in segs if r["status"] == "watching"]
-            expireds = [r for r in segs if r["status"] == "expired"]
-            cp = [v for v in (_seg_pnl(r) for r in clears) if v is not None]
-            hp = [v for v in (_seg_pnl(r) for r in holds) if v is not None]
-            allp = cp + hp
-            # ⚠ 口径（2026-09-11 修正）：单笔收益率**不能简单相加**——把 37 笔的 -0.8%~-7.6%
-            # 直接求和会得到 "-111.7%"，读起来像"本金亏了 111%"，实际只是算术和，无资金含义。
-            # 正确展示两个口径：
-            #   avg_pct  = 平均每笔收益（等权，无仓位假设）—— 唯一不依赖仓位假设的可比指标
-            #   comp_pct = 等权资金曲线（按每笔满仓复利连乘）—— 标准策略业绩口径
-            # cum_pnl 保留为算术和（仅调试用，前端不再作为主口径展示）
-            #
-            # ⚠ 口径（2026-09-19 再修正）：comp_pct（逐笔**顺序**复利）本身也是误导的——
-            # 它把**并行**持仓当成**串联**：短线 40+ 笔分布在 40 个交易日里、每日最多 3 只
-            # 同时持有，按顺序复利等价于假设"一份钱做完一笔再做下一笔"，于是 -2% 的单笔
-            # 均摊被放大成 -65% 的"累计"，视觉上像本金亏光。前端已弃用该口径，改用：
-            #   pnl_at_pos = 按仓位累计 = Σ(单笔收益%) × POSITION_PLAN_MAX_PCT
-            # 每笔按 20% 仓位下单时，对总资金的影响可**线性累加**（忽略复利，量级一致），
-            # 有明确资金含义，直接回答"我的账户大概亏/赚了多少"。comp_pct 保留字段仅供调试。
-            from config.personal_config import POSITION_PLAN_MAX_PCT
-            _avg = round(sum(allp) / len(allp), 2) if allp else None
-            _comp = None
-            if allp:
-                _c = 1.0
-                for _v in allp:
-                    _c *= (1 + _v / 100)
-                _comp = round((_c - 1) * 100, 1)
-            perf[hz] = {
-                "segments": len(segs),
-                "hold": len(holds),
-                "clear": len(clears),
-                # 回踩确认入场（2026-09-05）：待回踩/未成交未建仓，
-                # 不计入收益与胜率统计，仅计数展示
-                "watching": len(watches),
-                "expired": len(expireds),
-                # 已清仓：平均出场收益与胜率（相对建仓价，含止损/止盈/到期出场）
-                "clear_mean_pct": round(sum(cp) / len(cp), 2) if cp else None,
-                "clear_win_rate": round(sum(1 for v in cp if v > 0) / len(cp) * 100, 1) if cp else None,
-                # 持仓中：当前平均浮盈
-                "hold_mean_pct": round(sum(hp) / len(hp), 2) if hp else None,
-                # 综合（清仓+持仓）：全部段平均持有收益
-                "all_mean_pct": round(sum(allp) / len(allp), 2) if allp else None,
-                # 展示口径（见上方注释）
-                "avg_pct": _avg,
-                "comp_pct": _comp,     # 逐笔顺序复利（已弃用，仅调试/向后兼容）
-                "pnl_at_pos": (round(sum(allp) * POSITION_PLAN_MAX_PCT, 1)
-                               if allp else None),
-                "pos_pct": round(POSITION_PLAN_MAX_PCT * 100),
-                "cum_pnl": round(sum(allp), 2) if allp else None,
-                "win_rate": round(sum(1 for v in allp if v > 0) / len(allp) * 100, 1) if allp else None,
-            }
-
-        return ok(_sanitize({
-            "items": results,
-            "groups": groups,
-            "count": len(results),
-            "start_date": EXIT_TRACK_START_DATE,
-            "summary": {
-                "hold": sum(1 for r in results if r["status"] == "hold"),
-                "clear": sum(1 for r in results if r["status"] == "clear"),
-                "perf": perf,
-            },
-        }))
+        return ok(build_exit_advice_payload())
     except Exception as e:
         return fail(f"出场建议评估失败: {e}", 500)
 
 
-# ─────────────────────────────────────────────
-# 2. 市场速览：指数涨跌 + 北向资金 + 大盘冷热
-# ─────────────────────────────────────────────
+# 市场速览编排已下沉 core/services/market_overview.py（T7）
+from core.services.market_overview import build_market_overview_payload
 
-def _get_adaptive_weights_info() -> dict:
-    """P3: 获取自适应权重信息（供 market-overview API 返回）。"""
-    try:
-        from strategy.adaptive_weights import get_market_summary
-        return get_market_summary()
-    except Exception:
-        return {"regime": "unknown", "regime_label": "未知", "adaptive_enabled": False}
 
 @investor_bp.route("/market-overview", methods=["GET"])
 def market_overview():
-    """市场速览：核心指数 + 北向资金 + 大盘情绪冷热"""
-    indices = {
-        "000001": "上证指数",
-        "399001": "深证成指",
-        "399006": "创业板指",
-        "000300": "沪深300",
-        "000688": "科创50",
-        "000905": "中证500",
-    }
-
-    with get_conn() as conn:
-        # 指数最新一日
-        idx_rows = conn.execute(
-            """
-            SELECT code, MAX(trade_date) AS d FROM index_daily GROUP BY code
-            """
-        ).fetchall()
-        latest_dates = {r["code"]: r["d"] for r in idx_rows if r["d"]}
-
-        index_cards = []
-        for code, name in indices.items():
-            d = latest_dates.get(code)
-            if not d:
-                continue
-            row = conn.execute(
-                """SELECT open, high, low, close, pct_change
-                   FROM index_daily WHERE code=? AND trade_date=?""",
-                (code, d),
-            ).fetchone()
-            if not row:
-                continue
-            # 计算近 5 日涨跌幅（趋势辅助）
-            prev = conn.execute(
-                """SELECT close FROM index_daily
-                   WHERE code=? AND trade_date < ?
-                   ORDER BY trade_date DESC LIMIT 5""",
-                (code, d),
-            ).fetchall()
-            trend_5d = None
-            if prev and len(prev) >= 1:
-                base = prev[-1]["close"]
-                trend_5d = round((row["close"] - base) / base * 100, 2) if base else None
-
-            index_cards.append({
-                "code": code,
-                "name": name,
-                "close": round(row["close"], 2),
-                "pct_change": round(row["pct_change"] or 0, 2),
-                "high": row["high"],
-                "low": row["low"],
-                "trend_5d_pct": trend_5d,
-                "trade_date": d,
-            })
-
-        # 市场宽度 + 大盘冷热：涨跌家数、总成交额、平均涨幅（基于 daily_price 最新一日）
-        sentiment_row = conn.execute(
-            """
-            SELECT
-              MAX(trade_date)  AS trade_date,
-              AVG(pct_change)  AS avg_pct,
-              SUM(amount)      AS total_amount,
-              SUM(CASE WHEN pct_change > 0 THEN 1 ELSE 0 END) AS up_count,
-              SUM(CASE WHEN pct_change < 0 THEN 1 ELSE 0 END) AS down_count,
-              SUM(CASE WHEN pct_change = 0 THEN 1 ELSE 0 END) AS flat_count
-            FROM daily_price
-            WHERE trade_date = (SELECT MAX(trade_date) FROM daily_price)
-            """
-        ).fetchone()
-        avg_pct = sentiment_row["avg_pct"] if sentiment_row else None
-        total_amt = sentiment_row["total_amount"] if sentiment_row else None
-        up_count = (sentiment_row["up_count"] or 0) if sentiment_row else 0
-        down_count = (sentiment_row["down_count"] or 0) if sentiment_row else 0
-        flat_count = (sentiment_row["flat_count"] or 0) if sentiment_row else 0
-
-        # 简单规则 → 多日宽度 composite（10 分钟缓存，抗单日噪音）
-        _REGIME_HINT = {
-            "hot": "火热（注意追高风险）", "warm": "偏暖（可适度参与）",
-            "neutral": "震荡（精选个股）", "cool": "偏冷（控制仓位）",
-            "cold": "冰点（防守为主）",
-        }
-        regime = _compute_market_regime(conn)
-        regime_label = _REGIME_HINT.get(regime, "数据不足")
-
-        return ok({
-            "indices": _sanitize(index_cards),
-            "breadth": _sanitize({
-                "trade_date": sentiment_row["trade_date"] if sentiment_row else None,
-                "up_count": up_count,
-                "down_count": down_count,
-                "flat_count": flat_count,
-                "total_amount": round(total_amt / 1e8, 0) if total_amt else None,  # 亿
-                "label": (
-                    "普涨，情绪亢奋" if up_count and up_count > (down_count or 0) * 3 else
-                    "涨多跌少，偏强" if up_count > down_count else
-                    "普跌，情绪低迷" if down_count and down_count > (up_count or 1) * 3 else
-                    "跌多涨少，偏弱" if down_count > up_count else "涨跌相当"
-                ) if (up_count or down_count) else "暂无数据",
-            }),
-            "sentiment": {
-                "regime": regime,
-                "label": regime_label,
-                "avg_pct": round(avg_pct, 2) if avg_pct is not None else None,
-                "total_amount": round(total_amt / 1e8, 1) if total_amt else None,  # 亿
-            },
-            "adaptive_weights": _get_adaptive_weights_info(),  # P3: 自适应权重
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
+    """市场速览（核心指数 + 宽度 + 大盘冷热 + 自适应权重）—— 薄路由。"""
+    return ok(build_market_overview_payload())
 
 
-# ─────────────────────────────────────────────
-# 3. 个人持仓：CRUD + 实时盈亏
-# ─────────────────────────────────────────────
-def _diagnose_position(conn, code: str, cost_price, opened_at, horizon: str = "short") -> Optional[dict]:
-    """对单条持仓运行 exit_advisor 出场诊断，返回 {status, reason, detail} 或 None。
-
-    entry_price 取持仓成本价，entry_date 取建仓日；异常时降级为 None，不影响持仓主列表。
-    三周期统一移动止盈（2026-08 落地）：short 用 short_take_profit 启动线+
-    short_trailing_pct 回撤（2026-08-20 方案A：+8% 启动/3% 回撤/持10），
-    mid/long 各自启动线+回撤（持仓上限 60 / 不限仓期），
-    参数均来自 TUNABLE_PARAMS（DB 可覆盖）。
-    """
-    if not code or not cost_price or cost_price <= 0 or not opened_at:
-        return None
-    try:
-        from strategy.exit_advisor import (evaluate_exit, get_max_hold,
-                                           atr_dynamic_stop_pct, LIVE_MID_TRAILING_PCT)
-        import pandas as pd
-        rows = conn.execute(
-            """
-            SELECT trade_date, close, high, low
-            FROM daily_price WHERE code = ?
-            ORDER BY trade_date ASC
-            """,
-            (code,),
-        ).fetchall()
-        if not rows:
-            return None
-        df = pd.DataFrame([dict(r) for r in rows]).set_index("trade_date")
-        kwargs = {}
-        hz = horizon or "short"
-        stop_mode, atr_pct = "fixed", None
-        if hz == "short":
-            # 短线：止损 = ATR 自适应，**每天用最新交易日的 ATR14 重算**（2026-09-14 落地）。
-            # 与推荐线同口径：pct = clamp(k×ATR14%, floor, cap)，锚定成本价；
-            # ATR 不可用（开关关闭/数据不足）时回退固定 short_stop_loss，绝不落成 0。
-            # 移动止盈参数与推荐出场同口径（TUNABLE_PARAMS，DB 可覆盖）
-            atr_pct = atr_dynamic_stop_pct(df)
-            if atr_pct is not None:
-                stop_mode = "atr"
-            kwargs = dict(
-                stop_loss_pct=(atr_pct if atr_pct is not None
-                               else get_param("short_stop_loss")),
-                # 动态止损 → 硬止损只按当前收盘判定（否则波动率下行时会假阳性）
-                stop_is_dynamic=(atr_pct is not None),
-                partial_tp=get_param("short_take_profit"),
-                trailing_pct=get_param("short_trailing_pct"),
-                max_hold_days=int(get_param("short_max_hold_days")),
-            )
-        else:
-            # 中/长线：各自移动止盈启动线/回撤（与推荐出场同口径）+ 各自周期上限。
-            # 止损不传 → evaluate_exit 默认 DEFAULT_STOP_LOSS=-6%，与 short_stop_loss 同值
-            # （无独立 mid/long 止损参数；持仓诊断按成本价比例止损，与信号自带 ATR 止损价脱钩）
-            kwargs = dict(
-                partial_tp=get_param("mid_partial_tp") if hz == "mid" else get_param("long_partial_tp"),
-                # ⚠ 中线此处用 LIVE_MID_TRAILING_PCT(0.10) 而**非** mid_trailing_pct(0.05)：
-                # 本链路走 evaluate_exit（快照版，移动止盈无启动线），语义与推荐出场跟踪的
-                # evaluate_exit_by_prices（需先浮盈达标才启动）不同，详见 exit_advisor 常量注释。
-                trailing_pct=(LIVE_MID_TRAILING_PCT if hz == "mid"
-                              else get_param("long_trailing_pct")),
-                max_hold_days=get_max_hold(hz),
-            )
-        res = evaluate_exit(
-            entry_price=float(cost_price),
-            entry_date=str(opened_at)[:10],
-            df=df,
-            **kwargs,
-        )
-        # 标注止损来源，供前端区分「ATR 动态」与「固定比例」——
-        # 否则用户看到止损价变化会以为是 bug（实际是波动率变了）。
-        if isinstance(res, dict) and isinstance(res.get("detail"), dict):
-            res["detail"]["stop_mode"] = stop_mode
-            res["detail"]["stop_loss_pct"] = (
-                atr_pct if atr_pct is not None
-                else (kwargs.get("stop_loss_pct")))
-        return res
-    except Exception:
-        return None
-
-
-def _record_trade(conn, pos, action: str, shares: int, price: float, traded_at: str) -> dict:
-    """写入一条卖出流水（减仓/平仓），返回 {pnl, pnl_pct}（元 / %）。
-
-    收益率按持仓成本价 cost_price 计算：pnl_pct = (price - cost_price) / cost_price。
-    """
-    cost_price = float(pos["cost_price"] or 0)
-    pnl = (price - cost_price) * shares if cost_price else 0.0
-    pnl_pct = ((price - cost_price) / cost_price * 100) if cost_price else 0.0
-    conn.execute(
-        """
-        INSERT INTO personal_trade
-          (position_id, code, name, action, shares, price, cost_price, pnl, pnl_pct, traded_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (pos["id"], pos["code"], pos["name"], action, shares, price, cost_price,
-         round(pnl, 2), round(pnl_pct, 2), traded_at, traded_at),
-    )
-    return {"pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2)}
+# 个人持仓 / 自选股 / 风险告警编排已下沉 core/services/personal.py（T7）
+from core.services.personal import (
+    PersonalRequestError,
+    list_positions_payload, add_position as svc_add_position,
+    reduce_position as svc_reduce_position,
+    delete_position as svc_delete_position,
+    positions_history_payload,
+    list_watchlist_payload, add_watchlist as svc_add_watchlist,
+    remove_watchlist as svc_remove_watchlist,
+    risk_alerts_payload,
+)
 
 
 @investor_bp.route("/positions", methods=["GET"])
 def list_positions():
-    """列出当前持仓（含最新价 + 浮动盈亏 + 出场诊断）"""
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT p.*,
-                   lp.close AS latest_close,
-                   lp.pct_change AS latest_pct
-            FROM personal_position p
-            LEFT JOIN latest_price lp ON lp.code = p.code
-            WHERE p.status = 'holding'
-            ORDER BY p.opened_at DESC
-            """
-        ).fetchall()
-
-        items = []
-        total_cost = 0.0
-        total_value = 0.0
-        for r in rows:
-            d = dict(r)
-            cost = (d.get("cost_price") or 0) * (d.get("shares") or 0)
-            value = (d.get("latest_close") or 0) * (d.get("shares") or 0)
-            pnl = value - cost if d.get("latest_close") else 0
-            pnl_pct = (pnl / cost * 100) if cost > 0 else 0
-
-            # 出场诊断（清仓/减仓/持有）——复用推荐票出场纪律（按持仓周期选参数）
-            advice = _diagnose_position(conn, d.get("code"),
-                                        d.get("cost_price"), d.get("opened_at"),
-                                        d.get("horizon") or "short")
-
-            # 是否触发止损/止盈预警。止损价优先级：**用户手填 → ATR 动态**（每日重算）。
-            # ATR 动态止损不落库（每天都变），从诊断 detail 取 —— 与诊断结论同源，
-            # 否则会出现"预警说没破、诊断说已止损"的自相矛盾。
-            warning = None
-            sl = d.get("stop_loss")
-            tp = d.get("take_profit")
-            stop_eff, stop_src = sl, ("manual" if sl else None)
-            if not stop_eff and advice:
-                _det = advice.get("detail") or {}
-                if _det.get("stop_price"):
-                    stop_eff = _det["stop_price"]
-                    stop_src = _det.get("stop_mode") or "atr"
-            if d.get("latest_close") and stop_eff and d["latest_close"] <= stop_eff:
-                _src_txt = "手填" if stop_src == "manual" else "ATR动态"
-                warning = f"已触及止损价 {stop_eff:.2f}（{_src_txt}），请考虑止损"
-            elif d.get("latest_close") and tp and d["latest_close"] >= tp:
-                warning = "已触及止盈价，可考虑止盈"
-
-            total_cost += cost
-            total_value += value
-            items.append({
-                **{k: d.get(k) for k in (
-                    "id", "code", "name", "shares", "cost_price",
-                    "stop_loss", "take_profit", "note", "opened_at", "horizon"
-                )},
-                "latest_close": d.get("latest_close"),
-                "latest_pct": d.get("latest_pct"),
-                "cost": round(cost, 2),
-                "value": round(value, 2),
-                "pnl": round(pnl, 2),
-                "pnl_pct": round(pnl_pct, 2),
-                "warning": warning,
-                # 生效止损价与来源（manual=用户手填 / atr=每日动态 / None=未取到）
-                "stop_eff": round(float(stop_eff), 2) if stop_eff else None,
-                "stop_source": stop_src,
-                "advice": advice,
-            })
-
-        # 持仓集中度
-        concentration = None
-        if total_value > 0:
-            max_single = max((it["value"] for it in items), default=0)
-            concentration = round(max_single / total_value * 100, 1)
-
-        return ok({
-            "positions": _sanitize(items),
-            "summary": {
-                "total_cost": round(total_cost, 2),
-                "total_value": round(total_value, 2),
-                "total_pnl": round(total_value - total_cost, 2),
-                "total_pnl_pct": round((total_value - total_cost) / total_cost * 100, 2)
-                                  if total_cost > 0 else 0,
-                "position_count": len(items),
-                "max_concentration_pct": concentration,
-            },
-        })
+    """当前持仓（最新价 + 浮盈 + 出场诊断）—— 薄路由；编排见 personal 服务。"""
+    return ok(list_positions_payload())
 
 
 @investor_bp.route("/positions", methods=["POST"])
 def add_position():
-    """新增持仓 {code, shares, cost_price, stop_loss?, take_profit?, note?, horizon?}"""
-    body = request.get_json(silent=True) or {}
-    code = (body.get("code") or "").strip()
-    if not code or not body.get("shares") or not body.get("cost_price"):
-        return fail("缺少 code/shares/cost_price", 400)
-
+    """新增持仓 —— 薄路由；校验/写库见 personal 服务。"""
     try:
-        shares = int(body["shares"])
-        cost_price = float(body["cost_price"])
-    except (ValueError, TypeError):
-        return fail("shares/cost_price 必须是数字", 400)
-
-    stop_loss = body.get("stop_loss")
-    take_profit = body.get("take_profit")
-    # 持仓周期（决定出场诊断参数：短线=移动止盈 TUNABLE_PARAMS，中/长线=默认纪律）
-    horizon = (body.get("horizon") or "short").strip().lower()
-    if horizon not in ("short", "mid", "long"):
-        return fail("horizon 仅支持 short / mid / long", 400)
-
-    with get_conn() as conn:
-        # 自动补全股票名
-        info = conn.execute(
-            "SELECT name FROM stock_info WHERE code = ?", (code,)
-        ).fetchone()
-        name = info["name"] if info else body.get("name", code)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO personal_position
-              (code, name, shares, cost_price, stop_loss, take_profit,
-               note, opened_at, status, created_at, updated_at, horizon)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'holding', ?, ?, ?)
-            """,
-            (code, name, shares, cost_price,
-             float(stop_loss) if stop_loss else None,
-             float(take_profit) if take_profit else None,
-             body.get("note"), now, now, now, horizon),
-        )
-        new_id = conn.execute(
-            "SELECT id FROM personal_position WHERE code=? AND opened_at=?",
-            (code, now),
-        ).fetchone()
-        return ok({"id": new_id["id"] if new_id else None, "code": code, "name": name})
+        return ok(svc_add_position(request.get_json(silent=True) or {}))
+    except PersonalRequestError as e:
+        return fail(e.msg, e.status)
 
 
 @investor_bp.route("/positions/<int:pid>/reduce", methods=["POST"])
 def reduce_position(pid: int):
-    """减仓 / 平仓卖出：{shares, price}。
-
-    shares < 剩余股数 → 减仓（部分卖出）；shares >= 剩余股数 → 平仓。
-    每次卖出写一条 personal_trade 流水，用于历史持仓收益率统计。
-    """
-    body = request.get_json(silent=True) or {}
+    """减仓 / 平仓卖出 —— 薄路由；流水与状态更新见 personal 服务。"""
     try:
-        shares = int(body.get("shares") or 0)
-        price = float(body.get("price") or 0)
-    except (ValueError, TypeError):
-        return fail("shares/price 必须是数字", 400)
-    if shares <= 0 or price <= 0:
-        return fail("请填写卖出的股数与价格", 400)
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_conn() as conn:
-        pos = conn.execute(
-            "SELECT * FROM personal_position WHERE id = ?", (pid,)
-        ).fetchone()
-        if not pos or pos["status"] != "holding":
-            return fail("持仓不存在或已平仓", 404)
-
-        remaining = int(pos["shares"] or 0)
-        sell_shares = min(shares, remaining)
-        if sell_shares <= 0:
-            return fail("持仓股数为 0，无法卖出", 400)
-
-        action = "close" if sell_shares >= remaining else "reduce"
-        trade = _record_trade(conn, pos, action, sell_shares, price, now)
-
-        new_shares = remaining - sell_shares
-        if new_shares <= 0:
-            conn.execute(
-                "UPDATE personal_position SET shares=0, status='closed', closed_at=?, updated_at=? WHERE id=?",
-                (now, now, pid),
-            )
-        else:
-            conn.execute(
-                "UPDATE personal_position SET shares=?, updated_at=? WHERE id=?",
-                (new_shares, now, pid),
-            )
-
-        return ok({
-            "action": action,
-            "sold_shares": sell_shares,
-            "price": price,
-            "pnl": trade["pnl"],
-            "pnl_pct": trade["pnl_pct"],
-            "remaining_shares": max(new_shares, 0),
-        })
+        return ok(svc_reduce_position(pid, request.get_json(silent=True) or {}))
+    except PersonalRequestError as e:
+        return fail(e.msg, e.status)
 
 
 @investor_bp.route("/positions/<int:pid>", methods=["DELETE"])
 def delete_position(pid: int):
-    """直接删除持仓记录（误录入时使用），并级联清理其卖出流水。
-
-    与「平仓」不同：平仓会保留持仓并按卖出价结算收益；
-    删除则是物理移除该条记录（含历史），不进入历史收益率统计。
-    """
-    with get_conn() as conn:
-        pos = conn.execute(
-            "SELECT * FROM personal_position WHERE id = ?", (pid,)
-        ).fetchone()
-        if not pos:
-            return fail("持仓不存在", 404)
-        conn.execute("DELETE FROM personal_trade WHERE position_id = ?", (pid,))
-        conn.execute("DELETE FROM personal_position WHERE id = ?", (pid,))
-        return ok({"deleted": pid})
+    """删除持仓记录（级联流水）—— 薄路由。"""
+    try:
+        return ok(svc_delete_position(pid))
+    except PersonalRequestError as e:
+        return fail(e.msg, e.status)
 
 
 @investor_bp.route("/positions/history", methods=["GET"])
 def positions_history():
-    """历史持仓收益率统计：卖出流水（减仓/平仓）逐笔 + 汇总。"""
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM personal_trade ORDER BY traded_at DESC, id DESC"
-        ).fetchall()
-        items = [dict(r) for r in rows]
-
-        total_pnl = sum(t["pnl"] or 0 for t in items)
-        wins = [t for t in items if (t["pnl"] or 0) > 0]
-        losses = [t for t in items if (t["pnl"] or 0) < 0]
-        win_rate = round(len(wins) / len(items) * 100, 1) if items else 0
-        avg_pnl_pct = round(sum(t["pnl_pct"] or 0 for t in items) / len(items), 2) if items else 0
-        total_sold = sum((t["shares"] or 0) * (t["price"] or 0) for t in items)
-
-        return ok({
-            "trades": _sanitize(items),
-            "summary": {
-                "trade_count": len(items),
-                "win_count": len(wins),
-                "loss_count": len(losses),
-                "total_pnl": round(total_pnl, 2),
-                "win_rate": win_rate,
-                "avg_pnl_pct": avg_pnl_pct,
-                "best_pnl_pct": round(max((t["pnl_pct"] or 0 for t in items), default=0), 2),
-                "worst_pnl_pct": round(min((t["pnl_pct"] or 0 for t in items), default=0), 2),
-                "total_sold_amount": round(total_sold, 2),
-            },
-        })
+    """历史卖出流水与收益率汇总 —— 薄路由。"""
+    return ok(positions_history_payload())
 
 
-# ─────────────────────────────────────────────
-# 4. 自选股
-# ─────────────────────────────────────────────
 @investor_bp.route("/watchlist", methods=["GET"])
 def get_watchlist():
-    """自选股列表（附带最新价 + 当日打分 + 目标价）"""
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT w.id, w.code, w.note, w.created_at,
-                   w.target_price, w.alert_dir,
-                   i.name, i.industry,
-                   lp.close  AS latest_close,
-                   lp.pct_change AS latest_pct,
-                   lp.fusion_score AS latest_score
-            FROM personal_watchlist w
-            LEFT JOIN stock_info i   ON i.code = w.code
-            LEFT JOIN latest_price lp ON lp.code = w.code
-            ORDER BY w.created_at DESC
-            """
-        ).fetchall()
-        items = []
-        for r in rows:
-            d = dict(r)
-            tp = d.get("target_price")
-            latest = d.get("latest_close")
-            # 距目标价百分比（正=还需上涨，负=已超过）
-            if tp and tp > 0 and latest:
-                d["target_distance_pct"] = round((tp - latest) / latest * 100, 2)
-            else:
-                d["target_distance_pct"] = None
-            items.append(d)
-        return ok(_sanitize(items))
+    """自选股列表 —— 薄路由。"""
+    return ok(list_watchlist_payload())
 
 
 @investor_bp.route("/watchlist", methods=["POST"])
 def add_watchlist():
-    """加入自选
-    行为：
-      1) 写入 personal_watchlist
-      2) 异步触发该股历史数据补拉 + 策略分重算（避免阻塞 HTTP 响应）
-      3) 返回 task_id，前端可通过 /api/sync/status/<task_id> 轮询进度
-         或 3-5 秒后直接调 GET /api/investor/watchlist 看到 latest_close/latest_score
-    body: {"code": "600519", "note": "..."}
-    """
-    body = request.get_json(silent=True) or {}
-    code = (body.get("code") or "").strip()
-    if not code:
-        return fail("缺少 code", 400)
-    if not (code.isdigit() and len(code) == 6):
-        return fail("code 格式非法（需 6 位数字）", 400)
-
-    # 可选目标价（价格预警）：target_price + alert_dir(above/below)
-    target_price = body.get("target_price")
+    """加入自选（异步补拉历史数据）—— 薄路由。"""
     try:
-        target_price = float(target_price) if target_price not in (None, "") else None
-    except (TypeError, ValueError):
-        target_price = None
-    alert_dir = (body.get("alert_dir") or "above").strip().lower()
-    if alert_dir not in ("above", "below"):
-        alert_dir = "above"
-
-    with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO personal_watchlist(code, note, created_at) VALUES (?,?,?)",
-            (code, body.get("note"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        )
-        inserted = cur.rowcount > 0
-        # 无论新增还是已存在，均允许更新目标价
-        if target_price is not None:
-            conn.execute(
-                "UPDATE personal_watchlist SET target_price=?, alert_dir=? WHERE code=?",
-                (target_price, alert_dir, code),
-            )
-
-    task_id = None
-    sync_status = "already_has_data"
-    try:
-        from core.db import has_watchlist_data
-        from core.task_queue import submit_task, is_any_running
-        # 已经在跑其它任务时，仍允许加自选（不阻塞）
-        if is_any_running() and not has_watchlist_data(code):
-            sync_status = "queued"
-        elif not has_watchlist_data(code):
-            from core.sync import sync_single_stock_to_watchlist
-            task_id = submit_task(lambda: sync_single_stock_to_watchlist(code, verbose=False))
-            sync_status = "syncing"
-        # else: sync_status = "already_has_data" —— 不用再拉
-    except Exception as e:
-        # 异步触发失败不阻塞 INSERT 已成功的响应
-        sync_status = f"sync_dispatch_failed: {e}"
-
-    return ok({"code": code, "task_id": task_id, "sync_status": sync_status,
-               "message": "已加入自选，历史数据补拉中" if sync_status == "syncing" else "已加入自选"})
+        return ok(svc_add_watchlist(request.get_json(silent=True) or {}))
+    except PersonalRequestError as e:
+        return fail(e.msg, e.status)
 
 
 @investor_bp.route("/watchlist/<code>", methods=["DELETE"])
 def remove_watchlist(code: str):
-    """移出自选
-    行为：仅删除 personal_watchlist 记录，**不**清理 daily_price 中的历史数据。
-    原因：回测 / 历史推荐 / 持仓分析都仍需这些数据。
-    """
-    if not (code.isdigit() and len(code) == 6):
-        return fail("code 格式非法", 400)
-    with get_conn() as conn:
-        conn.execute("DELETE FROM personal_watchlist WHERE code = ?", (code,))
-        return ok({"removed": code, "message": "已移出自选，历史行情数据保留"})
+    """移出自选（保留历史行情）—— 薄路由。"""
+    try:
+        return ok(svc_remove_watchlist(code))
+    except PersonalRequestError as e:
+        return fail(e.msg, e.status)
 
 
-# ─────────────────────────────────────────────
-# 5. 风险告警
-# ─────────────────────────────────────────────
 @investor_bp.route("/alerts", methods=["GET"])
 def risk_alerts():
-    """当前风险告警（基于持仓）"""
-    with get_conn() as conn:
-        positions = conn.execute(
-            """
-            SELECT p.*, lp.close AS latest_close
-            FROM personal_position p
-            LEFT JOIN latest_price lp ON lp.code = p.code
-            WHERE p.status='holding'
-            """
-        ).fetchall()
-
-        alerts = []
-        for r in positions:
-            d = dict(r)
-            latest = d.get("latest_close")
-            if not latest:
-                continue
-            # 1) 触及止损
-            if d.get("stop_loss") and latest <= d["stop_loss"]:
-                alerts.append({
-                    "level": "danger",
-                    "code": d["code"], "name": d.get("name"),
-                    "msg": f"已触及止损价 {d['stop_loss']:.2f}，当前 {latest:.2f}",
-                })
-            # 2) 接近止损（差 ≤3%）
-            elif d.get("stop_loss") and latest <= d["stop_loss"] * 1.03:
-                alerts.append({
-                    "level": "warning",
-                    "code": d["code"], "name": d.get("name"),
-                    "msg": f"接近止损价（差 {((latest/d['stop_loss']-1)*100):.1f}%）",
-                })
-            # 3) 触及止盈
-            if d.get("take_profit") and latest >= d["take_profit"]:
-                alerts.append({
-                    "level": "info",
-                    "code": d["code"], "name": d.get("name"),
-                    "msg": f"已触及止盈价 {d['take_profit']:.2f}，可考虑止盈",
-                })
-
-        # 持仓集中度告警
-        rows = conn.execute(
-            """
-            SELECT p.code, p.shares, lp.close,
-                   (p.cost_price * p.shares) AS cost,
-                   (lp.close * p.shares)    AS value
-            FROM personal_position p
-            LEFT JOIN latest_price lp ON lp.code = p.code
-            WHERE p.status='holding'
-            """
-        ).fetchall()
-        total = sum((r["value"] or 0) for r in rows)
-        if total > 0:
-            for r in rows:
-                v = r["value"] or 0
-                ratio = v / total * 100
-                if ratio >= 20:
-                    alerts.append({
-                        "level": "warning",
-                        "code": r["code"], "name": r["code"],
-                        "msg": f"单股仓位占比 {ratio:.1f}%，过于集中（建议 <20%）",
-                    })
-
-        # 持仓票打分下降告警
-        alerts.extend(_score_drop_alerts(conn))
-
-        # 自选股价格预警：目标价触达/接近
-        watch_rows = conn.execute(
-            """
-            SELECT w.code, w.target_price, w.alert_dir,
-                   i.name, lp.close AS latest_close
-            FROM personal_watchlist w
-            LEFT JOIN stock_info i ON i.code = w.code
-            LEFT JOIN latest_price lp ON lp.code = w.code
-            WHERE w.target_price IS NOT NULL AND w.target_price > 0
-            """
-        ).fetchall()
-        for r in watch_rows:
-            d = dict(r)
-            latest = d.get("latest_close")
-            tp = d.get("target_price")
-            if not latest or not tp:
-                continue
-            direction = (d.get("alert_dir") or "above").lower()
-            name = d.get("name") or d["code"]
-            gap_pct = (latest - tp) / tp * 100
-            if direction == "above":
-                if latest >= tp:
-                    alerts.append({
-                        "level": "info", "code": d["code"], "name": name,
-                        "msg": f"自选已达目标价 {tp:.2f}（现价 {latest:.2f}）",
-                    })
-                elif gap_pct >= -2:
-                    alerts.append({
-                        "level": "warning", "code": d["code"], "name": name,
-                        "msg": f"自选接近目标价 {tp:.2f}（差 {abs(gap_pct):.1f}%）",
-                    })
-            else:  # below
-                if latest <= tp:
-                    alerts.append({
-                        "level": "info", "code": d["code"], "name": name,
-                        "msg": f"自选已跌至目标价 {tp:.2f}（现价 {latest:.2f}）",
-                    })
-                elif gap_pct <= 2:
-                    alerts.append({
-                        "level": "warning", "code": d["code"], "name": name,
-                        "msg": f"自选接近目标价 {tp:.2f}（差 {abs(gap_pct):.1f}%）",
-                    })
-
-        return ok({"alerts": alerts, "count": len(alerts)})
+    """当前风险告警 —— 薄路由；编排见 personal 服务。"""
+    return ok(risk_alerts_payload())
 
 
-# ─────────────────────────────────────────────
-# 6. 历史推荐回测：过去 N 天推荐的真实表现（默认 60 天）
-# ─────────────────────────────────────────────
+# 推荐复盘闭环（outcome / 历史）编排已下沉 core/services/review.py（T7）
+from core.services.review import (
+    outcome_summary_payload, outcome_list_payload,
+    recommendations_history_payload,
+)
+
+
 @investor_bp.route("/outcome_summary", methods=["GET"])
 def outcome_summary():
-    """推荐胜率闭环汇总（从 recommend_outcome 表读取）
-    GET /api/investor/outcome_summary?days=30
-    """
-    days = request.args.get("days", 30, type=int)
-    days = max(1, min(days, 90))
+    """推荐胜率闭环汇总 —— 薄路由；读 recommend_outcome 见 review 服务。"""
+    days = max(1, min(request.args.get("days", 30, type=int), 90))
     try:
-        from core.outcome_tracker import get_summary
-        summary = get_summary(days)
-        return ok({"summary": summary, "days": days})
+        return ok(outcome_summary_payload(days))
     except Exception as e:
         return fail(f"查询失败: {e}", 500)
 
 
 @investor_bp.route("/outcome_list", methods=["GET"])
 def outcome_list():
-    """推荐结果明细列表
-    GET /api/investor/outcome_list?days=30&limit=200
-    """
-    days = request.args.get("days", 30, type=int)
-    days = max(1, min(days, 90))
-    limit = request.args.get("limit", 200, type=int)
-    limit = max(1, min(limit, 500))
+    """推荐结果明细列表 —— 薄路由。"""
+    days = max(1, min(request.args.get("days", 30, type=int), 90))
+    limit = max(1, min(request.args.get("limit", 200, type=int), 500))
     try:
-        from core.outcome_tracker import get_outcome_list
-        items = get_outcome_list(days, limit)
-        return ok(_sanitize({"items": items, "days": days, "total": len(items)}))
+        return ok(outcome_list_payload(days, limit))
     except Exception as e:
         return fail(f"查询失败: {e}", 500)
 
+
 @investor_bp.route("/recommendations/history", methods=["GET"])
 def recommendations_history():
-    """历史推荐回测：过去 N 天短线推荐的股票，到今天的实际涨跌
-    GET /api/investor/recommendations/history?days=60
-    优先从 recommend_outcome 表读取持久化数据，fallback 到实时计算。
-    口径：仅统计短线（horizon=short）推荐；同一股票连续交易日不间断
-    被推荐时合并为一段，只显示首次推荐日并给出连续推荐天数。
-    默认 60 天（recommend_outcome 自 EXIT_TRACK_START_DATE=2026-07-20 起有数据），上限 90。
-    """
-    # ⚠ 默认值必须是 int：Flask 在参数缺失时直接返回 default、不做类型转换，
+    """历史推荐复盘（短线，合并连续段）—— 薄路由；口径见 review 服务。"""
+    # ⚠ 默认值必须是 int：Flask 参数缺失时直接返回 default、不做类型转换，
     # 若写 "60"（字符串）则 min(days, 90) 抛 TypeError → 500（2026-09-10 修）
-    days = request.args.get("days", 60, type=int)
-    days = max(1, min(days, 90))
-
-    # 优先尝试从 recommend_outcome 读取
-    try:
-        from core.outcome_tracker import get_merged_outcome_list, get_merged_summary
-        items = get_merged_outcome_list(days, "short")
-        if items:
-            summary = get_merged_summary(days, "short")
-            # 转换为前端兼容格式
-            results = []
-            for it in items:
-                ret = it.get("exit_return") or it.get("t5_return") or it.get("t3_return") or it.get("t1_return") or 0
-                results.append({
-                    "code": it["code"],
-                    "name": it.get("name"),  # get_merged_outcome_list 已 JOIN stock_info 补股名
-                    "scan_date": it["scan_date"],          # 兼容字段 = 首次推荐日
-                    "first_scan_date": it["first_scan_date"],
-                    "last_scan_date": it["last_scan_date"],
-                    "streak_days": it["streak_days"],       # 连续推荐天数
-                    "entry_price": round(it["entry_price"], 2) if it.get("entry_price") else None,
-                    "current_price": None,
-                    "pnl_pct": ret,
-                    "hit_stop_loss": bool(it.get("hit_stop")),
-                    "hit_take_profit": bool(it.get("hit_tp")),
-                    "fusion_score": round(it.get("fusion_score") or 0, 1),
-                    "t1_return": it.get("t1_return"),
-                    "t2_return": it.get("t2_return"),
-                    "t3_return": it.get("t3_return"),
-                    "t5_return": it.get("t5_return"),
-                    "exit_reason": it.get("exit_reason"),
-                    "days_held": None,
-                })
-            # 按首次推荐日降序（同日按收益降序），复盘列表以时间线为主
-            results.sort(key=lambda x: (x["first_scan_date"], x["pnl_pct"]), reverse=True)
-            return ok({
-                "items": _sanitize(results),
-                "summary": summary,
-                "days": days,
-                "source": "recommend_outcome",
-                "merged": True,
-            })
-    except Exception:
-        pass  # fallback 到实时计算
-
-    # Fallback: 实时计算（口径与 recommend_outcome 一致：短线 + 连续推荐合并 + 主板过滤）
-    from core.outcome_tracker import _merge_continuous_segments
-
-    # 板块限制：与今日推荐同口径（小资金仅推主板）
-    board_filter = main_board_filter("s.code")
-
-    with get_conn() as conn:
-        # 获取最近 N 天的短线推荐记录（stock_signal 中有 buy_price 的；
-        # 每日取 fusion_score 前 short_top_n，与 recommend_outcome/今日推荐同口径）
-        signals = conn.execute(
-            f"""
-            SELECT code, name, scan_date, buy_price, stop_loss, take_profit, fusion_score
-            FROM (
-                SELECT s.code, s.name, s.scan_date, s.buy_price, s.stop_loss, s.take_profit,
-                       s.fusion_score,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY s.scan_date
-                           ORDER BY COALESCE(s.fusion_score, 0) DESC
-                       ) AS rn
-                FROM stock_signal s
-                WHERE s.scan_date >= date('now', ?)
-                  AND s.buy_price IS NOT NULL
-                  AND COALESCE(s.horizon, 'short') = 'short'
-                  {board_filter}
-            )
-            WHERE rn <= ?
-            ORDER BY code ASC, scan_date ASC
-            """,
-            (f"-{days} days", max(1, int(get_param("short_top_n")))),
-        ).fetchall()
-
-        if not signals:
-            return ok({"items": [], "summary": {}, "days": days})
-
-        # 连续交易日不间断的推荐合并为一段（每段取首次推荐日 + 连续天数）
-        segments = _merge_continuous_segments(signals, conn)
-
-        results = []
-        for seg in segments:
-            code = seg["code"]
-            entry = seg.get("buy_price") or 0
-            if entry <= 0:
-                continue
-
-            # 段首推荐日之后最多 5 个交易日收盘价，计算 T1/T2/T3/T5
-            prices = conn.execute(
-                """
-                SELECT trade_date, close FROM daily_price
-                WHERE code = ? AND trade_date > ?
-                ORDER BY trade_date ASC LIMIT 5
-                """,
-                (code, seg["scan_date"]),
-            ).fetchall()
-
-            def _ret(n):
-                if len(prices) >= n and prices[n - 1]["close"]:
-                    return round((prices[n - 1]["close"] - entry) / entry * 100, 2)
-                return None
-
-            t1, t2, t3, t5 = _ret(1), _ret(2), _ret(3), _ret(5)
-            pnl_pct = t5 if t5 is not None else (t1 if t1 is not None else 0)
-            hit_stop = False
-            hit_tp = False
-            if prices:
-                current = prices[0]["close"]
-                current_date = prices[0]["trade_date"]
-                if seg.get("stop_loss") and current <= seg["stop_loss"]:
-                    hit_stop = True
-                if seg.get("take_profit") and current >= seg["take_profit"]:
-                    hit_tp = True
-            else:
-                current_date = None
-
-            # 判断是否仍在持仓中（首次推荐日后 N 天内）
-            from datetime import datetime as _dt
-            try:
-                scan = _dt.strptime(seg["scan_date"], "%Y-%m-%d")
-                now = _dt.now()
-                days_held = (now - scan).days
-            except (ValueError, TypeError):
-                days_held = 0
-
-            results.append({
-                "code": code,
-                "name": seg.get("name"),
-                "scan_date": seg["scan_date"],
-                "first_scan_date": seg["first_scan_date"],
-                "last_scan_date": seg["last_scan_date"],
-                "streak_days": seg["streak_days"],
-                "entry_price": round(entry, 2),
-                "current_price": round(prices[0]["close"], 2) if prices else None,
-                "current_date": current_date,
-                "pnl_pct": pnl_pct,
-                "hit_stop_loss": hit_stop,
-                "hit_take_profit": hit_tp,
-                "fusion_score": round(seg.get("fusion_score") or 0, 1),
-                "t1_return": t1,
-                "t2_return": t2,
-                "t3_return": t3,
-                "t5_return": t5,
-                "days_held": days_held,
-            })
-
-        # 汇总统计（合并口径）
-        if results:
-            def _win_stat(key):
-                vals = [r[key] for r in results if r.get(key) is not None]
-                if not vals:
-                    return {"n": 0, "win": 0, "win_rate": 0, "avg_return": 0}
-                win = sum(1 for v in vals if v > 0)
-                avg = sum(vals) / len(vals)
-                return {"n": len(vals), "win": win,
-                        "win_rate": round(win / len(vals) * 100, 1),
-                        "avg_return": round(avg, 2)}
-
-            wins = [r for r in results if r["pnl_pct"] > 0]
-            losses = [r for r in results if r["pnl_pct"] <= 0]
-            avg_return = sum(r["pnl_pct"] for r in results) / len(results)
-            win_rate = len(wins) / len(results) * 100 if results else 0
-            stop_count = sum(1 for r in results if r["hit_stop_loss"])
-            tp_count = sum(1 for r in results if r["hit_take_profit"])
-            summary = {
-                "total": len(results),
-                "t1": _win_stat("t1_return"),
-                "t2": _win_stat("t2_return"),
-                "t3": _win_stat("t3_return"),
-                "t5": _win_stat("t5_return"),
-                "win_count": len(wins),
-                "loss_count": len(losses),
-                "win_rate": round(win_rate, 1),
-                "avg_return": round(avg_return, 2),
-                "best_return": round(max(r["pnl_pct"] for r in results), 2),
-                "worst_return": round(min(r["pnl_pct"] for r in results), 2),
-                "stop_loss_count": stop_count,
-                "take_profit_count": tp_count,
-            }
-        else:
-            summary = {}
-
-        # 按首次推荐日降序（同日按收益降序），复盘列表以时间线为主
-        results.sort(key=lambda x: (x["first_scan_date"], x["pnl_pct"]), reverse=True)
-
-        return ok({
-            "items": _sanitize(results),
-            "summary": summary,
-            "days": days,
-            "merged": True,
-        })
+    days = max(1, min(request.args.get("days", 60, type=int), 90))
+    return ok(recommendations_history_payload(days))
 
 
-# ─────────────────────────────────────────────
-# 7. 持仓关联打分告警：持仓票打分下降时自动告警
-# ─────────────────────────────────────────────
-def _score_drop_alerts(conn):
-    """检查持仓票的打分变化，生成打分下降告警"""
-    alerts = []
-    # 获取所有持仓票
-    positions = conn.execute(
-        "SELECT code, name FROM personal_position WHERE status='holding'"
-    ).fetchall()
-
-    for pos in positions:
-        code = pos["code"]
-        name = pos["name"] or code
-        # 最近两次打分
-        scores = conn.execute(
-            """
-            SELECT trade_date, fusion_score AS score FROM daily_price
-            WHERE code = ?
-            ORDER BY trade_date DESC LIMIT 2
-            """,
-            (code,),
-        ).fetchall()
-
-        # 注：融合分 fusion_score 为 0~50 量纲，阈值较原 0~100 打分折半
-        if len(scores) >= 2:
-            latest_score = scores[0]["score"] or 0
-            prev_score = scores[1]["score"] or 0
-            drop = prev_score - latest_score
-            if drop >= 5:
-                alerts.append({
-                    "level": "warning",
-                    "code": code,
-                    "name": name,
-                    "msg": f"融合分下降 {drop:.0f} 分（{prev_score:.0f}→{latest_score:.0f}），注意风险",
-                })
-            elif drop >= 3:
-                alerts.append({
-                    "level": "info",
-                    "code": code,
-                    "name": name,
-                    "msg": f"融合分小幅回落 {drop:.0f} 分（{prev_score:.0f}→{latest_score:.0f}）",
-                })
-        elif len(scores) == 1:
-            # 只有一次评分，检查是否低于阈值（0~50 量纲）
-            s = scores[0]["score"] or 0
-            if s < 15:
-                alerts.append({
-                    "level": "warning",
-                    "code": code,
-                    "name": name,
-                    "msg": f"当前打分仅 {s:.0f} 分，低于安全线",
-                })
-
-    return alerts
-
-
-# ─────────────────────────────────────────────
-# 8. 量化指标白话解释（教育散户）
-# ─────────────────────────────────────────────
-EXPLAINERS = {
-    "fusion_score": {
-        "title": "综合评分",
-        "desc": "融合 5 类策略（放量、均线、量价背离、底部、主力）得出的 0~100 分。",
-        "for_dummies": "分数越高代表越多个策略同时看好这只票。但分数高 ≠ 一定赚钱，只是历史上这种条件出现时赚钱概率较大。",
-        "tip": "建议作为初筛，80+ 分再人工看 K 线确认。",
-    },
-    "stop_loss": {
-        "title": "止损价",
-        "desc": "股价跌到这个价位时坚决卖出，限制亏损。",
-        "for_dummies": "相当于'认错线'。设好之后一定要执行，否则和没设一样。",
-        "tip": "常见做法：买入价下方 5~8%。短线严、中线宽。",
-    },
-    "take_profit": {
-        "title": "止盈价",
-        "desc": "股价涨到这个价位时分批卖出，落袋为安。",
-        "for_dummies": "相当于'满意线'。很多人赚过又亏回去，就是因为不设止盈。",
-        "tip": "常见做法：买入价上方 15~25%。",
-    },
-    "sharpe_ratio": {
-        "title": "夏普比率",
-        "desc": "每承担 1 单位风险，能获得多少超额收益。",
-        "for_dummies": "数字越大越好。>1 算不错，>2 算优秀，<0 就是亏钱。",
-        "tip": "新手直接看这个数就行，比年化收益更靠谱。",
-    },
-    "max_drawdown": {
-        "title": "最大回撤",
-        "desc": "历史上从最高点跌到最低点的幅度。",
-        "for_dummies": "代表你可能遇到的最难受的亏损。-30% 意味着满仓可能亏掉 3 成。",
-        "tip": "回测时务必关注；个人投资者建议控制在 -20% 以内的策略。",
-    },
-    "win_rate": {
-        "title": "胜率",
-        "desc": "赚钱的交易占总交易次数的比例。",
-        "for_dummies": "胜率高不一定赚钱（赚少亏多也不行）。要看配合的平均盈亏比。",
-        "tip": "胜率 40% + 盈亏比 3:1 也是好策略。",
-    },
-    "annual_return": {
-        "title": "年化收益",
-        "desc": "按复利折算到每年的收益率。",
-        "for_dummies": "看起来很高，但要看是否经历过牛熊周期。",
-        "tip": "回测时间最好覆盖一轮完整牛熊（≥2 年）。",
-    },
-    "north_net_buy": {
-        "title": "北向资金净买入",
-        "desc": "境外资金通过沪深港通买入 A 股的净额。",
-        "for_dummies": "俗称'外资动向'。持续大幅净买入常被视为积极信号。",
-        "tip": "看 5 日或 20 日累计趋势，比看单日更靠谱。",
-    },
-    "market_cap": {
-        "title": "市值",
-        "desc": "股价 × 总股本，单位通常是亿元。",
-        "for_dummies": "盘子大 = 稳但弹性小；盘子小 = 弹性大但容易暴涨暴跌。",
-        "tip": "新手建议 100~1000 亿之间，避开'小票'风险。",
-    },
-}
+# 指标白话解释 / 因子趋势 / 规则命中编排已下沉 core/services/browse.py（T7）
+from core.services.browse import (
+    EXPLAINERS, factor_trend_payload, rule_signals_payload,
+)
 
 
 @investor_bp.route("/explain/<metric>", methods=["GET"])
 def explain(metric: str):
-    """指标白话解释"""
+    """指标白话解释 —— 薄路由。"""
     item = EXPLAINERS.get(metric)
     if not item:
         return fail(f"未知指标: {metric}", 404)
@@ -3360,59 +347,29 @@ def explain(metric: str):
 
 @investor_bp.route("/explain", methods=["GET"])
 def explain_all():
-    """列出所有可解释的指标"""
+    """列出所有可解释的指标 —— 薄路由。"""
     return ok({"metrics": list(EXPLAINERS.keys()), "items": EXPLAINERS})
 
 
 @investor_bp.route("/factor_trend", methods=["GET"])
 def factor_trend():
-    """融合分归因 + 趋势（纯读 daily_price）
-
-    GET /api/investor/factor_trend?codes=600519,000001&days=30
-    - codes: 逗号分隔 6 位代码，最多 50 个
-    - days:  取最近 N 个交易日，默认 30，clamp 到 [2, 90]
-    返回 { code: [ {trade_date, fusion_score, vol_score, ma_score,
-                    diverge_score, bottom_score, whale_score}, ... ] }（按日期升序）
-    同时服务：sparkline（days=7 取 fusion_score 序列）与详情弹窗（days=30 含 5 分项）。
-    """
+    """融合分归因与趋势 —— 薄路由；取数见 browse 服务。"""
     raw = (request.args.get("codes") or "").strip()
-    codes = [c.strip() for c in raw.split(",") if c.strip().isdigit() and len(c.strip()) == 6]
-    codes = codes[:50]
+    codes = [c.strip() for c in raw.split(",")
+             if c.strip().isdigit() and len(c.strip()) == 6][:50]
     if not codes:
         return fail("缺少合法 codes（6 位数字，逗号分隔）", 400)
-
     try:
         days = int(request.args.get("days", 30))
     except (TypeError, ValueError):
         days = 30
     days = max(2, min(90, days))
-
-    result = {}
-    with get_conn() as conn:
-        for code in codes:
-            rows = conn.execute(
-                """
-                SELECT trade_date, fusion_score, vol_score, ma_score,
-                       diverge_score, bottom_score, whale_score
-                FROM daily_price WHERE code = ?
-                ORDER BY trade_date DESC LIMIT ?
-                """,
-                (code, days),
-            ).fetchall()
-            result[code] = [dict(r) for r in reversed(rows)]
-    return ok(_sanitize(result))
+    return ok(factor_trend_payload(codes, days))
 
 
 @investor_bp.route("/rule_signals", methods=["GET"])
 def rule_signals():
-    """常驻策略规则命中（选股→回测→推荐闭环的推荐端）
-
-    GET /api/investor/rule_signals?date=YYYY-MM-DD&limit=100&max_hits=200
-    - date 缺省取 strategy_signals 最新 trade_date
-    - limit 缺省 100，上限 500（命中数可能很大，保护前端）
-    - max_hits 缺省 200：当日命中超过该数的规则视为过泛（无筛选价值），整条规则排除
-    返回该日命中列表，JOIN 股名与最新收盘价，按 confidence 降序。
-    """
+    """常驻策略规则命中 —— 薄路由；取数见 browse 服务。"""
     date = (request.args.get("date") or "").strip()
     try:
         limit = int(request.args.get("limit", 100))
@@ -3424,458 +381,135 @@ def rule_signals():
     except (TypeError, ValueError):
         max_hits = 200
     max_hits = max(1, min(max_hits, 100000))
-    with get_conn() as conn:
-        if not date:
-            row = conn.execute("SELECT MAX(trade_date) AS d FROM strategy_signals").fetchone()
-            date = row["d"] if row and row["d"] else None
-        if not date:
-            return ok(_sanitize({"date": None, "total": 0, "items": []}))
-        # 按规则统计当日命中数，排除命中过泛的规则
-        hit_rows = conn.execute(
-            """SELECT rule_id, COUNT(*) AS hits FROM strategy_signals
-               WHERE trade_date = ? GROUP BY rule_id""",
-            (date,),
-        ).fetchall()
-        rule_hits = {r["rule_id"]: r["hits"] for r in hit_rows}
-        excluded_rules = sum(1 for h in rule_hits.values() if h > max_hits)
-        total = sum(h for h in rule_hits.values() if h <= max_hits)
-        rows = conn.execute(
-            """
-            SELECT s.code, si.name AS name, s.rule_id, s.rule_name, s.confidence,
-                   dp.close AS latest_close,
-                   r.win_rate AS rule_win_rate, r.annual_return AS rule_annual_return,
-                   r.total_trades AS rule_total_trades
-            FROM strategy_signals s
-            LEFT JOIN stock_info si ON si.code = s.code
-            LEFT JOIN daily_price dp ON dp.code = s.code AND dp.trade_date = s.trade_date
-            LEFT JOIN strategy_rules r ON r.id = s.rule_id
-            WHERE s.trade_date = ?
-              AND s.rule_id IN (
-                  SELECT rule_id FROM strategy_signals
-                  WHERE trade_date = ? GROUP BY rule_id HAVING COUNT(*) <= ?
-              )
-            ORDER BY s.confidence DESC
-            LIMIT ?
-            """,
-            (date, date, max_hits, limit),
-        ).fetchall()
-    items = [dict(r) for r in rows]
-    for it in items:
-        it["rule_hits"] = rule_hits.get(it["rule_id"])
-    return ok(_sanitize({
-        "date": date, "total": total, "items": items,
-        "excluded_rules": excluded_rules, "max_hits": max_hits,
-    }))
+    return ok(rule_signals_payload(date, limit, max_hits))
 
 
-# ─────────────────────────────────────────────
-# 9. 个股深度 · 买卖建议（量价关系 + 涨跌节奏 + 买卖建议）
-# ─────────────────────────────────────────────
+# 个股深度编排已下沉 core/services/stock_deep_service.py；
+# 推荐跟踪（含后台回补进程）编排已下沉 core/services/deep_tracking.py（T7）
+from core.services.stock_deep_service import (
+    market_payload as deep_market_payload,
+    submit_scan as deep_submit_scan,
+    scan_status_payload as deep_scan_status_payload,
+    analyze_payload as deep_analyze_payload,
+    search_payload as deep_search_payload,
+    recent_payload as deep_recent_payload,
+)
+from core.services.deep_tracking import (
+    DeepTrackError,
+    list_payload as track_list_payload,
+    refresh_payload as track_refresh_payload,
+    read_backfill_progress, start_backfill as track_start_backfill,
+    close_payload as track_close_payload,
+    delete_payload as track_delete_payload,
+)
+
+
 @investor_bp.route("/stock_deep/market", methods=["GET"])
 def stock_deep_market():
-    """明日买入候选：优先返回最近一次「全市场深析扫描」结果；无结果时回退到已关注池扫描。
-
-    GET /api/investor/stock_deep/market?limit=10
-      全市场深析扫描：每日盘后同步+打分后由 scheduler 触发（也可 POST /stock_deep/scan 手动跑），
-      结果落库 stock_deep_signal；本接口读最近一次。若尚无全市场结果，则用已关注池（今日推荐+
-      自选+持仓 ≤60 只）实时计算。返回 { items, source: 'full'|'pool', scan_date, ... }。
-    """
+    """明日买入候选（全市场扫描优先，已关注池兜底）—— 薄路由。"""
+    limit = max(1, min(request.args.get("limit", 10, type=int), 30))
     try:
-        limit = request.args.get("limit", 10, type=int)
-        limit = max(1, min(limit, 30))
-        from strategy.stock_deep import get_market_signal_latest, scan_market_buy
-        with get_conn() as conn:
-            items = get_market_signal_latest(conn, limit)
-            source = "full"
-            scan_date = (items[0].get("scan_date") if items else None) or None
-            if not items:
-                # 回退：已关注池实时计算
-                codes: dict = {}
-                for r in conn.execute(
-                    "SELECT code FROM stock_signal WHERE scan_date=(SELECT MAX(scan_date) FROM stock_signal)"
-                ).fetchall():
-                    codes.setdefault(r["code"], "推荐")
-                for r in conn.execute("SELECT code FROM personal_watchlist").fetchall():
-                    codes.setdefault(r["code"], "自选")
-                for r in conn.execute(
-                    "SELECT code FROM personal_position WHERE status='holding'"
-                ).fetchall():
-                    codes.setdefault(r["code"], "持仓")
-                pool = list(codes.keys())[:60]
-                items = scan_market_buy(conn, pool, limit)
-                source = "pool"
-        # main_n = 当日真正建跟踪单（要花钱买）的只数，取自 DEEP_TRACK.daily_top_n。
-        # 前端据此把列表切成「主推(main_n) + 信息储备」两层 —— 配置单一来源，
-        # 避免前端再写死一个 4 导致改了配置两边不一致。
-        try:
-            from config.strategy_params import DEEP_TRACK as _DT
-            main_n = int(_DT.get("daily_top_n", 4) or 4)
-        except Exception:
-            main_n = 4
-        reserve_n = max(0, len(items) - main_n)
-        return ok(_sanitize({
-            "items": items,
-            "source": source,
-            "scan_date": scan_date,
-            "main_n": max(1, min(main_n, len(items) or main_n)),
-            "reserve_n": reserve_n,
-            "note": "source=full 为全市场深析扫描落库结果；source=pool 为已关注池(今日推荐+自选+持仓)结果；"
-                    "main_n 为当日主推（实际建跟踪单）只数，其后 reserve_n 只为信息储备候选",
-        }))
+        return ok(deep_market_payload(limit))
     except Exception as e:
         return fail(f"明日候选计算失败: {e}", 500)
 
 
 @investor_bp.route("/stock_deep/scan", methods=["POST"])
 def stock_deep_scan():
-    """手动触发全市场深析扫描（异步后台任务，结果落库 stock_deep_signal）。
-
-    POST /api/investor/stock_deep/scan
-    返回 { task_id, running, message }；前端可轮询 /stock_deep/scan_status。
-    """
+    """手动触发全市场深析扫描（异步任务）—— 薄路由。"""
     try:
-        from core.task_queue import submit_task, is_any_running
-        if is_any_running("sd_scan"):
-            return ok({"running": True, "task_id": None,
-                       "message": "全市场深析扫描已在运行，请稍候"})
-
-        def _run(progress_callback=None):
-            from strategy.stock_deep import run_full_market_scan
-            from core.db import get_conn as _gc
-            with _gc() as conn:
-                return run_full_market_scan(conn, progress_callback=progress_callback)
-
-        task_id = submit_task(_run, kind="sd_scan")
-        return ok({"running": True, "task_id": task_id,
-                   "message": "全市场深析扫描已启动（约几分钟），完成后可在「明日候选」查看"})
+        return ok(deep_submit_scan())
     except Exception as e:
         return fail(f"触发全市场深析扫描失败: {e}", 500)
 
 
 @investor_bp.route("/stock_deep/scan_status", methods=["GET"])
 def stock_deep_scan_status():
-    """全市场深析扫描状态：是否在运行 + 进度 + 最近一次扫描日期/候选数。"""
+    """全市场深析扫描状态 —— 薄路由。"""
     try:
-        from core.task_queue import is_any_running, get_running_task
-        running = is_any_running("sd_scan")
-        running_task = get_running_task("sd_scan")
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT MAX(scan_date) AS d, COUNT(*) AS c FROM stock_deep_signal"
-            ).fetchone()
-        return ok({
-            "running": running,
-            "progress": (running_task or {}).get("progress", 0),
-            "message": (running_task or {}).get("message", ""),
-            "scan_date": row["d"] if row else None,
-            "candidates": row["c"] if row else 0,
-        })
+        return ok(deep_scan_status_payload())
     except Exception as e:
         return fail(f"查询扫描状态失败: {e}", 500)
 
 
 @investor_bp.route("/stock_deep/<code>", methods=["GET"])
 def stock_deep(code: str):
-    """个股深度分析：学习该股历史走势与量价关系 → 识别涨跌节奏 → 给出近期买卖建议。
-
-    GET /api/investor/stock_deep/600519?lookback=260&recent_days=45
-    返回 { code, name, industry, as_of, latest, trend, volume_price, rhythm,
-           signal, recent_advice, chart, track_events }。
-    track_events = 该股跟踪单的实际建仓/卖出成交点（K 线叠加用，与 B/S 档位标记不同源）。
-    数据不足返回 { insufficient: true, reason }。
-    """
+    """单股深度分析（量价 + 节奏 + 买卖建议）—— 薄路由。"""
     try:
         from config.strategy_params import DEEP_LOOKBACK
-        lookback = request.args.get("lookback", DEEP_LOOKBACK, type=int)
-        recent_days = request.args.get("recent_days", 45, type=int)
-        lookback = max(120, min(lookback, 600))
-        recent_days = max(10, min(recent_days, 90))
-
-        from strategy.stock_deep import analyze_stock
-        with get_conn() as conn:
-            result = analyze_stock(conn, code, lookback=lookback, recent_days=recent_days)
-            from strategy.deep_tracker import get_track_events
-            result["track_events"] = get_track_events(conn, code)
-        return ok(_sanitize(result))
+        lookback = max(120, min(request.args.get("lookback", DEEP_LOOKBACK, type=int), 600))
+        recent_days = max(10, min(request.args.get("recent_days", 45, type=int), 90))
+        return ok(deep_analyze_payload(code, lookback, recent_days))
     except Exception as e:
         return fail(f"个股深度分析失败: {e}", 500)
 
 
 @investor_bp.route("/stocks/search", methods=["GET"])
 def stock_search():
-    """个股搜索（供深度面板的股票切换器自动补全）。
-
-    GET /api/investor/stocks/search?q=贵州&limit=20
-    q 为空时返回自选/持仓/今日推荐里的热门候选（v1 做切换点击的种子）。
-    匹配规则：code 前缀 或 name 包含；仅返回 is_active=1 且有行情数据的股票。
-    """
+    """股票搜索/自动补全 —— 薄路由。"""
     q = (request.args.get("q") or "").strip()
-    limit = request.args.get("limit", 20, type=int)
-    limit = max(1, min(limit, 50))
-
-    with get_conn() as conn:
-        if q:
-            # 按代码（前缀）或名称（包含）匹配。非数字时代码前缀置为不可能匹配的值，
-            # 否则 f"{''}%" 会变成 "%" 导致 code LIKE '%' 匹配全部股票。
-            is_digit = q.isdigit()
-            code_pat = f"{q}%" if is_digit else "zzzz"   # 非数字：代码完全不匹配，仅按名称
-            like = f"%{q}%"
-            rows = conn.execute(
-                """
-                SELECT i.code, i.name, i.industry, i.market
-                FROM stock_info i
-                WHERE i.is_active = 1
-                  AND (i.code LIKE ? OR i.name LIKE ?)
-                  AND EXISTS (SELECT 1 FROM daily_price d WHERE d.code = i.code)
-                ORDER BY
-                    CASE WHEN i.code LIKE ? THEN 0 WHEN i.name LIKE ? THEN 1 ELSE 2 END,
-                    i.code
-                LIMIT ?
-                """,
-                (code_pat, like, code_pat, like, limit),
-            ).fetchall()
-        else:
-            # 无关键词：返回自选 + 持仓 + 今日推荐里的股票，作为切换种子
-            seed_codes = {}
-            for r in conn.execute(
-                "SELECT code, '自选' AS src FROM personal_watchlist "
-                "UNION ALL SELECT code, '持仓' AS src FROM personal_position WHERE status='holding' "
-                "UNION ALL SELECT code, '推荐' AS src FROM stock_signal "
-                "WHERE scan_date = (SELECT MAX(scan_date) FROM stock_signal)"
-            ).fetchall():
-                seed_codes.setdefault(r["code"], r["src"])
-            codes = list(seed_codes.keys())
-            if not codes:
-                return ok({"items": []})
-            ph = ",".join("?" * len(codes))
-            rows = conn.execute(
-                f"""
-                SELECT i.code, i.name, i.industry, i.market
-                FROM stock_info i WHERE i.is_active = 1 AND i.code IN ({ph})
-                LIMIT ?
-                """,
-                [*codes, limit],
-            ).fetchall()
-
-    items = [dict(r) for r in rows]
-    if q:
-        # 过滤掉无行情数据的（保险起见，前端再兜底）
-        pass
-    return ok(_sanitize({"items": items, "query": q}))
+    limit = max(1, min(request.args.get("limit", 20, type=int), 50))
+    return ok(deep_search_payload(q, limit))
 
 
 @investor_bp.route("/stock_deep/recent", methods=["GET"])
 def stock_deep_recent():
-    """个股深度面板的"近期关注"候选：自选 + 持仓 + 最新推荐，供一键切换。
-
-    GET /api/investor/stock_deep/recent
-    返回 { items: [{code, name, industry, src}] }
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT code, '自选' AS src, created_at AS ts FROM personal_watchlist
-            UNION ALL
-            SELECT code, '持仓' AS src, opened_at AS ts FROM personal_position WHERE status='holding'
-            UNION ALL
-            SELECT code, '推荐' AS src, scan_date AS ts FROM stock_signal
-              WHERE scan_date = (SELECT MAX(scan_date) FROM stock_signal)
-            ORDER BY ts DESC
-            """,
-        ).fetchall()
-        seen = set()
-        out = []
-        for r in rows:
-            if r["code"] in seen:
-                continue
-            seen.add(r["code"])
-            info = conn.execute(
-                "SELECT name, industry FROM stock_info WHERE code = ?", (r["code"],)
-            ).fetchone()
-            out.append({
-                "code": r["code"],
-                "name": info["name"] if info else r["code"],
-                "industry": info["industry"] if info and "industry" in info.keys() else None,
-                "src": r["src"],
-            })
-            if len(out) >= 14:
-                break
-    return ok(_sanitize({"items": out}))
+    """近期关注候选（自选+持仓+最新推荐）—— 薄路由。"""
+    return ok(deep_recent_payload())
 
 
-# ─────────────────────────────────────────────
-# 10. 个股深度 · 推荐跟踪（买点建仓 → 卖点出场 → 每笔持仓时间与收益）
-# ─────────────────────────────────────────────
 @investor_bp.route("/deep_track", methods=["GET"])
 def deep_track_list():
-    """个股深度跟踪列表 + 汇总统计。
-
-    GET /api/investor/deep_track?status=holding&limit=100&days=90
-      status 为空=全部；days 只影响统计的回溯范围（按 scan_date），不影响列表。
-    返回 { items, stats, updated_at, total }：
-      items 每笔含推荐买点/止损/止盈、建仓日与成交价、出场日与出场价、
-      持仓交易日 hold_tdays、收益 return_pct；持仓中另有 float_return 浮盈。
-      total 为**符合当前 status 过滤**的总笔数（不是返回条数）——回补后动辄
-      几百笔，前端靠它判断还有没有更多、要不要显示「加载更多」。
-    """
+    """深析推荐跟踪列表 + 汇总 —— 薄路由。"""
     try:
-        from strategy.deep_tracker import ensure_table, get_tracks, get_stats
         status = request.args.get("status", "").strip() or None
         limit = max(1, min(request.args.get("limit", 100, type=int), 1000))
         days = request.args.get("days", None, type=int)
-        with get_conn() as conn:
-            ensure_table(conn)
-            items = get_tracks(conn, status=status, limit=limit)
-            stats = get_stats(conn, days=days)
-            last = conn.execute(
-                "SELECT MAX(updated_at) AS t FROM deep_track").fetchone()
-            # 与 get_tracks 相同的过滤条件，统计「符合条件」的总数
-            where, args = "", []
-            if status:
-                keys = [s.strip() for s in str(status).split(",") if s.strip()]
-                if keys:
-                    where = "WHERE status IN ({})".format(",".join("?" * len(keys)))
-                    args.extend(keys)
-            total = conn.execute(
-                f"SELECT COUNT(*) AS c FROM deep_track {where}", args).fetchone()["c"]
-        return ok(_sanitize({
-            "items": items,
-            "stats": stats,
-            "updated_at": (last["t"] if last else None),
-            "total": int(total or 0),
-        }))
+        return ok(track_list_payload(status, limit, days))
     except Exception as e:
         return fail(f"跟踪列表读取失败: {e}", 500)
 
 
 @investor_bp.route("/deep_track/refresh", methods=["POST"])
 def deep_track_refresh():
-    """手动跑一次跟踪推进（调度每日盘后自动跑，这里用于补跑/回补）。
-
-    POST /api/investor/deep_track/refresh  body: { "backfill_days": 0 }
-      backfill_days > 0 时对最近 N 个扫描日补建跟踪单（首次接入时用，让统计立刻有样本）。
-    """
+    """手动推进跟踪 / 回补最近 N 个扫描日的跟踪单 —— 薄路由。"""
     try:
-        from strategy.deep_tracker import refresh, backfill
         body = request.get_json(silent=True) or {}
         days = int(body.get("backfill_days") or 0)
-        with get_conn() as conn:
-            if days > 0:
-                res = backfill(conn, days=min(days, 180))
-                res["mode"] = "backfill"
-            else:
-                res = refresh(conn)
-                res["mode"] = "refresh"
-        return ok(_sanitize(res))
+        return ok(track_refresh_payload(days))
     except Exception as e:
         return fail(f"跟踪推进失败: {e}", 500)
 
 
-# ─────────────────────────────────────────────
-# 历史扫描日回补（后台独立进程）
-# ─────────────────────────────────────────────
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BACKFILL_SCRIPT = os.path.join(_ROOT, "tools", "backfill_deep_scan.py")
-_BACKFILL_PROGRESS = os.path.join(_ROOT, "data_cache", "backfill_deep_scan.json")
-
-
-def _read_backfill_progress() -> dict:
-    """读取回补进度文件；文件不存在/损坏时返回 idle 状态。"""
-    if not os.path.exists(_BACKFILL_PROGRESS):
-        return {"status": "idle", "progress": 0, "message": "尚未运行"}
-    try:
-        with open(_BACKFILL_PROGRESS, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"status": "idle", "progress": 0, "message": "进度文件读取失败"}
-
-
-def _write_progress_atomic(data: dict) -> None:
-    """原子写进度文件（临时文件 + os.replace），避免前端读到写了一半的 JSON。"""
-    os.makedirs(os.path.dirname(_BACKFILL_PROGRESS), exist_ok=True)
-    tmp = _BACKFILL_PROGRESS + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, _BACKFILL_PROGRESS)
-
-
 @investor_bp.route("/deep_track/backfill_scan", methods=["POST"])
 def deep_track_backfill_scan():
-    """启动「历史扫描日回补」（后台独立进程，接口立即返回）。
-
-    POST body: { "days": 30, "procs": 8 }
-       days  回补最近 N 个交易日（1~180）
-       procs 并行进程数（默认 8；实测 8 进程约 46s/扫描日）
-
-    为什么要独立进程：回补一天就要对 4500+ 只股票跑全套指标，单进程约 5 分钟/天，
-    30 天就是 2.4 小时，不可能放在 Flask 请求里跑完。脚本内部用多进程（线程池无效——
-    analyze_stock 是纯 Python 计算不释放 GIL，实测 8 线程反而慢 4 倍）。
-    每天扫描都传 as_of=该交易日，杜绝未来函数。
-    """
+    """启动历史扫描日回补（后台独立进程，立即返回）—— 薄路由。"""
     try:
         body = request.get_json(silent=True) or {}
         days = max(1, min(int(body.get("days") or 30), 180))
         procs = max(1, min(int(body.get("procs") or 8), 16))
-
-        cur = _read_backfill_progress()
-        if cur.get("status") == "running":
-            return fail(f"回补任务正在运行中（{cur.get('message') or ''}），请等待完成", 409)
-
-        if not os.path.exists(_BACKFILL_SCRIPT):
-            return fail(f"回补脚本不存在: {_BACKFILL_SCRIPT}", 500)
-
-        os.makedirs(os.path.dirname(_BACKFILL_PROGRESS), exist_ok=True)
-
-        # 先落一个 running 状态再拉进程：脚本启动（Python 解释器 + 进程池 spawn）
-        # 需要几秒，若这段时间前端来轮询，会读到上一次任务残留的 success/error
-        # 而误判本轮已结束。预写 running 消除这个竞态。
-        _write_progress_atomic({
-            "status": "running", "progress": 0, "message": "正在启动…",
-            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "result": None, "error": None, "scanned_dates": [],
-        })
-
-        kwargs = {"cwd": _ROOT}
-        if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        subprocess.Popen(
-            [sys.executable, _BACKFILL_SCRIPT,
-             "--days", str(days), "--procs", str(procs),
-             "--progress-file", _BACKFILL_PROGRESS],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
-        return ok({"started": True, "days": days, "procs": procs,
-                   "message": f"已启动回补（{days} 个交易日），请在下方查看进度"})
+        return ok(track_start_backfill(days, procs))
+    except DeepTrackError as e:
+        return fail(e.msg, e.status)
     except Exception as e:
         return fail(f"启动回补失败: {e}", 500)
 
 
 @investor_bp.route("/deep_track/backfill_scan/status", methods=["GET"])
 def deep_track_backfill_scan_status():
-    """轮询回补进度：{ status, progress, message, result, error, scanned_dates }。
-
-    status: idle / running / success / error。脚本用临时文件+os.replace 原子写，
-    不会读到半截 JSON。
-    """
+    """轮询历史扫描日回补进度 —— 薄路由。"""
     try:
-        return ok(_read_backfill_progress())
+        return ok(read_backfill_progress())
     except Exception as e:
         return fail(f"进度读取失败: {e}", 500)
 
 
 @investor_bp.route("/deep_track/<int:tid>/close", methods=["POST"])
 def deep_track_close(tid: int):
-    """手动平仓：body { "price": 12.34 }；不传价格则用最新收盘价。"""
+    """手动平仓（body 可带 price）—— 薄路由。"""
     try:
-        from strategy.deep_tracker import close_track
         body = request.get_json(silent=True) or {}
-        price = body.get("price")
-        with get_conn() as conn:
-            res = close_track(
-                conn, tid,
-                price=float(price) if price not in (None, "") else None,
-            )
-        return ok(_sanitize(res))
+        return ok(track_close_payload(tid, body.get("price")))
     except ValueError as e:
         return fail(str(e), 400)
     except Exception as e:
@@ -3884,14 +518,11 @@ def deep_track_close(tid: int):
 
 @investor_bp.route("/deep_track/<int:tid>", methods=["DELETE"])
 def deep_track_delete(tid: int):
-    """删除一笔跟踪（误录入或不想再跟踪）。删除不进入收益统计。"""
+    """删除一笔跟踪（不进收益统计）—— 薄路由。"""
     try:
-        from strategy.deep_tracker import delete_track
-        with get_conn() as conn:
-            deleted = delete_track(conn, tid)
-        if not deleted:
-            return fail("跟踪单不存在", 404)
-        return ok({"deleted": tid})
+        return ok(track_delete_payload(tid))
+    except DeepTrackError as e:
+        return fail(e.msg, e.status)
     except Exception as e:
         return fail(f"删除失败: {e}", 500)
 
