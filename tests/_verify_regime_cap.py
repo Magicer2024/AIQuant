@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""验证 RECO_REGIME_CAP 合并与 mid/long cold 不归零（2026-09-15）。
+"""验证 RECO_REGIME_CAP 合并与各档不归零（2026-09-15 建，2026-10-14 更新）。
 
 检查点：
-  1. config 无 MID_LONG_REGIME_CAP 残留、RECO_REGIME_CAP 结构正确；
-  2. /api/investor/today 在 regime=cold 下 mid/long 出票、short 仍为 0；
-  3. 三档上限值与设计一致（cool 收缩 2/1，cold short=0）。
+  1. config 无 MID_LONG_REGIME_CAP 残留、RECO_REGIME_CAP 结构正确
+     （2026-10-14：short 改为不截断，与出场跟踪/复盘同口径）；
+  2. /api/investor/today 在 regime=cold 下 short/mid/long 均出票（不再归零）；
+  3. mid/long cool 收缩值与设计一致（2/1）。
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,7 +17,7 @@ fails = []
 # 1) 配置结构
 assert not hasattr(sp, "MID_LONG_REGIME_CAP"), "MID_LONG_REGIME_CAP 应已删除"
 tab = sp.RECO_REGIME_CAP
-expect = {"short": {"cold": 0, "cool": 2},
+expect = {"short": {},              # 2026-10-14：不截断 → short_top_n
           "mid": {"cool": 2},
           "long": {"cool": 1}}
 if tab != expect:
@@ -32,12 +33,26 @@ g = d["groups"]
 print(f"[2] date={d['date']} regime={regime} count={d['count']} "
       f"short={len(g['short'])} mid={len(g['mid'])} long={len(g['long'])}")
 
+# 当日各周期在 stock_signal 里是否真有候选：池子本来就空 ≠ 被展示层归零
+from core.db import get_conn
+with get_conn() as conn:
+    pool = {hz: conn.execute(
+        """SELECT COUNT(*) FROM stock_signal
+           WHERE scan_date = ? AND COALESCE(horizon, 'short') = ?""",
+        (d["date"], hz)).fetchone()[0]
+        for hz in ("short", "mid", "long")}
+print(f"    当日信号池 {pool}")
+
 if regime == "cold":
-    if len(g["short"]) != 0:
-        fails.append("cold 下 short 应为 0")
-    if len(g["mid"]) == 0:
+    if pool["short"] and len(g["short"]) == 0:
+        fails.append("cold 下 short 不应再归零（2026-10-14：走弱闸门已把抄底剔掉，"
+                     "剩下的隔日动量是该档唯一正期望票，展示层不该再砍）"
+                     "——若确认是门控/T1 过滤所致则属正常")
+    if len(g["short"]) > 3:
+        fails.append("cold 下 short 超过 short_top_n=3")
+    if pool["mid"] and len(g["mid"]) == 0:
         fails.append("cold 下 mid 不应再归零（本次修复目标）")
-    if len(g["long"]) == 0:
+    if pool["long"] and len(g["long"]) == 0:
         fails.append("cold 下 long 不应再归零（本次修复目标）")
     if len(g["mid"]) > 4 or len(g["long"]) > 4:
         fails.append("mid/long 超过 limit=4")

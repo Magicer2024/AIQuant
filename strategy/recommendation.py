@@ -126,9 +126,10 @@ def build_today_payload(*, limit: int, horizon_filter, target_date) -> dict:
     来源：stock_signal 表（融合分高 + 已有明确买入价/止损/止盈）
     分组：mid/long 按 fusion_score DESC；short 先 fusion≥门控、再按低扩展度排序，
           各取 limit 条（默认 4）；short 组另受 short_top_n=3 约束（2026-08-20 收缩）；
-          regime 天花板（RECO_REGIME_CAP 单一来源）：short cold→0/cool→2；
-          mid/long cool→2/1 收缩、cold 不归零（2026-09-15，实测 cold 是 mid/long
-          唯一正期望档）；其余 regime 走各周期默认上限
+          regime 天花板（RECO_REGIME_CAP 单一来源）：short 2026-10-14 起不再截断
+          （原 cold→0/cool→2，实证被归零的是 cold 日仅剩的正期望隔日动量，见该
+          常量注释）；mid/long cool→2/1 收缩、cold 不归零（2026-09-15，实测 cold
+          是 mid/long 唯一正期望档）；其余 regime 走各周期默认上限
     target_date：指定日期；None 用 stock_signal 最新扫描日
     返回 {date, market_regime, count, groups:{short,mid,long}, items(=short 组别名，兼容旧前端)}
     """
@@ -547,7 +548,8 @@ def build_today_payload(*, limit: int, horizon_filter, target_date) -> dict:
             }
 
         # 展示层 regime 天花板（config.RECO_REGIME_CAP 单一来源）：
-        #   short: cold→0 / cool→2 / 其余→short_top_n；
+        #   short: 2026-10-14 起不截断 → short_top_n（名额完全交给策略层的走弱闸门
+        #   与置信门控决定，与出场跟踪/复盘同口径）；
         #   mid/long: cool 收缩（2/1），cold 不再归零 —— 2026-09-14 实测 cold 是
         #   mid/long 唯一正期望档（long T+60 +2.96% n=2328），归零前提与数据相反，
         #   且当日曾致三档全空（mid 11 条 / long 345 条达标被丢）；其余 → limit。
