@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from config.strategy_params import get_param
+from config.strategy_params import get_param, get_strategy_config
 from core.db import get_conn
 
 
@@ -298,6 +298,7 @@ def build_exit_advice_payload() -> dict:
                                         EXIT_TRACK_START_DATE,
                                         POSITION_PLAN_MAX_PCT)
     from config.strategy_params import T1_GAP_GUARD as _T1_GAP_GUARD
+    from core.market_regime import compute_regime_series
     from core.outcome_tracker import (short_gate_sql, short_order_clause,
                                       short_observe_bottom_sql,
                                       long_order_clause,
@@ -336,12 +337,15 @@ def build_exit_advice_payload() -> dict:
         gap_sql = "0"
 
     with get_conn() as conn:
+        # regime 序列：走弱闸门 + 展示层名额判定共用同一份
+        # （compute_regime_series 贵，同窗口算两次曾实测占本请求近一半耗时）
+        regime_series = compute_regime_series(conn, EXIT_TRACK_START_DATE)
         # T1 辅助过滤（恐慌日闸门 + MA5 偏离，按信号日 regime 自动切换，
         # 隔日动量豁免；参数 >=99 禁用）+ 大盘走弱闸门（2026-08-26 弱市日
         # 只保留隔日动量）——各信号日按当天历史 regime 判定，两闸门共用
         # short_gate_sql（同一窗口 regime 只算一次，T4），与今日推荐/复盘同口径
         t1_cond, t1_params, mk_cond, mk_params = short_gate_sql(
-            conn, EXIT_TRACK_START_DATE)
+            conn, EXIT_TRACK_START_DATE, series=regime_series)
         # 抄底融合线降观察（2026-09-06）：不占短线名额（三处出口同口径）
         ob_cond, ob_params = short_observe_bottom_sql()
         horizon_specs = {
@@ -387,7 +391,7 @@ def build_exit_advice_payload() -> dict:
                 _pool = caps[hz] * long_sort_pool_mult()
                 signals += conn.execute(f"""
                     SELECT code, name, scan_date, buy_price,
-                           stop_loss, take_profit, fusion_score, horizon, strategy
+                           stop_loss, take_profit, fusion_score, horizon, strategy, rn
                     FROM (
                         SELECT code, name, scan_date, buy_price, stop_loss,
                                take_profit, fusion_score, horizon, strategy,
@@ -415,7 +419,7 @@ def build_exit_advice_payload() -> dict:
             else:
                 signals += conn.execute(f"""
                     SELECT code, name, scan_date, buy_price,
-                           stop_loss, take_profit, fusion_score, horizon, strategy
+                           stop_loss, take_profit, fusion_score, horizon, strategy, rn
                     FROM (
                         SELECT s.code, s.name, s.scan_date, s.buy_price,
                                s.stop_loss, s.take_profit, s.fusion_score,
@@ -435,14 +439,30 @@ def build_exit_advice_payload() -> dict:
                     "count": 0, "start_date": EXIT_TRACK_START_DATE,
                     "summary": {"hold": 0, "clear": 0}}
 
-        # 按 (code, scan_date, horizon) 去重
-        seen = set()
-        unique_signals = []
+        # 按 (code, scan_date, horizon) 去重：同一票同一日可能有多条信号线记录，
+        # ROW_NUMBER 会给重复行分到不同名次 ⇒ 保留最小 rn（= 线上真实名次）
+        best: dict = {}
         for s in signals:
             key = (s["code"], s["scan_date"], s["horizon"])
-            if key not in seen:
-                seen.add(key)
-                unique_signals.append(s)
+            if key not in best or int(s["rn"]) < int(best[key]["rn"]):
+                best[key] = s
+        unique_signals = list(best.values())
+
+        # ── 展示层可执行性标注（2026-10-14）────────────────────────────
+        # 「今日推荐」读 RECO_REGIME_CAP（short: cold→0 / cool→2），出场跟踪与
+        # 复盘入库不读 ⇒ 面板里会出现「用户当天没被推荐」的票。实证：面板窗
+        # 短线 63 笔中 9 笔（全部是 cold 日的隔日动量票）属于此类，且这 9 笔
+        # 均笔 +1.11% vs 可执行 54 笔 -0.69% —— 面板标题被这批票往上抬。
+        # 统计口径保持不变：3 年 E1「对齐展示层 cap」变体显示均笔 +1.801 vs
+        # base +1.792（t=-0.68 不显著）但合计 -3.7% ⇒ 对齐只减少笔数、不改善
+        # 单笔质量。因此这里只标出「当天是否真的会推给你」，不改选股。
+        cap_table = get_strategy_config("RECO_REGIME_CAP") or {}
+        reco_flags = {}
+        for s in unique_signals:
+            _hz = s["horizon"]
+            _rgn = regime_series.get(s["scan_date"], "")
+            _cap = int((cap_table.get(_hz) or {}).get(_rgn, caps[_hz]))
+            reco_flags[(s["code"], s["scan_date"], _hz)] = (int(s["rn"]) <= _cap, _rgn)
 
         # ── 连续推荐合并：同 (code, horizon) 且推荐日按交易日连续 → 合并为一段 ──
         # 段内：推荐日展示最新一次，持仓天数从最早一次累计，止损/止盈按最新一次判定；
@@ -609,6 +629,13 @@ def build_exit_advice_payload() -> dict:
                 "detail": detail,
             })
 
+    # 展示层可执行性标注：推荐日（= 合并后展示的那一次）当天是否真的会推给用户
+    for r in results:
+        shown, rgn = reco_flags.get(
+            (r["code"], r["scan_date"], r["horizon"]), (True, ""))
+        r["reco_shown"] = bool(shown)
+        r["market_regime"] = rgn
+
     # 排序：推荐日降序（最新在前），同一天内 clear > hold
     status_order = {"clear": 0, "hold": 1}
     results.sort(key=lambda x: (x["scan_date"], -status_order.get(x["status"], 2)), reverse=True)
@@ -648,6 +675,12 @@ def build_exit_advice_payload() -> dict:
         # 每笔按 20% 仓位下单时，对总资金的影响可**线性累加**（忽略复利，量级一致），
         # 有明确资金含义，直接回答"我的账户大概亏/赚了多少"。comp_pct 保留字段仅供调试。
         _avg = round(sum(allp) / len(allp), 2) if allp else None
+        # 展示层可执行性拆分（2026-10-14）：cold/cool 日被今日推荐名额截掉的笔
+        # 单独统计，让「策略池成绩」与「用户真能执行的成绩」的差异可见
+        _hid = [r for r in segs if not r.get("reco_shown", True)]
+        _vis = [r for r in segs if r.get("reco_shown", True)]
+        _hidp = [v for v in (_seg_pnl(r) for r in _hid) if v is not None]
+        _visp = [v for v in (_seg_pnl(r) for r in _vis) if v is not None]
         _comp = None
         if allp:
             _c = 1.0
@@ -680,6 +713,11 @@ def build_exit_advice_payload() -> dict:
             "pos_pct": round(POSITION_PLAN_MAX_PCT * 100),
             "cum_pnl": round(sum(allp), 2) if allp else None,
             "win_rate": round(sum(1 for v in allp if v > 0) / len(allp) * 100, 1) if allp else None,
+            # 「今日推荐当天不会推给你」的笔数与其均笔（RECO_REGIME_CAP 名额截断）；
+            # shown_mean_pct = 剔除这批笔后的均笔 = 用户实际可执行口径
+            "hidden_n": len(_hid),
+            "hidden_mean_pct": round(sum(_hidp) / len(_hidp), 2) if _hidp else None,
+            "shown_mean_pct": round(sum(_visp) / len(_visp), 2) if _visp else None,
         }
 
     return sanitize_numeric({

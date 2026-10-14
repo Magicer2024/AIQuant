@@ -1041,6 +1041,7 @@ function renderPickExitMini(hz, list, perf, startDate) {
             '<span class="hz-spacer"></span>' +
             '<span class="pick-exit-chips">' + exitStatChip(hz, perf) +
                 exitSplitChips(hz, list) +
+                exitCapChip(hz, perf) +
                 '<span class="exit-group-stat">持有 ' + held + '</span>' +
                 '<span class="exit-group-stat">已卖出 ' + cleared + '</span>' +
                 (watching > 0 ? '<span class="exit-group-stat">待回踩 ' + watching + '</span>' : '') +
@@ -3011,6 +3012,20 @@ function exitSplitChips(hz, list) {
     return s;
 }
 
+// 展示层名额差异（2026-10-14 新增）：「今日推荐」按 RECO_REGIME_CAP 在 cold 日把
+// 短线归零、cool 日砍到 2 只，而出场跟踪评的是完整策略池 ⇒ 面板里会混进
+// 「当天根本没推给你」的笔（面板窗短线 63 笔中 9 笔，全是 cold 日隔日动量）。
+// 不改统计口径：3 年样本验证过把 cap 对齐进跟踪只减少笔数、不改善单笔
+// （均笔 +1.801% vs base +1.792%，t=-0.68 不显著，合计 -3.7%）。
+// 数值全部取后端 perf，前端不做推算。
+function exitCapChip(hz, perf) {
+    const p = (perf && perf[hz]) || {};
+    const n = p.hidden_n || 0;
+    if (!n) return '';
+    const f = v => v == null ? '--' : `${v >= 0 ? '+' : ''}${v}%`;
+    return `<span class="exit-group-stat exit-cap" title="这 ${n} 笔在「今日推荐」当天不会展示给你（大盘 cold 日短线名额归零 / cool 日只留 2 只），但计入了上面的「平均每笔」。它们均笔 ${f(p.hidden_mean_pct)}，剔除后你可执行口径均笔 ${f(p.shown_mean_pct)}。跟踪仍按完整策略池统计，是为了和回测/复盘保持同一口径。">${n}笔未展示 · 可执行 ${f(p.shown_mean_pct)}</span>`;
+}
+
 // 跟踪列表行（展开态表格 tbody）
 // ── 列集合（2026-10-13 重排，表头见 renderExitGroupBody，两者必须一一对应）──
 // 修掉此前「表头 10 列 / 单元格 11 个」的整列错位（加「现价」列时没回头补表头，
@@ -3110,9 +3125,16 @@ function renderExitRows(list, maxHold) {
               : muted;
         // 连续推荐：推荐日显示最新一次，附最早推荐日提示
         const firstDate = detail.first_scan_date;
+        // 展示层名额闸门：该推荐日「今日推荐」不会推给用户（cold 日短线归零 /
+        // cool 日只留 2 只），但完整策略池的出场跟踪仍计入 —— 标出来避免
+        // 「这票我昨天没见过」的误读（2026-10-14）
+        const capTag = it.reco_shown === false
+            ? `<div class="exit-sub exit-cap-tag" title="该推荐日大盘状态 ${it.market_regime || '未知'}，「今日推荐」按 RECO_REGIME_CAP 名额闸门不会推给你（cold→0 / cool→2）。这笔只计入策略池跟踪统计，不代表你当天有可执行标的。">未展示 · ${it.market_regime || '闸门'}</div>`
+            : '';
         const scanHtml = (it.scan_date || '--')
             + (firstDate && firstDate !== it.scan_date
-                ? `<div class="exit-sub">自 ${firstDate} 连续推荐</div>` : '');
+                ? `<div class="exit-sub">自 ${firstDate} 连续推荐</div>` : '')
+            + capTag;
         const isPullback = (it.strategy || '') !== '隔日动量';
         const entryTip = isPullback
             ? `回踩买点 ${exitNum(entry) || '--'}：推荐日后若干交易日内价格触及才建仓，`

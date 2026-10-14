@@ -28,7 +28,7 @@ global.localStorage = { getItem: () => null, setItem: () => {} };
 global.openKline = () => {};
 const sandbox = new Function(
     code + '\nreturn {renderPickExitMini, renderExitGroupBody, renderExitRows, ' +
-    'exitStatChip, exitSplitChips, EXIT_HORIZON_META};')();
+    'exitStatChip, exitSplitChips, exitCapChip, EXIT_HORIZON_META};')();
 
 const counts = (s, re) => (s.match(re) || []).length;
 let failures = [];
@@ -65,6 +65,18 @@ let failures = [];
         console.log(`  分组 chips: ${(chips.match(/>[^<]+</g) || []).map(s => s.slice(1, -1)).join(' / ') || '（无）'}`);
         console.log(`  统计 chips: ${(sandbox.exitStatChip(hz, perf).match(/>[^<]+</g) || []).map(s => s.slice(1, -1)).join(' / ')}`);
         console.log(`  max_hold = ${p.max_hold}`);
+    }
+    // 展示层名额标注（2026-10-14）：hidden_n>0 时 chips 与明细行标签都必须出现
+    if ((p.hidden_n || 0) > 0) {
+        const capChip = sandbox.exitCapChip(hz, perf);
+        if (!capChip) failures.push(`${hz}: perf.hidden_n=${p.hidden_n} 但展示层 chips 未渲染`);
+        const nTag = (table.match(/未展示/g) || []).length;
+        const nHidden = list.filter(it => it.reco_shown === false).length;
+        if (nTag !== nHidden) {
+            failures.push(`${hz}: 行内「未展示」标签 ${nTag} 个 ≠ reco_shown=false 的 ${nHidden} 段`);
+        }
+        console.log(`  展示层 chips: ${(capChip.match(/>[^<]+</g) || []).map(s => s.slice(1, -1)).join(' / ')}` +
+                    ` | 行内标签 ${nTag}/${nHidden} 段`);
     }
 });
 

@@ -186,16 +186,21 @@ def short_market_gate_sql(conn, start_date: str, end_date: str | None = None,
 
 
 def short_gate_sql(conn, start_date: str, end_date: str | None = None,
-                   alias: str = "s") -> tuple[str, list, str, list]:
+                   alias: str = "s",
+                   series: dict | None = None) -> tuple[str, list, str, list]:
     """T1 辅助过滤 + 大盘走弱闸门组合版：同一窗口的 regime 只计算一次。
 
     两个过滤器都按信号日 regime 判定，而 compute_regime_series 同窗口重复
     计算实测占出场跟踪请求近一半耗时（cProfile 2×2.3s，2026-10 T4）。
     返回 (t1_cond, t1_params, mk_cond, mk_params)，与分别调用两个
     *_filter_sql 完全同构（口径不变），调用方拼接方式无需改变。
+
+    series：调用方已算好的 {trade_date: regime}（如出场跟踪还要用它推展示层
+    名额，则复用同一份，避免二次窗口计算）；缺省 None 时自行计算。
     """
     from core.market_regime import compute_regime_series
-    series = compute_regime_series(conn, start_date, end_date)
+    if series is None:
+        series = compute_regime_series(conn, start_date, end_date)
     t1_cond, t1_params = short_t1_filter_sql(conn, start_date, end_date,
                                              alias, series=series)
     mk_cond, mk_params = short_market_gate_sql(conn, start_date, end_date,
