@@ -449,13 +449,16 @@ def build_exit_advice_payload() -> dict:
         unique_signals = list(best.values())
 
         # ── 展示层可执行性标注（2026-10-14）────────────────────────────
-        # 「今日推荐」读 RECO_REGIME_CAP（short: cold→0 / cool→2），出场跟踪与
+        # 「今日推荐」读 RECO_REGIME_CAP（原 short: cold→0 / cool→2），出场跟踪与
         # 复盘入库不读 ⇒ 面板里会出现「用户当天没被推荐」的票。实证：面板窗
         # 短线 63 笔中 9 笔（全部是 cold 日的隔日动量票）属于此类，且这 9 笔
         # 均笔 +1.11% vs 可执行 54 笔 -0.69% —— 面板标题被这批票往上抬。
         # 统计口径保持不变：3 年 E1「对齐展示层 cap」变体显示均笔 +1.801 vs
         # base +1.792（t=-0.68 不显著）但合计 -3.7% ⇒ 对齐只减少笔数、不改善
         # 单笔质量。因此这里只标出「当天是否真的会推给你」，不改选股。
+        # ⚠ 同日已按该结论把 RECO_REGIME_CAP 三档全部清空（展示层 = 策略层产出），
+        #   ⇒ 当前 hidden_n 恒为 0、标签不再出现；本段保留作口径回归监控，
+        #   将来若恢复任何 regime 截断，这里会立刻把「用户拿不到」的笔重新标出来。
         cap_table = get_strategy_config("RECO_REGIME_CAP") or {}
         reco_flags = {}
         for s in unique_signals:
