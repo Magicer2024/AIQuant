@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017d">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017e">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -42,7 +42,7 @@
         /* 双层候选：主推（实际建仓，资金有限只做这批） / 信息储备（展开看，可不建仓） */
         .sd-market-card.is-main{border-color:rgba(var(--accent-rgb),.42);background:linear-gradient(180deg,rgba(var(--accent-rgb),.055),transparent 62%)}
         .sd-market-card.is-main:hover{box-shadow:0 0 0 1px rgba(var(--accent-rgb),.32)}
-        .sd-badge-main{font-size:var(--fs-1);padding:1px 5px;border-radius:3px;background:rgba(var(--accent-rgb),.15);color:var(--accent);font-weight:700;letter-spacing:.4px;flex:none}
+        .sd-badge-main{font-size:var(--fs-1);padding:1px 6px;border-radius:3px;background:var(--tint-accent);color:var(--accent);font-weight:700;letter-spacing:.4px;flex:none}
         .sd-market-card.is-reserve{opacity:.8}
         .sd-market-card.is-reserve:hover{opacity:1}
         .sd-sec-label{font-size:var(--fs-1);color:var(--text-muted);margin:2px 0 6px;display:flex;align-items:center;gap:5px}
@@ -99,7 +99,7 @@
         .sd-tl-item .lvl{width:88px;flex:none}
         .sd-tl-item .brief{flex:1;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .sd-lvl-chip{display:inline-block;padding:2px 8px;border-radius:10px;font-size:var(--fs-1);font-weight:600}
-        .sd-lvl-buy{background:rgba(var(--green-rgb),.16);color:var(--green)}
+        .sd-lvl-buy{background:var(--tint-good);color:var(--status-good)}
         .sd-lvl-add{background:rgba(255,170,60,.16);color:#ffaa3c}
         .sd-lvl-hold{background:rgba(var(--accent-rgb),.14);color:var(--accent)}
         .sd-lvl-sell{background:rgba(var(--danger-rgb),.14);color:var(--danger)}
@@ -132,7 +132,7 @@
         .sd-st-watching{background:var(--tint-warn);color:#8a5a00}
         .sd-st-closed{background:var(--tint-good);color:var(--status-good)}
         .sd-st-expired{background:rgba(16,24,40,.06);color:var(--text-secondary)}
-        .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:var(--fs-1);padding:1px 6px;cursor:pointer;margin-right:4px}
+        .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:var(--fs-1);padding:3px 9px;cursor:pointer;margin-right:4px}
         .sd-op:hover{border-color:var(--accent);color:var(--text-primary)}
         .sd-op.danger:hover{border-color:var(--danger);color:var(--danger)}
     </style>
@@ -159,6 +159,8 @@
 </nav>
 
 <main class="content" id="content"></main>
+<button id="backTop" class="back-top" aria-label="回到顶部" title="回到顶部"
+        onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
 
 <!-- 全局同步进度条（所有 tab 共用） -->
 <div id="syncProgress" style="display:none; margin: 12px 20px; padding: 12px 16px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px;">
@@ -341,6 +343,22 @@ var TabState = {
 
     save: function(tab) {
         var content = document.getElementById('content');
+        // innerHTML 只序列化属性：把 input/select 当前值写回属性，
+        // 否则缓存恢复后日期/下拉回退默认值（任务12 遗留②：pickDate 跳 tab 回空）
+        if (content) {
+            try {
+                content.querySelectorAll('input').forEach(function (i) {
+                    if (i.type === 'checkbox' || i.type === 'radio') i.setAttribute('checked', i.checked ? 'checked' : '');
+                    else i.setAttribute('value', i.value);
+                });
+                content.querySelectorAll('select').forEach(function (sel) {
+                    Array.prototype.forEach.call(sel.options, function (o) {
+                        if (o.selected) o.setAttribute('selected', 'selected');
+                        else o.removeAttribute('selected');
+                    });
+                });
+            } catch (e) {}
+        }
         var scrollEl = document.querySelector('.content');
         this.states[tab] = {
             html: content ? content.innerHTML : '',
@@ -489,10 +507,46 @@ function initAnchorNav() {
     }
 }
 
+// ── P3#6：回顶按钮——滚动超 1.5 屏浮出（rAF 节流）──
+(function () {
+    var btn = null, ticking = false;
+    function upd() {
+        if (!btn) btn = document.getElementById('backTop');
+        if (btn) btn.classList.toggle('show', window.scrollY > window.innerHeight * 1.5);
+        ticking = false;
+    }
+    window.addEventListener('scroll', function () {
+        if (!ticking) { ticking = true; requestAnimationFrame(upd); }
+    }, { passive: true });
+})();
+
+// ── P3#10：「详情/收起」就地手风琴——togglePickDetail 同步换 innerHTML 后，
+//    对 .pick-group-body 的高度变化补 160ms ease-out 过渡（capture 先于按钮 onclick 记录旧高）──
+document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('.pick-detail-toggle') : null;
+    if (!btn || btn.disabled) return;
+    var group = btn.closest('.pick-group');
+    var body = group && group.querySelector('.pick-group-body');
+    if (!body || !body.animate) return;
+    var from = body.getBoundingClientRect().height;
+    requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+            var to = body.getBoundingClientRect().height;
+            if (Math.abs(to - from) > 4) {
+                body.animate(
+                    [{ height: from + 'px', overflow: 'hidden' }, { height: to + 'px', overflow: 'hidden' }],
+                    { duration: 160, easing: 'ease-out' });
+            }
+        });
+    });
+}, true);
+
 // 切页防抖：120ms 内连续点击导航只执行最后一次内容加载。
 // 旧实现每次点击都立刻 cancelAll+骨架屏+loadTab，快速点两页时第一页的加载全部白做。
 // 导航高亮点击即更新（即时视觉反馈，且不依赖延迟后的内容加载）。
+var _tabScroll = {};   // P3#6：每 tab 记忆窗口滚动位置
 function switchTab(tab) {
+    if (typeof currentTab !== 'undefined' && currentTab) _tabScroll[currentTab] = window.scrollY;
     var navItems = document.querySelectorAll('.nav-item');
     for (var i = 0; i < navItems.length; i++) { navItems[i].classList.remove('active'); }
     var btn = document.querySelector('.nav-item[onclick*="' + tab + '"]');
@@ -521,6 +575,7 @@ function _doSwitchTab(tab) {
         document.getElementById('content').innerHTML = cached.html;
         var scrollEl = document.querySelector('.content');
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
+        window.scrollTo(0, _tabScroll[tab] || 0);     // P3#6：恢复该 tab 的滚动位置
         if (tab === 'research') restoreStockDeep();   // cache 恢复时重绘个股深度图表
         renderAnchorBar(tab); initAnchorNav();        // tab 内迷你锚点随内容重建
         return;
@@ -540,6 +595,7 @@ async function loadTab(tab) {
 
         c.firstElementChild?.classList.add('tab-content');
         renderAnchorBar(tab); initAnchorNav();
+        window.scrollTo(0, _tabScroll[tab] || 0);     // P3#6：新加载完成后恢复滚动位置
     } catch(e) {
         showToast('加载失败，请重试', 'error');
         c.innerHTML = '<div class="empty-state" style="color:var(--danger)">加载失败: ' + e.message + '</div>';
@@ -1614,8 +1670,8 @@ function renderReversalStats(s, enabled) {
                 </div></details>
             </div>
             <div style="margin-bottom:6px;padding:6px 11px;border-radius:6px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.30);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.6">
-                <b style="color:var(--status-warn)">⚠ 收益集中于创业板（未开通不可交易）</b> · 可交易子集明显更弱
-                <details style="display:inline-block;margin-left:6px;vertical-align:baseline"><summary style="display:inline;cursor:pointer;color:var(--status-warn)">详情</summary><div style="margin-top:6px;line-height:1.7">
+                <b style="color:#8a5a00">⚠ 收益集中于创业板（未开通不可交易）</b> · 可交易子集明显更弱
+                <details style="display:inline-block;margin-left:6px;vertical-align:baseline"><summary style="display:inline;cursor:pointer;color:#8a5a00">详情</summary><div style="margin-top:6px;line-height:1.7">
                 实盘跟踪 951→<b>485</b> 条按主板口径重算后，
                 创业板子样本 n=466 胜率 <b>58.9%</b>／均 +2.38%（PF 1.99），
                 主板子样本 n=485 胜率 <b>47.1%</b>／均 +0.79% ⇒
@@ -1922,7 +1978,7 @@ function renderReversalCard(it) {
         <div class="action-card" style="border-color:rgba(60,180,255,0.35)${it.missed ? ';opacity:.6' : ''}" onclick="openKline('${it.code}')">
             <div class="action-head">
                 <div>
-                    <div class="action-name">${it.name || it.code} <span class="strategy-badge" style="background:rgba(60,180,255,0.15);color:#2b8fd6">反转首日</span></div>
+                    <div class="action-name">${it.name || it.code} <span class="strategy-badge" style="background:var(--tint-accent);color:var(--accent)">反转首日</span></div>
                     <div class="action-code">${it.code}${it.industry ? ` · ${it.industry}` : ''}</div>
                 </div>
                 <div class="action-score" title="首日分：量比与涨幅强度合成（30~50），非收益预测">
@@ -3751,7 +3807,7 @@ function renderPositionAdvice(advice) {
         const src = det.stop_mode === 'atr' ? 'ATR动态' : '固定';
         stopTxt = ` · 止损 ${Number(det.stop_price).toFixed(2)}（${src}${pct ? ' ' + pct : ''}）`;
     }
-    return `<div style="padding:4px 10px;font-size:var(--fs-2);color:var(--text-secondary);border-left:2px solid var(--border);background:rgba(255,255,255,0.02);margin-top:2px">诊断：<span class="badge ${m.badge}">${m.label}</span>${reason}${stopTxt}</div>`;
+    return `<div style="padding:4px 10px;font-size:var(--fs-2);color:var(--text-secondary);border-left:2px solid var(--border);background:var(--bg-cell);margin-top:2px">诊断：<span class="badge ${m.badge}">${m.label}</span>${reason}${stopTxt}</div>`;
 }
 
 async function loadMyPositions() {
@@ -3768,7 +3824,7 @@ async function loadMyPositions() {
                         ${i.status==='clear'?'<span class="badge badge-bad">清仓</span>':(i.status==='reduce'?'<span class="badge badge-warn">减仓</span>':'<span class="badge badge-good">持有</span>')}
                         <b>${i.code}</b> ${i.name||''} — ${i.reason||''}
                      </div>`).join('');
-                adviceBanner = `<div style="margin-bottom:10px;padding:8px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:8px;background:rgba(255,255,255,0.02)">
+                adviceBanner = `<div style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-cell)">
                     <div style="font-size:var(--fs-2);font-weight:600;margin-bottom:4px">同步后持仓建议（${ha.summary||''}）</div>${rows}</div>`;
             }
         } catch(e) { /* 横幅获取失败不影响持仓列表 */ }
@@ -4535,11 +4591,15 @@ async function maybeAutoSync() {
 
 function onAutoSyncDone(msg) {
     if (msg) showToast(msg, 'success');
-    // 后端「同步」已自洽完成「拉行情 + 拉龙虎榜 + 重算打分」，此处只需刷新展示
-    if (typeof currentTab !== 'undefined' && currentTab === 'home') {
-        const c = document.getElementById('content');
-        if (c) loadHomeTab(c);
-        loadSyncStatusPanel();
+    // 后端「同步」已自洽完成「拉行情 + 拉龙虎榜 + 重算打分」，此处只需刷新展示。
+    // 任务12 遗留③：4 标签 IA 后按当前 tab 刷新对应内容，不再假设数据面板在首页。
+    const c = document.getElementById('content');
+    if (!c || typeof currentTab === 'undefined') return;
+    var loaders = { home: loadHomeTab, track: loadTrackTab, research: loadResearchTab, settings: loadSettingsTab };
+    var fn = loaders[currentTab];
+    if (fn) {
+        if (TabState && TabState.states) TabState.states[currentTab] = null;   // 旧缓存作废
+        fn(c).then(function () { renderAnchorBar(currentTab); initAnchorNav(); });
     }
 }
 

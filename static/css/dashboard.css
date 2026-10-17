@@ -356,6 +356,7 @@ input:focus, select:focus {
 .btn {
     padding: 7px 18px; border: 1px solid var(--border);
     border-radius: var(--radius);
+    min-height: 32px;   /* P3#5：桌面主按钮命中区 ≥32px */
     cursor: pointer; font-family: var(--font-mono); font-size: var(--fs-1);
     font-weight: 500; letter-spacing: 0.04em;
     transition: all 0.2s;
@@ -380,7 +381,7 @@ input:focus, select:focus {
     background: rgba(var(--danger-rgb),0.1);
     border-color: var(--danger);
 }
-.btn-sm { padding: 4px 12px; font-size: var(--fs-1); }
+.btn-sm { padding: 4px 12px; font-size: var(--fs-1); min-height: 28px; }   /* P3#5：次级按钮 ≥28px */
 
 /* 表单控件统一（方案A spec §7）：native select 与伪装成 .btn 的 select 归一 */
 .field-select {
@@ -867,7 +868,7 @@ tr:hover td {
 }
 .segmented .seg-btn {
     border: 0; background: transparent; cursor: pointer;
-    padding: 4px 14px; border-radius: 999px;
+    padding: 4px 14px; border-radius: 999px; min-height: 28px;
     font-size: var(--fs-2); color: var(--text-secondary);
     transition: background 0.2s ease-out, color 0.2s ease-out;
 }
@@ -976,7 +977,8 @@ tr:hover td {
 /* 右上角「详情 / 收起」按钮 */
 .pick-detail-btn {
     margin-left: 4px;
-    padding: 3px 10px;
+    padding: 3px 12px;
+    min-height: 28px;   /* P3#5：行内文字按钮补 padding，命中区 ≥28px */
     font-size: var(--fs-1);
     color: var(--text-secondary);
     background: rgba(var(--accent-rgb),0.06);
@@ -1887,3 +1889,18 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 }
 .rule-scan-ctl button:disabled { opacity: .6; cursor: not-allowed; }
 
+
+/* ── 回顶按钮（P3#6：滚动超 1.5 屏浮出）── */
+.back-top {
+    position: fixed; right: 24px; bottom: 28px; z-index: 900;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    box-shadow: var(--shadow-float);
+    color: var(--text-secondary); font-size: var(--fs-4); line-height: 1;
+    cursor: pointer;
+    opacity: 0; transform: translateY(8px); pointer-events: none;
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out, color 0.2s ease-out;
+}
+.back-top.show { opacity: 1; transform: none; pointer-events: auto; }
+.back-top:hover { color: var(--accent); border-color: var(--border-glow); }
+@media (max-width: 600px) { .back-top { right: 14px; bottom: 16px; } }
