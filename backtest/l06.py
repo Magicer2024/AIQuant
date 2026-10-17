@@ -777,7 +777,7 @@ def render_markdown(bundle: Dict[str, Any]) -> str:
                      f"lot_size={ec.get('lot_size')}")
     lines.append(f"- 成本假设：现实档=佣金 {cost_tier('real')['commission_rate']} / 印花 "
                  f"{cost_tier('real')['stamp_tax_rate']} / 滑点 {cost_tier('real')['slippage_rate']}"
-                 f"；理想档=三项全 0 且最低佣金 0")
+                 f"；理想档=佣金/印花/滑点三项置 0（min_commission 保持现实值，见 cannot_prove）")
     lines.append(f"- 数据版本：{bundle.get('data_version') or '未记录'}")
     lines += ["", "## 两版同框（近窗：理想 vs 现实）"]
     lines.append("| 指标 | 理想 C | 现实 A | 差 |")
