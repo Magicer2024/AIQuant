@@ -145,6 +145,14 @@
         <h1>AI<span>Quant</span> · 个人投研台</h1>
     </div>
     <div class="header-status">
+        <div class="top-search" role="search">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="flex:none">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2.2"/>
+                <line x1="16.7" y1="16.7" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+            <input id="topSearchInput" type="search" placeholder="搜代码/名称 · Ctrl+K" aria-label="搜索股票并在研判页打开深析抽屉"
+                   autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();topSearchGo();}">
+        </div>
         <div class="status-dot" id="sysStatus"></div>
         <span id="last-update">就绪</span>
     </div>
@@ -577,6 +585,31 @@ document.addEventListener('click', function (e) {
         }
     }
 })();
+
+// ── P4 #9：顶栏常驻搜索（Spotlight 范式）：Ctrl/⌘+K 聚焦，回车→研判 tab 深析抽屉直达 ──
+function topSearchGo() {
+    var el = document.getElementById('topSearchInput');
+    var v = ((el && el.value) || '').trim();
+    if (!v) return;
+    var codeMatch = v.match(/\d{6}/);
+    switchTab('research');
+    var tries = 0;
+    (function attempt() {
+        var sd = document.getElementById('sdSearch');
+        if (!sd) { if (tries++ < 40) setTimeout(attempt, 150); return; }   // 等研判 tab 模板就绪
+        if (codeMatch) { openSdDeep(codeMatch[0]); return; }               // 6 位代码直达
+        sd.value = v;                                                       // 名称：借面板既有检索匹配
+        try { onSdSearchPick(); } catch (e) {}
+        setTimeout(function () { if (_sd.code) openSdDeep(_sd.code); }, 1200);
+    })();
+}
+document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        var i = document.getElementById('topSearchInput');
+        if (i) i.focus();
+    }
+});
 
 // 切页防抖：120ms 内连续点击导航只执行最后一次内容加载。
 // 旧实现每次点击都立刻 cancelAll+骨架屏+loadTab，快速点两页时第一页的加载全部白做。

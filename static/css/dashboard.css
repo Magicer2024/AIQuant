@@ -1927,3 +1927,19 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 @media (prefers-reduced-motion: reduce) {
     .idx-price.flash-up, .idx-price.flash-down { animation: none; }
 }
+
+/* ── 顶栏常驻搜索（P4#9，Spotlight 范式）── */
+.top-search {
+    display: flex; align-items: center; gap: 7px;
+    min-width: 210px; padding: 5px 12px;
+    background: var(--bg-input); color: var(--text-muted);
+    border: 1px solid var(--border); border-radius: 999px;
+    transition: border-color 0.2s ease-out, box-shadow 0.2s ease-out;
+}
+.top-search:focus-within { border-color: var(--accent-dim); box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.12); color: var(--accent); }
+.top-search input {
+    flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
+    font-family: var(--font-sans); font-size: var(--fs-2); color: var(--text-primary);
+}
+.top-search input::-webkit-search-cancel-button { cursor: pointer; opacity: .55; }
+@media (max-width: 1000px) { .top-search { min-width: 140px; } }
