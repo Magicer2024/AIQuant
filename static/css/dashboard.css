@@ -2107,3 +2107,7 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 .rp-stat-chip b { color: var(--text-muted); font-weight: 500; margin-right: 6px; font-family: inherit; }
 .rp-review-hint { font-size: var(--fs-2); color: var(--text-muted); }
 .btn-danger { background: rgba(var(--danger-rgb),.12); color: var(--danger); border: 1px solid rgba(var(--danger-rgb),.4); }
+.rp-intent-res { margin-top: 8px; font-size: var(--fs-2); border-radius: 8px; padding: 8px 12px; line-height: 1.7; }
+.rp-intent-res.ok { background: var(--tint-good); color: var(--status-good); }
+.rp-intent-res.dev { background: rgba(255,170,60,.12); color: #b26a00; }
+.rp-intent-res.err { background: rgba(var(--danger-rgb),.1); color: var(--danger); }

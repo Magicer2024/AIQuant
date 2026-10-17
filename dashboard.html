@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017i">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017j">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -6302,6 +6302,30 @@ function fmtGap(v, fmt) {
 
 async function loadDiscTab(container) {
     container.innerHTML = `
+        <div class="panel" id="panelDiscIntent">
+            <div class="panel-header"><h3>意向登记 · 装置只认这里登记的意向</h3>
+            <span class="text-muted" style="font-size:var(--fs-2)">本工具不接券商；绕过此处直连券商 App 的动作不会被延迟，但也不会被保护（D-5 已知边界）</span></div>
+            <div class="rp-form" id="discIntentForm">
+                <div class="rp-form-row">
+                    <label>代码<input id="intCode" maxlength="10" placeholder="600519"></label>
+                    <label>方向<select id="intDir" onchange="intDirChange()"><option value="buy">买入/加仓</option><option value="sell">卖出/减仓</option><option value="stop_change">调整止损</option></select></label>
+                    <label>数量（股）<input id="intQty" type="number" min="0" step="100" value="100"></label>
+                    <label>价格（参考）<input id="intPrice" type="number" step="0.01" min="0"></label>
+                </div>
+                <div class="rp-form-row" id="intStopRow" style="display:none">
+                    <label>原止损价<input id="intStopOld" type="number" step="0.01"></label>
+                    <label>新止损价<input id="intStopNew" type="number" step="0.01"></label>
+                    <span class="rp-triage-note" style="align-self:center">放宽/撤销止损按增风险（ENTRY）处理，不豁免</span>
+                </div>
+                <div class="rp-form-row">
+                    <label>延迟档<select id="intTier"><option value="24h">24h + 跨交易日开盘（默认）</option><option value="soft_hold">10 分钟档 · 仅提醒</option></select></label>
+                </div>
+                <label>偏离理由 intent_reason（若判为偏离单必填，当场写不许事后补）<textarea id="intReason" rows="2" maxlength="300"></textarea></label>
+                <button class="btn btn-primary" onclick="discSubmitIntent()">登记意向</button>
+                <div id="discIntentResult"></div>
+            </div>
+        </div>
+
         <div class="panel" id="panelDiscDev">
             <div class="panel-header"><h3>偏离单 · 待放行/已放行</h3>
             <span class="text-muted" style="font-size:var(--fs-2)">进场偏离 24h 延迟放行；放行当日 15:00 未复核自动失效，不可复活。<b>止损/减仓等出场全豁免，不进这里。</b></span></div>
@@ -6341,6 +6365,90 @@ async function loadDiscTab(container) {
     loadDiscCases();
 }
 
+function intDirChange() {
+    var box = document.getElementById('intStopRow');
+    if (box) box.style.display = document.getElementById('intDir').value === 'stop_change' ? '' : 'none';
+}
+
+async function postRaw(url, body) {
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    let j = null;
+    try { j = await resp.json(); } catch (e) {}
+    return { status: resp.status, j: j || {} };
+}
+
+async function discSubmitIntent() {
+    var body = {
+        code: (document.getElementById('intCode').value || '').trim(),
+        direction: document.getElementById('intDir').value,
+        qty: Number(document.getElementById('intQty').value) || 0,
+        price: Number(document.getElementById('intPrice').value) || 0,
+        tier: document.getElementById('intTier').value,
+        intent_reason: (document.getElementById('intReason').value || '').trim(),
+    };
+    if (!body.code) { showToast('代码必填', 'warning'); return; }
+    if (body.direction === 'stop_change') {
+        body.stop_old = Number(document.getElementById('intStopOld').value) || null;
+        body.stop_new = Number(document.getElementById('intStopNew').value) || null;
+    }
+    var box = document.getElementById('discIntentResult');
+    var out = await postRaw(API + '/deviation', body);
+    var d = out.j.data || {};
+    if (out.status === 200 && d.is_deviation === false) {
+        box.innerHTML = '<div class="rp-intent-res ok">计划内' +
+            (d.exempt ? '（降风险出场 · 全豁免，无延迟）' : '') + '：' + rpEsc(d.action_class) +
+            '，可直接执行。已登记留痕。</div>';
+        loadDiscPending();
+        return;
+    }
+    if (out.status === 200 && d.is_deviation) {
+        box.innerHTML = '<div class="rp-intent-res dev">判定为偏离单（命中 ' + rpEsc((d.rules || []).join('/')) + '）。' +
+            '放行：' + rpEsc(d.release_at || '') + ' · 逾期失效：' + rpEsc(d.expire_at || '') + '。已在下方列表倒计时。' +
+            (d.required_seal ? '<br>本单属高风险（' + rpEsc((d.seal_triggers || []).join('/')) + '），执行前须先有封存件。' : '') + '</div>';
+        loadDiscPending();
+        return;
+    }
+    if (out.j.error_code === 'SEAL_REQUIRED' || (out.j.message || '').indexOf('先封存') >= 0) {
+        box.innerHTML = discSealMiniFormHtml({ code: body.code, qty: body.qty, ref_price: body.price, action: body.direction, triggers: d.seal_triggers || out.j.seal_triggers });
+        return;
+    }
+    box.innerHTML = '<div class="rp-intent-res err">' + rpEsc(out.j.error || out.j.message || ('提交失败 HTTP ' + out.status)) + '</div>';
+}
+
+function discSealMiniFormHtml(ctx) {
+    return '<div class="rp-overtime"><div class="rp-overtime-2">高风险意向（' +
+        rpEsc((ctx.triggers || []).join('/') || 'H1-H7') + '）：先封存事前预期，再重提意向 —— 顺序不可逆（JH4 §6.1）。</div>' +
+        '<div class="rp-form-row rp-form" style="margin-top:6px">' +
+        '<label>预期收益%<input id="sealExp" type="number" step="0.5" value="10"></label>' +
+        '<label>预期天数(1~20)<input id="sealDays" type="number" min="1" max="20" value="10"></label>' +
+        '<label>信心(0.05~0.95)<input id="sealConf" type="number" step="0.05" min="0.05" max="0.95" value="0.6"></label>' +
+        '<label>最坏情形%（负数）<input id="sealWorst" type="number" step="0.5" value="-6"></label>' +
+        '</div>' +
+        '<label class="rp-form" style="display:block">反证 falsifier：这个判断可能错在哪（≥15 字，与该票上次封存雷同会被拒）<textarea id="sealFals" rows="2" maxlength="300"></textarea></label>' +
+        '<button class="btn btn-primary" onclick="discSubmitSeal(\'' + rpEsc(ctx.code) + '\',' + ctx.qty + ',' + ctx.ref_price + ',\'' + rpEsc(ctx.action) + '\')">封存</button>' +
+        '<div id="discSealRes"></div></div>';
+}
+
+async function discSubmitSeal(code, qty, refPrice, action) {
+    var body = {
+        code: code, qty: qty, ref_price: refPrice, action: action,
+        expected_return_pct: Number(document.getElementById('sealExp').value) / 100,
+        expected_horizon_days: Number(document.getElementById('sealDays').value),
+        confidence: Number(document.getElementById('sealConf').value),
+        worst_case_pct: Number(document.getElementById('sealWorst').value) / 100,
+        falsifier: (document.getElementById('sealFals').value || '').trim(),
+    };
+    var out = await postRaw(API + '/l09/seal', body);
+    var box = document.getElementById('discSealRes');
+    if (out.status === 200) {
+        var d = out.j.data || {};
+        if (box) box.innerHTML = '<div class="rp-intent-res ok">已封存（到期 ' + rpEsc(d.due_on || '') + '，哈希链留痕）。回上方重提同一意向即可放行。</div>';
+        loadDiscSeal();
+    } else if (box) {
+        box.innerHTML = '<div class="rp-intent-res err">' + rpEsc(out.j.error || out.j.message || '封存失败') + '</div>';
+    }
+}
+
 function resumeDiscTimers() {
     if (document.querySelector('#discPendingBody [data-release]')) _discStartTick();
 }
@@ -6352,7 +6460,7 @@ async function loadDiscPending() {
     if (!box) return;
     try {
         var resp = await RequestManager.fetch('disc-pending', API + '/deviation/pending');
-        var items = ((resp && resp.data) || {}).items || [];
+        var items = ((resp && resp.data) || {}).tickets || [];
         if (!items.length) { box.innerHTML = '<div class="empty-state">没有待处理偏离单。手痒还没变成行动，很好。</div>'; return; }
         box.innerHTML = items.map(_discPendingRow).join('');
         _discStartTick();
@@ -6370,7 +6478,8 @@ function _discPendingRow(it) {
                  '<button class="sd-op" onclick="discDeviateExecute(' + it.id + ')">已在券商执行</button>' +
                  '<span class="rp-expire">放行当日 15:00 未确认自动失效</span>';
     } else {
-        action = '<span class="rp-count2" data-release="' + rpEsc(it.release_at) + '" data-expire="' + rpEsc(it.expire_at) + '" data-status="' + rpEsc(it.status) + '"></span>';
+        action = '<span class="rp-count2" data-release="' + rpEsc(it.release_at) + '" data-expire="' + rpEsc(it.expire_at) + '" data-status="' + rpEsc(it.status) + '"></span>' +
+            '<button class="sd-op danger" onclick="discDeviateWithdraw(' + it.id + ')">放弃此念头</button>';
     }
     return '<div class="rp-q-row disc-dev">' +
         '<b>' + rpEsc(it.code) + '</b><span>' + rpEsc(it.action) + ' ' + rpEsc(it.qty) + ' 股 ≈ ' + rpEsc(it.amount_ref) + ' 元</span>' +
@@ -6398,6 +6507,12 @@ async function discDeviateConfirm(id) {
         showToast('已确认放行', 'success'); loadDiscPending();
     } catch (e) { showToast('确认失败：' + (e.message || e), 'error'); }
 }
+async function discDeviateWithdraw(id) {
+    try {
+        await rpJsonPost('disc-dev-w', API + '/deviation/' + id + '/withdraw', {});
+        showToast('已放弃并归档判例', 'success'); loadDiscPending();
+    } catch (e) { showToast('放弃失败：' + (e.message || e), 'error'); }
+}
 async function discDeviateExecute(id) {
     try {
         await rpJsonPost('disc-dev-e', API + '/deviation/' + id + '/execute', {});
@@ -6418,7 +6533,7 @@ async function loadDiscPlans(status) {
     if (!box) return;
     try {
         var resp = await RequestManager.fetch('disc-plans', API + '/plan/list?status=' + _discPlanStatus);
-        var items = ((resp && resp.data) || {}).items || [];
+        var items = ((resp && resp.data) || {}).plans || [];
         if (!items.length) { box.innerHTML = '<div class="empty-state">无「' + _discPlanStatus + '」状态计划卡</div>'; return; }
         box.innerHTML = items.map(_discPlanRow).join('');
     } catch (e) {
@@ -6557,6 +6672,7 @@ async function loadDiscCalib() {
         var resp = await RequestManager.fetch('disc-calib', API + '/calibration/current');
         var d = (resp && resp.data) || {};
         var st = DISC_CALIB_LABEL[d.status] || DISC_CALIB_LABEL.uncalibrated;
+        if (d.note) st = [st[0], d.note];   // 后端措辞优先（R8 uncalibrated 附「沿用默认」）
         var nums;
         if (d.status === 'uncalibrated' || d.stop_loss_pct == null) {
             // R8：uncalibrated 时 API 不返回建议值，前端也不许显示数字
@@ -6588,7 +6704,7 @@ async function loadDiscSeal() {
     if (!box) return;
     try {
         var resp = await RequestManager.fetch('disc-seal-due', API + '/l09/due');
-        var items = ((resp && resp.data) || {}).items || [];
+        var items = ((resp && resp.data) || {}).due || [];
         if (!items.length) { box.innerHTML = '<div class="empty-state">无到期封存件。封存件在下单时被自动创建。</div>'; return; }
         // 到期提醒页只列 code 与「已到期」——不显示任何封存内容（JH4_spec §6.4 / R10）
         box.innerHTML = items.map(function (it) {
@@ -6600,23 +6716,30 @@ async function loadDiscSeal() {
     }
 }
 
+function _rpResultMetricsChips(res) {
+    return ['interval_return', 'max_drawdown'].filter(function (k) { return res[k] != null; })
+        .map(function (k) { return '<span class="rp-stat-chip"><b>' + k + '</b> ' + rpPct(res[k]) + '</span>'; }).join('') +
+        (res.window_days != null ? '<span class="rp-stat-chip"><b>window_days</b> ' + rpEsc(res.window_days) + '</span>' : '') +
+        (res.worst_case_reached != null ? '<span class="rp-stat-chip"><b>worst_case_reached</b> ' + (res.worst_case_reached ? '是（真实回撤已触到事前想象的最坏点）' : '否') + '</span>' : '');
+}
+
 async function discBlindStart(id) {
     rpOpenDrawer('<div class="rp-loading">拉取结果指标（不含封存内容）…</div>');
     try {
         var resp = await RequestManager.fetch('l09-blind-' + id, API + '/l09/' + id + '/blind');
         var d = (resp && resp.data) || {};
-        var res = d.result || d.result_metrics || d;
-        var chips = ['interval_return', 'period_return', 'max_drawdown', 'worst_case_triggered', 'hit_expected']
-            .filter(function (k) { return res[k] != null; })
-            .map(function (k) {
-                var v = res[k];
-                var txt = (typeof v === 'number' && Math.abs(v) <= 3) ? rpPct(v) : String(v);
-                return '<span class="rp-stat-chip"><b>' + k + '</b> ' + rpEsc(txt) + '</span>';
-            }).join('');
+        var res = d.result_metrics || d.result || {};
+        if (d.already_answered) {
+            // 已作答未揭示：直接给揭示入口（reveal 仍由后端校验作答行，顺序不可逆由后端保证）
+            rpBody('<div class="rp-head"><h2>盲核 · 已作答</h2><div class="rp-meta">结果数据如下，封存原件仍未揭示。</div></div>' +
+                '<div class="rp-sec"><h4>结果数据</h4><div class="rp-stats">' + _rpResultMetricsChips(res) + '</div></div>' +
+                '<button class="btn btn-primary" onclick="discBlindReveal(' + id + ')">揭示封存原件并对照</button>');
+            return;
+        }
         rpBody(
             '<div class="rp-head"><h2>盲核 · 第一步：只看结果作答</h2>' +
             '<div class="rp-meta">封存原件此刻不可见。先写下你「现在记得的」当时的预期，提交后才对照（防事后记忆重写）。</div></div>' +
-            '<div class="rp-sec"><h4>结果数据</h4><div class="rp-stats">' + (chips || rpEsc(JSON.stringify(res))) + '</div></div>' +
+            '<div class="rp-sec"><h4>结果数据</h4><div class="rp-stats">' + (_rpResultMetricsChips(res) || rpEsc(JSON.stringify(res))) + '</div></div>' +
             '<div class="rp-form">' +
             '<div class="rp-field-label">当时预期兑现了吗？</div><span class="rp-radio-row">' +
             '<label><input type="radio" name="rcv" value="yes">兑现</label>' +
@@ -6628,6 +6751,38 @@ async function discBlindStart(id) {
             '</div>');
     } catch (e) {
         rpBody('<div class="panel-error">盲核数据失败：' + rpEsc(e.message || e) + '</div>');
+    }
+}
+
+function _discRevealHtml(d) {
+    var sealed = d.sealed || {};
+    var cmp = d.comparison || {};
+    return '' +
+        '<div class="rp-head"><h2>盲核 · 第二步：封存原件 vs 此刻的你</h2>' +
+        '<div class="rp-meta">sealed_at ' + rpEsc(sealed.sealed_at || '--') + ' · 哈希 ' + rpEsc(String(d.content_hash || '').slice(0, 12)) + '…（链上留痕，事后不可改）</div></div>' +
+        '<div class="rp-sec"><h4>当时封存的原话</h4>' +
+        '<div class="rp-text"><b>论点：</b>' + rpEsc(sealed.thesis_snapshot || '--') + '</div>' +
+        '<div class="rp-kv"><span>预期：<b>' + rpPct(sealed.expected_return_pct) + '</b></span>' +
+        '<span>信心：<b>' + rpEsc(sealed.confidence) + '</b></span>' +
+        '<span>最坏情形：<b>' + rpPct(sealed.worst_case_pct) + '</b></span></div>' +
+        '<div class="rp-text"><b>反证（当时的你写的「可能错在哪」）：</b>' + rpEsc(sealed.falsifier || '--') + '</div></div>' +
+        '<div class="rp-sec"><h4>对照结果</h4><div class="rp-stats">' +
+        '<span class="rp-stat-chip"><b>记忆偏差 gap_expected</b> ' + (cmp.gap_expected != null ? rpSigned(cmp.gap_expected, rpPct(cmp.gap_expected)) : '--') + '</span>' +
+        '<span class="rp-stat-chip"><b>信心命中</b> ' + (cmp.confidence_hit != null ? (cmp.confidence_hit ? '命中' : '未命中') : '--') + '</span>' +
+        '<span class="rp-stat-chip"><b>最坏情形成真</b> ' + (cmp.worst_case_hit != null ? (cmp.worst_case_hit ? '是' : '否') : '--') + '</span>' +
+        '<span class="rp-stat-chip"><b>解释漂移度</b> ' + (cmp.explanation_diverged != null ? Number(cmp.explanation_diverged).toFixed(2) : '--') + '</span>' +
+        '</div>' +
+        '<div class="rp-triage-note">gap 系统性为正 = 你在事后抬地平线；worst_case_hit 为否 = 你事前想象的风险承受比真实承受轻。逐案攒着，不做曲线。</div></div>';
+}
+
+async function discBlindReveal(id) {
+    rpBody('<div class="rp-loading">揭示中…</div>');
+    try {
+        var r2 = await rpJsonPost('l09-reveal-' + id, API + '/l09/' + id + '/reveal', {});
+        rpBody(_discRevealHtml((r2 && r2.data) || {}));
+        loadDiscSeal();
+    } catch (e) {
+        rpBody('<div class="panel-error">揭示失败：' + rpEsc(e.message || e) + '</div>');
     }
 }
 
@@ -6646,28 +6801,11 @@ async function discBlindSubmit(id) {
         d = (r2 && r2.data) || {};
     } catch (e) {
         rpBody('<div class="panel-error">盲核流程中断：' + rpEsc(e.message || e) +
-            '<br>作答与揭示是两次独立提交，此处不合并重试；已作答再点提交会返回 BLIND_ALREADY_ANSWERED，直接刷新队列查看揭示入口。 ' +
+            '<br>作答与揭示是两次独立提交，此处不合并重试；已作答再点提交会返回 BLIND_ALREADY_ANSWERED，直接刷新即可进入揭示。 ' +
             '<button class="btn btn-sm" onclick="discBlindStart(' + id + ')">重试</button></div>');
         return;
     }
-    var sealed = d.sealed || d.decision || d;
-    var cmp = d.comparison || d;
-    rpBody(
-            '<div class="rp-head"><h2>盲核 · 第二步：封存原件 vs 此刻的你</h2>' +
-            '<div class="rp-meta">sealed_at ' + rpEsc(sealed.sealed_at || '--') + '（哈希链留痕，事后不可改）</div></div>' +
-            '<div class="rp-sec"><h4>当时封存的原话</h4>' +
-            '<div class="rp-text"><b>论点：</b>' + rpEsc(sealed.thesis_snapshot || '--') + '</div>' +
-            '<div class="rp-kv"><span>预期：<b>' + rpPct(sealed.expected_return_pct) + '</b></span>' +
-            '<span>信心：<b>' + rpEsc(sealed.confidence) + '</b></span>' +
-            '<span>最坏情形：<b>' + rpPct(sealed.worst_case_pct) + '</b></span></div>' +
-            '<div class="rp-text"><b>反证（当时的你写的「可能错在哪」）：</b>' + rpEsc(sealed.falsifier || '--') + '</div></div>' +
-            '<div class="rp-sec"><h4>对照结果</h4><div class="rp-stats">' +
-            '<span class="rp-stat-chip"><b>记忆偏差 gap_expected</b> ' + (cmp.gap_expected != null ? rpSigned(cmp.gap_expected, rpPct(cmp.gap_expected)) : '--') + '</span>' +
-            '<span class="rp-stat-chip"><b>信心命中</b> ' + rpEsc(cmp.confidence_hit != null ? cmp.confidence_hit : '--') + '</span>' +
-            '<span class="rp-stat-chip"><b>最坏情形成真</b> ' + rpEsc(cmp.worst_case_hit != null ? cmp.worst_case_hit : '--') + '</span>' +
-            '<span class="rp-stat-chip"><b>解释漂移度</b> ' + (cmp.explanation_diverged != null ? Number(cmp.explanation_diverged).toFixed(2) : '--') + '</span>' +
-            '</div>' +
-            '<div class="rp-triage-note">gap 系统性为正 = 你在事后抬地平线；worst_case_hit 为假 = 你事前想象的风险承受比真实承受轻。逐案攒着，不做曲线。</div></div>');
+    rpBody(_discRevealHtml(d));
     loadDiscSeal();
 }
 
@@ -6678,11 +6816,13 @@ async function loadDiscCases() {
     try {
         var resp = await RequestManager.fetch('disc-cases', API + '/case-file?week=' + encodeURIComponent(week));
         var d = (resp && resp.data) || {};
-        var items = d.items || [];
-        var stats = d.stats || {};
-        var chips = '<span class="rp-stat-chip"><b>自动过期率</b> ' + (stats.expired_rate != null ? rpPct(stats.expired_rate) : '--') + '</span>' +
-            '<span class="rp-stat-chip"><b>本周提交</b> ' + rpEsc(stats.submitted_week != null ? stats.submitted_week : '--') + '</span>' +
-            '<span class="rp-stat-chip"><b>上周提交</b> ' + rpEsc(stats.submitted_prev_week != null ? stats.submitted_prev_week : '--') + '</span>';
+        var items = d.cases || [];
+        var byStatus = d.by_status || {};
+        var chips = '<span class="rp-stat-chip"><b>自动过期率</b> ' + (d.auto_expire_rate != null ? rpPct(d.auto_expire_rate) : '--') + '</span>' +
+            '<span class="rp-stat-chip"><b>区间单量</b> ' + rpEsc(d.ticket_count != null ? d.ticket_count : '--') + '</span>' +
+            Object.keys(byStatus).map(function (k) {
+                return '<span class="rp-stat-chip"><b>' + rpEsc(k) + '</b> ' + rpEsc(byStatus[k]) + '</span>';
+            }).join('');
         if (!items.length) { box.innerHTML = '<div class="rp-stats">' + chips + '</div><div class="empty-state">本周无判例</div>'; return; }
         var tbl = '<table class="rp-tbl"><thead><tr><th>代码</th><th>动作</th><th>结局</th>' +
             '<th colspan="3">买了（执行后 5/10/20 日）</th><th colspan="3">拦住了（反事实 5/10/20 日）</th><th>最大逆行</th></tr></thead><tbody>' +
