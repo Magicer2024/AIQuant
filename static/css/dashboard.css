@@ -1996,6 +1996,7 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 .rp-d-regime { background: rgba(var(--accent-rgb),.14); color: var(--accent); }
 .rp-d-logic, .rp-d-sample, .rp-d-liquidity { background: rgba(var(--danger-rgb),.12); color: var(--danger); }
 .rp-d-data, .rp-d-weak { background: rgba(16,24,40,.07); color: var(--text-secondary); }
+.rp-d-timeout { background: rgba(255,170,60,.12); color: var(--text-secondary); border: 1px dashed rgba(255,170,60,.5); }
 .rp-meta, .rp-fpath { font-size: var(--fs-2); color: var(--text-muted); font-family: var(--font-mono); }
 .rp-checks { font-size: var(--fs-2); color: var(--text-secondary); margin-top: 4px; }
 .rp-sec { border-top: 1px solid var(--border); padding: 12px 0 14px; }

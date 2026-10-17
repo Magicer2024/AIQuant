@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017h">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017i">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -5674,10 +5674,6 @@ function rpPct(v, dp) {   // 小数口径（引擎指标）→ 百分比文本�
     if (v == null || isNaN(v)) return '--';
     return (Number(v) * 100).toFixed(dp == null ? 1 : dp) + '%';
 }
-function rpPctRaw(v, dp) {  // 已是百分数的字段（判例档案 exec_pnl_pct_* 列，单位待联调确认）
-    if (v == null || isNaN(v)) return '--';
-    return Number(v).toFixed(dp == null ? 1 : dp) + '%';
-}
 function rpSigned(v, txt) {
     var cls = v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
     return '<span class="' + cls + '">' + txt + '</span>';
@@ -5719,6 +5715,7 @@ var L06_CHECKS = [
 var L06_DEATH_LABEL = {
     LOGIC: '逻辑不成立', DATA: '数据不可得', SAMPLE: '样本不足', LIQUIDITY: '不可成交',
     COST: '成本蚕食', REGIME: '环境依赖', WEAK: '信号偏弱', NONE: '值得推进',
+    TIMEOUT: '不可验证（二次超时）',
 };
 var L06_DEATH_CODES = ['LOGIC', 'DATA', 'SAMPLE', 'LIQUIDITY', 'REGIME'];
 var PF_ANCHOR_KINDS = ['price_below', 'drawdown_from_entry', 'giveback_from_peak', 'deadline', 'indicator_below', 'unlock_event'];
@@ -5851,7 +5848,7 @@ function l06CollectChecks() {
         }
         var noteEl = document.querySelector('.rp-check-note[data-note="' + c[0] + '"]');
         var note = (noteEl && noteEl.value || '').trim();
-        return { id: c[0], state: state, note: note };
+        return { id: c[0], result: state, note: note };   // §8.1：checks 键名用 result
     });
 }
 
@@ -5893,9 +5890,9 @@ async function l06SubmitVerdict(verdict) {
     var body = { triage_attempt: _l06Active.attempt, checks: checks, verdict: verdict };
     if (verdict === 'pass') {
         var t2 = checks.filter(function (c) { return c.id === 'T2'; })[0];
-        if (!t2 || t2.state !== 'pass') { showToast('T2 未来函数是硬门，不通过不许 pass（服务端也会重算兜底）', 'error'); return; }
+        if (!t2 || t2.result !== 'pass') { showToast('T2 未来函数是硬门，不通过不许 pass（服务端也会重算兜底）', 'error'); return; }
         var t6 = checks.filter(function (c) { return c.id === 'T6'; })[0];
-        if (t6 && t6.state === 'fail' && (t6.note || '').replace(/\s/g, '').length < 10) {
+        if (t6 && t6.result === 'fail' && (t6.note || '').replace(/\s/g, '').length < 10) {
             showToast('T6 判为重复覆盖：pass 前须在 T6 依据里写满 10 字「与已有规则不同在哪」', 'warning'); return;
         }
     }
@@ -6141,13 +6138,15 @@ function rpReportHtml(d) {
     var mmss = triage.elapsed_seconds != null ? rpMmss(triage.elapsed_seconds) : '--';
     var checks = _rpParseMaybeJson(triage.checks_json || triage.checks) || [];
     var checkLine = Array.isArray(checks) ? checks.map(function (c) {
-        var mark = c.state === 'pass' ? '✓' : (c.state === 'fail' ? '✗' : '·');
+        var st = c.result || c.state;
+        var mark = st === 'pass' ? '✓' : (st === 'fail' ? '✗' : '·');
         return c.id + ' ' + mark + (c.note ? '(' + rpEsc(c.note) + ')' : '');
     }).join('　') : '';
     var ec = d.execution_config || d._execution_config || {};
-    var comboA = _rpCombo(d, 'A'), comboB = _rpCombo(d, 'B');
+    var wActual = d.window_days_actual || {};
+    var comboB = _rpCombo(d, 'B');
     var clamp = d.window_clamped
-        ? '<span class="rp-warn">窗口不足已截断：实际 ' + rpEsc((comboB && comboB.window_days) || '?') + ' 交易日，勿当 3 年结论读</span>' : '';
+        ? '<span class="rp-warn">窗口不足已截断：B 实际 ' + rpEsc(wActual.B != null ? wActual.B : ((comboB && comboB.window_days) || '?')) + ' 交易日，勿当 3 年结论读</span>' : '';
     var cannotProve = _rpParseMaybeJson(d.cannot_prove);
     var proveHtml = Array.isArray(cannotProve) && cannotProve.length
         ? '<ul class="rp-noprov">' + cannotProve.map(function (x) { return '<li>' + rpEsc(x) + '</li>'; }).join('') + '</ul>'
@@ -6159,7 +6158,8 @@ function rpReportHtml(d) {
         '<div class="rp-concl"><span class="rp-death rp-d-' + rpEsc((step || 'none').toLowerCase()) + '">死因：' + rpEsc(L06_DEATH_LABEL[step] || '—') + '</span>' +
         '<span class="rp-concl-text">' + rpEsc(d.conclusion_text || '') + '</span></div>' +
         '<div class="rp-meta">分诊：用时 ' + mmss + ' / 预算 30:00，verdict=' + rpEsc(triage.verdict || d.triage_verdict || '--') +
-        '，attempt=' + rpEsc(triage.triage_attempt || d.triage_attempt || 1) + '</div>' +
+        '，attempt=' + rpEsc(triage.attempt != null ? triage.attempt : (d.triage_attempt != null ? d.triage_attempt : 1)) +
+        (triage.over_budget ? '，超时 ' + rpMmss(triage.over_budget) + '（超时后 pass 入口已关闭）' : '') + '</div>' +
         (checkLine ? '<div class="rp-checks">' + checkLine + '</div>' : '') +
     '</div>' +
     '<div class="rp-sec"><h4>执行配置与数据版本（同框可比的前提）</h4>' +
@@ -6283,7 +6283,9 @@ function rpMetricsTableHtml(d) {
             (m.cost_gap != null ? '<tr class="rp-costgap"><td>成本蚕食 cost_gap</td><td colspan="3">' + rpPct(m.cost_gap) + '（同期收益被佣金/印花/滑点吃掉的量）</td></tr>' : '') +
             '</tbody></table>';
     } else {
-        var aD = (_rpCombo(d, 'A') || {}).window_days || '?', bD = (_rpCombo(d, 'B') || {}).window_days || '?';
+        var wa = d.window_days_actual || {};
+        var aD = wa.A != null ? wa.A : ((_rpCombo(d, 'A') || {}).window_days || '?');
+        var bD = wa.B != null ? wa.B : ((_rpCombo(d, 'B') || {}).window_days || '?');
         html = '<table class="rp-tbl"><thead><tr><th>指标</th><th>A ' + rpEsc(aD) + 'td（近窗）</th><th>B ' + rpEsc(bD) + 'td（全窗）</th></tr></thead><tbody>' +
             rows.map(function (r) { return '<tr><td>' + r.label + '</td><td>' + r.fmt(r.a) + '</td><td>' + r.fmt(r.b) + '</td></tr>'; }).join('') +
             '</tbody></table>';
@@ -6435,8 +6437,8 @@ function _discPlanRow(it) {
         '<div class="rp-plan-head"><b>' + rpEsc(it.code) + ' ' + rpEsc(it.name || '') + '</b>' +
         '<span class="rp-st rp-st-' + rpEsc(it.status) + '">' + rpEsc(it.status) + '</span>' +
         (it.violated_at ? '<span class="rp-viol">违反持仓日 ' + rpEsc(it.violated_at) + '</span>' : '') +
-        '<span class="rp-meta-r">信心 ' + rpEsc(it.confidence) + ' · 预期 ' + rpPctRaw(it.expected_return_pct != null && it.expected_return_pct > 1 ? it.expected_return_pct : (it.expected_return_pct || 0) * 100, 1) +
-        ' / ' + rpEsc(it.expected_horizon_days) + ' 日 · 仓位 ' + rpPctRaw(it.position_pct != null && it.position_pct > 1 ? it.position_pct : (it.position_pct || 0) * 100, 1) + '</span></div>' +
+        '<span class="rp-meta-r">信心 ' + rpEsc(it.confidence) + ' · 预期 ' + rpPct(it.expected_return_pct) +
+        ' / ' + rpEsc(it.expected_horizon_days) + ' 日 · 仓位 ' + rpPct(it.position_pct) + '</span></div>' +
         '<div class="rp-plan-thesis">' + rpEsc(it.thesis) + '</div>' +
         '<div class="rp-plan-anchors">' + anchorHtml + (it.params_source ? '<span class="rp-tier">参数：' + rpEsc(it.params_source) + '</span>' : '') + '</div>' +
         '</div>';
@@ -6635,21 +6637,18 @@ async function discBlindSubmit(id) {
     var exp = document.getElementById('blExp').value;
     var reason = (document.getElementById('blReason').value || '').trim();
     if (exp === '' || isNaN(Number(exp))) { showToast('填写你现在记得的预期收益（%）', 'warning'); return; }
-    var answer = { recall_verdict: rcvEl.value, recall_expected_pct: Number(exp) / 100, recall_reason: reason };
-    // 答案提交端点未列在 JH4_spec §8 表：先按 POST /blind 提交，不存在则回退为 reveal 带答案
+    var answer = { recall_verdict: rcvEl.value, recall_expected_return_pct: Number(exp) / 100, recall_reason: reason };
+    // JH4_spec §8 裁定 2：作答与揭示严格两步，无「reveal 带答案」回退——合并调用=盲核失效
     var d;
     try {
         await rpJsonPost('l09-answer-' + id, API + '/l09/' + id + '/blind', answer);
         var r2 = await rpJsonPost('l09-reveal-' + id, API + '/l09/' + id + '/reveal', {});
         d = (r2 && r2.data) || {};
-    } catch (e1) {
-        try {
-            var r3 = await rpJsonPost('l09-reveal-fb-' + id, API + '/l09/' + id + '/reveal', answer);
-            d = (r3 && r3.data) || {};
-        } catch (e) {
-            showToast('盲核流程失败：' + (e.message || e) + '（未作答时 reveal 应返回 409，属正常防线）', 'error');
-            return;
-        }
+    } catch (e) {
+        rpBody('<div class="panel-error">盲核流程中断：' + rpEsc(e.message || e) +
+            '<br>作答与揭示是两次独立提交，此处不合并重试；已作答再点提交会返回 BLIND_ALREADY_ANSWERED，直接刷新队列查看揭示入口。 ' +
+            '<button class="btn btn-sm" onclick="discBlindStart(' + id + ')">重试</button></div>');
+        return;
     }
     var sealed = d.sealed || d.decision || d;
     var cmp = d.comparison || d;
@@ -6688,11 +6687,11 @@ async function loadDiscCases() {
         var tbl = '<table class="rp-tbl"><thead><tr><th>代码</th><th>动作</th><th>结局</th>' +
             '<th colspan="3">买了（执行后 5/10/20 日）</th><th colspan="3">拦住了（反事实 5/10/20 日）</th><th>最大逆行</th></tr></thead><tbody>' +
             items.map(function (it) {
-                var bought = ['exec_pnl_pct_5', 'exec_pnl_pct_10', 'exec_pnl_pct_20'].map(function (k) { return '<td>' + rpPctRaw(it[k]) + '</td>'; }).join('');
-                // counterfactual_* 按小数口径渲染；exec_pnl_pct_* 按百分数口径（命名含 pct）——单位以联调为准
-                var blocked = ['counterfactual_5', 'counterfactual_10', 'counterfactual_20'].map(function (k) { return '<td>' + rpPct(it[k]) + '</td>'; }).join('');
+                // JH4_spec §7.1：新表收益/回撤/比例一律带符号小数，统一 ×100 显示
+                var bought = ['exec_ret_5', 'exec_ret_10', 'exec_ret_20'].map(function (k) { return '<td>' + rpPct(it[k]) + '</td>'; }).join('');
+                var blocked = ['counterfactual_ret_5', 'counterfactual_ret_10', 'counterfactual_ret_20'].map(function (k) { return '<td>' + rpPct(it[k]) + '</td>'; }).join('');
                 return '<tr><td>' + rpEsc(it.code) + '</td><td>' + rpEsc(it.action || '') + '</td><td>' + rpEsc(it.outcome || '') + '</td>' +
-                    bought + blocked + '<td>' + rpPct(it.worst_adverse_pct) + '</td></tr>';
+                    bought + blocked + '<td>' + rpPct(it.worst_adverse_ret) + '</td></tr>';
             }).join('') + '</tbody></table>';
         box.innerHTML = '<div class="rp-stats">' + chips + '</div>' + tbl +
             '<div class="rp-triage-note">两列并看：拦住的多数是涨是跌 → 装置在创造价值还是只造摩擦。季度回看，别用一周样本下结论。</div>';
