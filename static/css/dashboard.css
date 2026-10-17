@@ -804,59 +804,83 @@ tr:hover td {
    设计原则：信息密度高、操作意图清晰、风险提示醒目
    ═════════════════════════════════════════════════════════ */
 
-/* ── Hero banner ── */
+/* ── Hero 闸门状态条（P2 IA：压缩为一行，信息不删除只移位）── */
 .hero-banner {
-    display: flex; justify-content: space-between; align-items: center;
-    gap: 20px;
-    padding: 26px 32px;
-    margin-bottom: 22px;
-    background: linear-gradient(120deg, rgba(var(--accent-rgb),0.10) 0%, rgba(var(--accent-2-rgb),0.07) 55%, rgba(var(--accent-2-rgb),0.02) 100%);
-    border: 1px solid rgba(var(--accent-2-rgb),0.22);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+    padding: 12px 18px;
+    margin-bottom: 16px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    position: relative;
-    overflow: hidden;
+    box-shadow: var(--shadow-panel);
 }
-.hero-banner::before {
-    content: ''; position: absolute; inset: 0;
-    background: radial-gradient(circle at 0% 50%, rgba(var(--accent-rgb),0.08), transparent 50%);
-    pointer-events: none;
-}
-.hero-left { position: relative; z-index: 1; flex: 1; }
 .hero-greeting {
     font-size: var(--fs-3); color: var(--text-secondary);
-    letter-spacing: 0.04em; margin-bottom: 4px;
+    letter-spacing: 0.04em;
 }
 .hero-title {
-    font-size: var(--fs-5); font-weight: 700;
-    color: var(--text-primary); margin-bottom: 6px;
+    font-size: var(--fs-4); font-weight: 700;
+    color: var(--text-primary);
     letter-spacing: 0.02em;
 }
 .hero-sub {
     font-size: var(--fs-3); color: var(--text-secondary);
     line-height: 1.6;
 }
-.hero-right {
-    position: relative; z-index: 1;
-    display: flex; flex-direction: column; align-items: center; gap: 6px;
-    min-width: 130px;
-}
 .regime-card {
-    padding: 14px 18px;
-    border: 2px solid var(--accent);
-    border-radius: 8px;
-    background: rgba(var(--bg-deep-rgb),0.5);
-    display: flex; flex-direction: column; align-items: center; gap: 4px;
-    min-width: 110px;
-    transition: all 0.3s;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px;
+    border: 1.5px solid var(--accent);
+    border-radius: 999px;
+    background: rgba(var(--accent-rgb), 0.06);
+    transition: border-color 0.25s ease-out;
 }
-.regime-emoji { font-size: 32px; line-height: 1; }
+.regime-emoji { font-size: var(--fs-4); line-height: 1; }
 .regime-tag {
-    font-size: var(--fs-3); font-weight: 700; letter-spacing: 0.08em;
+    font-size: var(--fs-2); font-weight: 700; letter-spacing: 0.06em;
 }
 .regime-tip {
-    font-size: var(--fs-1); color: var(--text-muted);
-    text-align: center; max-width: 140px;
+    font-size: var(--fs-2); color: var(--text-muted);
 }
+.hero-fund-tip {
+    margin-left: auto;
+    font-size: var(--fs-2); color: var(--text-secondary);
+    background: var(--tint-warn); border-left: 3px solid var(--status-warn);
+    padding: 5px 10px; border-radius: 4px;
+}
+
+/* ── Segmented 分段控件（§1.3-2；选中段 #0060df 实底白字 5.62）── */
+.segmented {
+    display: inline-flex; gap: 2px; padding: 2px;
+    background: var(--bg-cell);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+}
+.segmented .seg-btn {
+    border: 0; background: transparent; cursor: pointer;
+    padding: 4px 14px; border-radius: 999px;
+    font-size: var(--fs-2); color: var(--text-secondary);
+    transition: background 0.2s ease-out, color 0.2s ease-out;
+}
+.segmented .seg-btn:hover { color: var(--text-primary); }
+.segmented .seg-btn.active { background: var(--accent); color: #fff; }
+.segmented .seg-btn:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 1px; }
+
+/* ── 今日页 top3 速览行（列表组范式：hairline 行 + 整行 hover）── */
+.sum-list { display: flex; flex-direction: column; }
+.sum-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 9px 4px; cursor: pointer;
+    border-bottom: 1px solid var(--hairline);
+    font-size: var(--fs-3);
+    transition: background 0.15s ease-out;
+}
+.sum-row:hover { background: var(--bg-panel-hover); }
+.sum-row .sum-name { font-weight: 600; color: var(--text-primary); }
+.sum-row .sum-code { font-family: var(--font-mono); font-size: var(--fs-1); color: var(--text-muted); }
+.sum-row .sum-val { margin-left: auto; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.sum-row .sum-val + .sum-val { margin-left: 0; }
+.sum-foot { padding-top: 10px; }
 
 /* ── Risk alerts banner ── */
 .alerts-banner {
@@ -878,11 +902,14 @@ tr:hover td {
 .ab-warning { color: var(--warning); }
 .ab-info { color: var(--accent); }
 
-/* ── Index cards grid ── */
+/* ── Index cards grid（IA：市场速览 6 胶囊一行）── */
 .index-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
     gap: 14px;
+}
+@media (min-width: 1100px) {
+    .index-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 .idx-card {
     padding: 14px 16px;
@@ -1473,9 +1500,9 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 
 /* ── Home responsive ── */
 @media (max-width: 600px) {
-    .hero-banner { flex-direction: column; align-items: flex-start; padding: 16px; }
-    .hero-right { align-self: stretch; flex-direction: row; }
-    .hero-title { font-size: var(--fs-4); }
+    .hero-banner { padding: 10px 14px; gap: 6px 10px; }
+    .hero-fund-tip { margin-left: 0; }
+    .hero-title { font-size: var(--fs-3); }
     .action-plan-grid { grid-template-columns: 1fr; }
     .idx-price { font-size: var(--fs-4); }
     /* 简略行窄屏：股票 + 分一行，价位一行 */

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017b">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017c">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -151,18 +151,11 @@
 </header>
 
 <nav class="nav-bar">
-    <button class="nav-item active" onclick="switchTab('home')">首页</button>
-    <button class="nav-item" onclick="switchTab('maintenance')">系统维护</button>
-    <div class="anchor-bar" id="anchorBar" role="navigation" aria-label="面板导航">
-        <span class="anchor-group">今日决策</span>
-        <a href="#panelMarket">市场速览</a><a href="#panelToday">今日推荐</a><a href="#panelReversal">反转观察</a><a href="#panelJgTrack">机构跟踪</a>
-        <span class="anchor-group">跟踪复盘</span>
-        <a href="#panelMyBook">持仓自选</a><a href="#panelRecHistory">推荐复盘</a>
-        <span class="anchor-group">研判</span>
-        <a href="#stockDeepPanel">个股深度</a><a href="#panelExplainer">新手入门</a>
-        <span class="anchor-group">系统</span>
-        <a href="#dataStatusPanel">数据状态</a><a href="#panelOptimizer">策略优化</a>
-    </div>
+    <button class="nav-item active" onclick="switchTab('home')">今日</button>
+    <button class="nav-item" onclick="switchTab('track')">跟踪</button>
+    <button class="nav-item" onclick="switchTab('research')">研判</button>
+    <button class="nav-item" onclick="switchTab('settings')">设置</button>
+    <div class="anchor-bar" id="anchorBar" role="navigation" aria-label="面板导航"></div>
 </nav>
 
 <main class="content" id="content"></main>
@@ -505,7 +498,7 @@ function switchTab(tab) {
     var btn = document.querySelector('.nav-item[onclick*="' + tab + '"]');
     if (btn) btn.classList.add('active');
     var ab = document.getElementById('anchorBar');
-    if (ab) ab.style.display = (tab === 'home') ? 'flex' : 'none';
+    if (ab) ab.style.display = (tab === 'home' || tab === 'track') ? 'flex' : 'none';
 
     timerManager.clear('switchTabDebounce');
     timerManager.setTimeout('switchTabDebounce', function() { _doSwitchTab(tab); }, 120);
@@ -528,7 +521,8 @@ function _doSwitchTab(tab) {
         document.getElementById('content').innerHTML = cached.html;
         var scrollEl = document.querySelector('.content');
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
-        if (tab === 'home') { restoreStockDeep(); initAnchorNav(); }   // cache 恢复时重绘个股深度图表 + 锚点观察
+        if (tab === 'research') restoreStockDeep();   // cache 恢复时重绘个股深度图表
+        renderAnchorBar(tab); initAnchorNav();        // tab 内迷你锚点随内容重建
         return;
     }
 
@@ -540,60 +534,51 @@ async function loadTab(tab) {
     showSkeleton(c, 10);
     try {
         if (tab === 'home') await loadHomeTab(c);
-        else if (tab === 'maintenance') await loadMaintenanceTab(c);
+        else if (tab === 'track') await loadTrackTab(c);
+        else if (tab === 'research') await loadResearchTab(c);
+        else if (tab === 'settings') await loadSettingsTab(c);
 
         c.firstElementChild?.classList.add('tab-content');
+        renderAnchorBar(tab); initAnchorNav();
     } catch(e) {
         showToast('加载失败，请重试', 'error');
         c.innerHTML = '<div class="empty-state" style="color:var(--danger)">加载失败: ' + e.message + '</div>';
     }
 }
 
-// ─── Tab 0: Home (个人投资者首页) ───
+// ─── 任务12 P2 · 4 标签 IA（redesign_proposal §2）：今日/跟踪/研判/设置 ───
+// 面板 DOM 归属移位；render 函数、API、数据字段零触碰（下方模板自旧 loadHomeTab 原样迁移）。
+
+// tab 内迷你锚点（今日/跟踪显示；研判/设置隐藏）
+var ANCHOR_SETS = {
+    home: [['今日决策', [['#panelMarket', '市场速览'], ['#panelToday', '今日推荐'],
+                          ['#panelTodaySummaries', '反转速览'], ['#alertsBanner', '风险提示']]]],
+    track: [['跟踪复盘', [['#panelMyBook', '持仓自选'], ['#panelTrackHistory', '历史收益'],
+                           ['#panelRecHistory', '推荐复盘']]]]
+};
+function renderAnchorBar(tab) {
+    var bar = document.getElementById('anchorBar');
+    if (!bar) return;
+    var set = ANCHOR_SETS[tab];
+    if (!set) { bar.innerHTML = ''; return; }
+    var html = '';
+    set.forEach(function (grp) {
+        html += '<span class="anchor-group">' + grp[0] + '</span>';
+        grp[1].forEach(function (a) { html += '<a href="' + a[0] + '">' + a[1] + '</a>'; });
+    });
+    bar.innerHTML = html;
+}
+
+// ─── Tab 今日(home)：≤2 屏速览 —— 闸门条 / 市场速览 / 今日推荐(segment) / 反转·机构 top3 ───
 async function loadHomeTab(container) {
     container.innerHTML = `
         <div class="hero-banner">
-            <div class="hero-left">
-                <div class="hero-greeting" id="heroGreeting">早上好 👋</div>
-                <div class="hero-title">今天投资，看这一页就够了</div>
-                <div class="hero-sub" id="heroSub">正在加载市场状态…</div>
-                <div class="hero-fund-tip" style="margin-top:8px;padding:8px 12px;background:rgba(255,171,64,0.08);border-left:3px solid var(--warning);border-radius:4px;font-size:var(--fs-3);color:var(--text-secondary)">
-                    <span id="accountBudgetHint">正在读取参考账户配置…</span>
-                </div>
-            </div>
-            <div class="hero-right">
-                <div class="regime-card" id="regimeCard">--</div>
-                <div class="regime-tip" id="regimeTip"></div>
-            </div>
-        </div>
-
-        <div class="panel" id="dataStatusPanel">
-            <div class="panel-header">
-                <h3>数据状态</h3>
-                <span class="text-muted" id="dataStatusHint" style="font-size:var(--fs-2)"></span>
-            </div>
-            <div class="data-status-grid">
-                <div class="data-status-cell">
-                    <div class="label">行情数据 (daily_price)</div>
-                    <div class="state" id="syncDataState"><span class="badge badge-running">检查中…</span></div>
-                    <div class="time" id="syncDataTime"></div>
-                </div>
-                <div class="data-status-cell">
-                    <div class="label">推荐打分 (stock_signal)</div>
-                    <div class="state" id="recalcState"><span class="badge badge-running">检查中…</span></div>
-                    <div class="time" id="recalcTime"></div>
-                </div>
-            </div>
-            <div class="data-status-actions">
-                <span style="font-size:var(--fs-1);color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.05em">同步范围</span>
-                <select id="syncTargetSel" style="padding:4px 8px;font-family:var(--font-mono);font-size:var(--fs-1)">
-                    <option value="watchlist" selected>仅自选股</option>
-                    <option value="all">全市场</option>
-                </select>
-                <button class="btn btn-primary btn-sm" id="btnHomeSync" onclick="homeSync()">立即同步行情</button>
-                <button class="btn btn-sm" id="btnHomeRecalc" onclick="homeRecalc()">立即重算打分</button>
-                <span class="inline-progress" id="homeInlineProgress"></span>
-            </div>
+            <span class="hero-greeting" id="heroGreeting">早上好 👋</span>
+            <span class="hero-title">今天投资，看这一页就够了</span>
+            <span class="hero-sub" id="heroSub">正在加载市场状态…</span>
+            <span class="regime-card" id="regimeCard">--</span>
+            <span class="regime-tip" id="regimeTip"></span>
+            <span class="hero-fund-tip" id="accountBudgetHint">正在读取参考账户配置…</span>
         </div>
 
         <div id="alertsBanner"></div>
@@ -609,13 +594,200 @@ async function loadHomeTab(container) {
         <div class="panel" id="panelToday">
             <div class="panel-header">
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
+                <div class="segmented" id="picksSeg" role="group" aria-label="推荐周期切换">
+                    <button class="seg-btn" data-hz="short" onclick="setPicksSegment('short')">短线</button>
+                    <button class="seg-btn" data-hz="mid" onclick="setPicksSegment('mid')">中线</button>
+                    <button class="seg-btn" data-hz="long" onclick="setPicksSegment('long')">长线</button>
+                </div>
                 <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">复制</button>
-                <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:var(--fs-2);padding:2px 6px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+                <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks().then(function(){ applyPicksSegment(); })" style="font-size:var(--fs-2);padding:2px 6px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
                 <span class="text-muted" style="font-size:var(--fs-2)" title="基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）">默认简略 · 点「详情」展开 ⓘ</span>
             </div>
             <div id="todayPicks" class="action-plan-grid"><div class="skeleton-stack"><i></i><i></i><i></i><i></i></div></div>
         </div>
 
+        <div class="grid-2col" id="panelTodaySummaries">
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>反转首日 · 速览</h3>
+                    <span class="text-muted" id="reversalSummaryHint" style="font-size:var(--fs-2)">观察池 · 只标位置不推荐买入</span>
+                </div>
+                <div id="reversalSummaryBox"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>机构席位 · 速览</h3>
+                    <span class="text-muted" id="jgSummaryHint" style="font-size:var(--fs-2)">近 20 交易日 · 按建仓力度排序</span>
+                </div>
+                <div id="jgSummaryBox"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+            </div>
+        </div>
+    `;
+
+    // 并行加载所有数据（口径与全量面板一致，只取 top3 摘要）
+    await Promise.all([
+        loadAccountBudget(),
+        loadMarketOverview(),
+        loadTodayPicks(),
+        loadAlertsBanner(),
+        loadReversalSummary(),
+        loadJgSummary(),
+    ]);
+    initPicksSegment();
+    renderAnchorBar('home'); initAnchorNav();
+
+    // 首次进入或今日尚未同步时，自动触发同步
+    maybeAutoSync();
+}
+
+// ── 今日推荐 短/中/长 segment：纯前端显隐 .pick-group（渲染函数零触碰）──
+var _picksSeg = null;
+function setPicksSegment(hz) { _picksSeg = hz; applyPicksSegment(); }
+function applyPicksSegment() {
+    if (!_picksSeg) return;
+    var gs = document.querySelectorAll('#todayPicks .pick-group');
+    for (var i = 0; i < gs.length; i++) {
+        gs[i].style.display = (gs[i].getAttribute('data-hz') === _picksSeg) ? '' : 'none';
+    }
+    var btns = document.querySelectorAll('#picksSeg .seg-btn');
+    for (var j = 0; j < btns.length; j++) {
+        btns[j].classList.toggle('active', btns[j].getAttribute('data-hz') === _picksSeg);
+    }
+}
+function initPicksSegment() {
+    var gs = document.querySelectorAll('#todayPicks .pick-group');
+    if (!gs.length) return;
+    if (!_picksSeg) {
+        for (var i = 0; i < gs.length; i++) {
+            if (!gs[i].querySelector('.pick-group-body .empty-state')) {
+                _picksSeg = gs[i].getAttribute('data-hz');
+                break;
+            }
+        }
+    }
+    if (!_picksSeg) _picksSeg = gs[0].getAttribute('data-hz');
+    applyPicksSegment();
+}
+
+// ── 今日页 top3 速览：反转/机构全量面板在「研判」，此处仅摘要 + 跳转（同一接口同一口径）──
+function _sumJumpHtml(tab, txt) {
+    return '<div class="sum-foot"><button class="btn btn-sm" onclick="switchTab(\'' + tab + '\')">' + txt + ' →</button></div>';
+}
+async function loadReversalSummary() {
+    const box = document.getElementById('reversalSummaryBox');
+    if (!box) return;
+    try {
+        const resp = await RequestManager.fetch(
+            'reversal-picks', API + '/investor/reversal_picks?limit=' + REVERSAL_LIMIT,
+            {cacheTtl: RequestManager.CACHE_TTL});
+        const data = (resp && resp.data) || {};
+        const items = data.items || [];
+        const hint = document.getElementById('reversalSummaryHint');
+        if (hint && data.date) {
+            hint.textContent = '信号日 ' + data.date + ' · 共 ' + items.length + ' 只 · 观察池非推荐';
+        }
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-state">今日无「反转首日」候选<br><span style="color:var(--text-muted);font-size:var(--fs-2)">条件：首破 MA20 + 大阳 ≥5% + 量比 ≥1.5 + 非涨停</span></div>';
+            return;
+        }
+        box.innerHTML = '<div class="sum-list">' + items.slice(0, 3).map(it => {
+            const pct = it.pct_day;
+            const pctTxt = pct == null ? '' : ' <span class="' + (pct >= 0 ? 'positive' : 'negative') + '">' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%</span>';
+            return '<div class="sum-row" onclick="openKline(\'' + it.code + '\')">' +
+                '<span class="sum-name">' + (it.name || it.code) + '</span>' +
+                '<span class="sum-code">' + it.code + '</span>' +
+                '<span class="sum-val">收盘 ' + (it.signal_price != null ? Number(it.signal_price).toFixed(2) : '--') + pctTxt + '</span>' +
+                '<span class="sum-val">首日分 ' + (it.fusion_score != null ? it.fusion_score : '--') + '</span>' +
+                '</div>';
+        }).join('') + '</div>' + _sumJumpHtml('research', '全部 ' + items.length + ' 只 · 去研判');
+    } catch (e) {
+        box.innerHTML = panelError('loadReversalSummary');
+    }
+}
+async function loadJgSummary() {
+    const box = document.getElementById('jgSummaryBox');
+    if (!box) return;
+    try {
+        const resp = await RequestManager.fetch(
+            'jg-track', `${API}/investor/lhb_jg_track?days=20&min_cnt=2&sort=cum_ratio&limit=40`,
+            {cacheTtl: RequestManager.CACHE_TTL});
+        const d = (resp && resp.data) || {};
+        const items = d.items || [];
+        const hint = document.getElementById('jgSummaryHint');
+        if (hint && d.as_of) {
+            hint.textContent = `${d.start_date} ~ ${d.as_of} · 命中 ${d.count || 0} 只`;
+        }
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-state">近 20 交易日无「机构净买 ≥ 2 次」的股票</div>';
+            return;
+        }
+        box.innerHTML = '<div class="sum-list">' + items.slice(0, 3).map(it => {
+            const vs = it.vs_cost;
+            const vsTxt = vs == null ? '--' : (vs >= 0 ? '+' : '') + Number(vs).toFixed(2) + '%';
+            const vsCls = vs == null ? '' : (vs >= 0 ? 'positive' : 'negative');
+            return '<div class="sum-row" onclick="openKline(\'' + it.code + '\')">' +
+                '<span class="sum-name">' + (it.name || it.code) + '</span>' +
+                '<span class="sum-code">' + it.code + '</span>' +
+                '<span class="sum-val">净买 ' + it.cnt_in + '/' + it.cnt_total + ' 次</span>' +
+                '<span class="sum-val">占流值 ' + (it.cum_ratio != null ? Number(it.cum_ratio).toFixed(2) + '%' : '--') + '</span>' +
+                '<span class="sum-val ' + vsCls + '">现价vs成本 ' + vsTxt + '</span>' +
+                '</div>';
+        }).join('') + '</div>' + _sumJumpHtml('research', '全部 ' + (d.count || items.length) + ' 只 · 去研判');
+    } catch (e) {
+        box.innerHTML = panelError('loadJgSummary');
+    }
+}
+
+// ─── Tab 跟踪：持仓+自选合并 / 历史收益 / 推荐复盘 ───
+async function loadTrackTab(container) {
+    container.innerHTML = `
+        <div class="grid-2col" id="panelMyBook">
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>我的持仓</h3>
+                    <button class="btn btn-primary btn-sm" onclick="showAddPositionDialog()">+ 添加</button>
+                </div>
+                <div id="myPositions"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>我的自选</h3>
+                    <button class="btn btn-sm" onclick="showAddWatchlistDialog()">+ 添加</button>
+                </div>
+                <div id="myWatchlist"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+            </div>
+        </div>
+
+        <div class="panel" id="panelTrackHistory">
+            <div class="panel-header">
+                <h3>历史持仓收益 · 已实现盈亏统计</h3>
+                <span class="text-muted" style="font-size:var(--fs-2)">减仓 / 平仓时按卖出价与成本价计算收益率，逐笔留存</span>
+            </div>
+            <div id="positionHistory"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+        </div>
+
+        <div class="panel" id="panelRecHistory">
+            <div class="panel-header">
+                <h3>推荐复盘 · 过去60天推荐的真实表现与出场结果</h3>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="recHistoryUpdatedAt"></span>
+            </div>
+            <div id="recHistorySummary"></div>
+            <div id="recHistoryTable"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+        </div>
+    `;
+
+    await Promise.all([
+        loadMyPositions(),
+        loadMyWatchlist(),
+        loadPositionHistory(),
+        loadRecHistory(),
+    ]);
+}
+
+// ─── Tab 研判：个股深度整版工作台 / 反转全量 / 机构全量 ───
+async function loadResearchTab(container) {
+    container.innerHTML = `
         <div class="panel" id="stockDeepPanel">
             <div class="panel-header">
                 <h3>个股深度 · 买卖建议</h3>
@@ -641,7 +813,7 @@ async function loadHomeTab(container) {
         <div class="panel" id="panelReversal">
             <div class="panel-header">
                 <h3>反转首日观察 · 首次站上 MA20 的低位入场</h3>
-                <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint" title="⚠ 观察池：只标「首破 MA20 那天」的位置，非买入推荐；出场纪律对本线为负贡献，勿机械套用止损/止盈">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池 ⓘ</span>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint" title="⚠ 观察池：只标「首破 MA20 当日」的低位入场 详情">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池 ⓘ</span>
             </div>
             <div id="reversalPicks" class="action-plan-grid"><div class="skeleton-stack"><i></i><i></i><i></i><i></i></div></div>
         </div>
@@ -674,40 +846,45 @@ async function loadHomeTab(container) {
             <div id="jgTrackMetrics" class="metrics-row" style="margin-bottom:10px"></div>
             <div id="jgTrackTable"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
         </div>
+    `;
 
-        <div class="grid-2col" id="panelMyBook">
-            <div class="panel">
-                <div class="panel-header">
-                    <h3>我的持仓</h3>
-                    <button class="btn btn-primary btn-sm" onclick="showAddPositionDialog()">+ 添加</button>
-                </div>
-                <div id="myPositions"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
-            </div>
+    await Promise.all([
+        loadStockDeep(),
+        loadReversalPicks(),
+        loadJgTrack(),
+    ]);
+}
 
-            <div class="panel">
-                <div class="panel-header">
-                    <h3>我的自选</h3>
-                    <button class="btn btn-sm" onclick="showAddWatchlistDialog()">+ 添加</button>
-                </div>
-                <div id="myWatchlist"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
-            </div>
-        </div>
-
-        <div class="panel">
+// ─── Tab 设置：数据与同步 / 策略优化 / 新手入门 / 系统维护 ───
+async function loadSettingsTab(container) {
+    container.innerHTML = `
+        <div class="panel" id="dataStatusPanel">
             <div class="panel-header">
-                <h3>历史持仓收益 · 已实现盈亏统计</h3>
-                <span class="text-muted" style="font-size:var(--fs-2)">减仓 / 平仓时按卖出价与成本价计算收益率，逐笔留存</span>
+                <h3>数据与同步</h3>
+                <span class="text-muted" id="dataStatusHint" style="font-size:var(--fs-2)"></span>
             </div>
-            <div id="positionHistory"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
-        </div>
-
-        <div class="panel" id="panelRecHistory">
-            <div class="panel-header">
-                <h3>推荐复盘 · 过去60天推荐的真实表现与出场结果</h3>
-                <span class="text-muted" style="font-size:var(--fs-2)" id="recHistoryUpdatedAt"></span>
+            <div class="data-status-grid">
+                <div class="data-status-cell">
+                    <div class="label">行情数据 (daily_price)</div>
+                    <div class="state" id="syncDataState"><span class="badge badge-running">检查中…</span></div>
+                    <div class="time" id="syncDataTime"></div>
+                </div>
+                <div class="data-status-cell">
+                    <div class="label">推荐打分 (stock_signal)</div>
+                    <div class="state" id="recalcState"><span class="badge badge-running">检查中…</span></div>
+                    <div class="time" id="recalcTime"></div>
+                </div>
             </div>
-            <div id="recHistorySummary"></div>
-            <div id="recHistoryTable"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+            <div class="data-status-actions">
+                <span style="font-size:var(--fs-1);color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.05em">同步范围</span>
+                <select id="syncTargetSel" style="padding:4px 8px;font-family:var(--font-mono);font-size:var(--fs-1)">
+                    <option value="watchlist" selected>仅自选股</option>
+                    <option value="all">全市场</option>
+                </select>
+                <button class="btn btn-primary btn-sm" id="btnHomeSync" onclick="homeSync()">立即同步行情</button>
+                <button class="btn btn-sm" id="btnHomeRecalc" onclick="homeRecalc()">立即重算打分</button>
+                <span class="inline-progress" id="homeInlineProgress"></span>
+            </div>
         </div>
 
         <div class="panel" id="panelOptimizer">
@@ -726,32 +903,18 @@ async function loadHomeTab(container) {
             </div>
             <div id="explainerGrid" class="explainer-grid"></div>
         </div>
+
+        <div id="maintenanceHost"></div>
     `;
 
-    initAnchorNav();
-
-    // 并行加载所有数据
     await Promise.all([
-        loadAccountBudget(),
-        loadMarketOverview(),
-        loadTodayPicks(),
-        loadReversalPicks(),
-        loadJgTrack(),
-        // 出场跟踪已并入 loadTodayPicks（按 hz 嵌入对应推荐小板块底下）
-        loadStockDeep(),
-        loadMyPositions(),
-        loadMyWatchlist(),
-        loadPositionHistory(),
-        loadAlertsBanner(),
-        loadExplainerGrid(),
-        loadRecHistory(),
-        loadOptimizerPanel(),
         loadSyncStatusPanel(),
+        loadOptimizerPanel(),
+        loadExplainerGrid(),
+        loadMaintenanceTab(document.getElementById('maintenanceHost')),
     ]);
-
-    // 首次进入或今日尚未同步时，自动触发同步
-    maybeAutoSync();
 }
+
 
 async function loadAccountBudget() {
     const hint = document.getElementById('accountBudgetHint');

@@ -66,7 +66,7 @@ def test_dashboard_navigation(flask_server):
             page.goto(flask_server + "/dashboard", wait_until="domcontentloaded")
             assert "AIQuant" in page.title()
             buttons = page.locator(".nav-item")
-            assert buttons.count() == 2
+            assert buttons.count() == 4
             for i in range(buttons.count()):
                 buttons.nth(i).click()
                 assert "active" in (buttons.nth(i).get_attribute("class") or "")
@@ -153,8 +153,8 @@ def test_poll_helper_cleared_on_tab_switch(flask_server):
                 "}")
             page.wait_for_function("window.__t9poll >= 2", timeout=3000)
 
-            # 切到维护页（防抖 120ms 后 _doSwitchTab 执行 clearAll）
-            page.locator(".nav-item", has_text="系统维护").click()
+            # 切到设置页（防抖 120ms 后 _doSwitchTab 执行 clearAll）
+            page.locator(".nav-item", has_text="设置").click()
             # 基线必须在「timer 被清掉的那一刻」读取：clearAll 之前合法触发的
             # tick（点击延迟+120ms 防抖窗）不算泄漏，否则用例会时序抖动
             page.wait_for_function(
@@ -182,12 +182,12 @@ def test_switch_tab_debounce_keeps_last(flask_server):
 
             page.evaluate(
                 "() => {"
-                "switchTab('maintenance'); switchTab('home');"
+                "switchTab('settings'); switchTab('home');"
                 "}")
             page.wait_for_timeout(350)  # 超过 120ms 防抖窗
             assert page.evaluate("currentTab") == "home"
             # 导航高亮也应落在首页
-            cls = page.locator(".nav-item", has_text="首页").get_attribute("class")
+            cls = page.locator(".nav-item", has_text="今日").get_attribute("class")
             assert "active" in (cls or "")
         finally:
             browser.close()
