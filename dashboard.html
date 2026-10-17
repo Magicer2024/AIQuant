@@ -1395,12 +1395,14 @@ function renderReversalStats(s, enabled) {
         .map(y => by[y] != null ? (by[y] >= 0 ? '+' : '') + by[y] : null)
         .filter(Boolean).join('/');
     const byTxt = bySeq ? `${bySeq}pp（24/25/26）` : '--';
-    const wrCls = s.win_rate == null ? '' : (s.win_rate >= 52 ? 'positive' : 'negative');
+    // R2：胜率/超额等判断类数字保持中性，好坏只进徽标；收益类（原始 T+1 收益）仍走 R1 涨跌色
+    const wrBadge = s.win_rate == null ? '' : (s.win_rate >= 52
+        ? '<span class="badge badge-good">达标</span>' : '<span class="badge badge-warn">未达52门槛</span>');
     const exCls = s.excess_pp == null ? '' : (s.excess_pp > 0 ? 'positive' : 'negative');
     const nCls = s.oc1_mean == null ? '' : (s.oc1_mean >= 0 ? 'positive' : 'negative');
     const exHtml = v => v == null ? '--' : (v >= 0 ? '+' : '') + v;
     const offnote = enabled === false
-        ? '<b style="color:var(--negative)">· 信号线当前为关闭状态（需将 FIRST_REVERSAL[\'enabled\'] 置 True 才产出）</b>'
+        ? '<b style="color:var(--status-warn)">⚠ 信号线当前为关闭状态（需将 FIRST_REVERSAL[\'enabled\'] 置 True 才产出）</b>'
         : '';
     return `
         <div style="grid-column:1 / -1">
@@ -1422,7 +1424,7 @@ function renderReversalStats(s, enabled) {
                 ${numCard(s.n != null ? s.n : '--', '全样本信号数', '', '2024-07~2026-09 / 544 交易日 / 4500 只（OC 现实口径）')}
                 ${numCard(s.per_day != null ? s.per_day : '--', '日均信号', '', '本线是「广撒网」型：日均近 30 只，需自行精选')}
                 ${numCard(s.oc1_mean != null ? exHtml(s.oc1_mean) + '%' : '--', '原始 T+1 收益', nCls, '信号日收盘→次日开盘买→次日收盘卖 的均值')}
-                ${numCard(s.win_rate != null ? s.win_rate + '%' : '--', 'T+1 胜率', wrCls, '未达报告 §6C 的 52% 门槛 ⇒ 只能当观察池')}
+                ${numCard(s.win_rate != null ? s.win_rate + '%' : '--', 'T+1 胜率 ' + wrBadge, '', '未达报告 §6C 的 52% 门槛 ⇒ 只能当观察池')}
                 ${numCard(s.excess_pp != null ? exHtml(s.excess_pp) + 'pp' : '--', '市场中性超额', exCls, '剔除当日全市场同口径后的超额收益（含系统性普涨）')}
                 ${numCard(s.t != null ? exHtml(s.t) : '--', '超额 t 值', exCls, '分年：' + byTxt)}
             </div>
@@ -1449,7 +1451,9 @@ function renderReversalTracked(t) {
     const num = (v, lbl, cls, tip) =>
         `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${v}</div><div class="lbl">${lbl}</div></div>`;
     const wr = t.win_rate, avg = t.avg_return, pf = t.profit_factor, t1 = t.t1 || {};
-    const wrCls = wr == null ? '' : (wr >= 50 ? 'positive' : 'negative');
+    // R2：胜率数字中性，达标与否进徽标；平均收益是涨跌语义保留 R1
+    const wrBadge = wr == null ? '' : (wr >= 50
+        ? '<span class="badge badge-good">达标</span>' : '<span class="badge badge-warn">偏低</span>');
     const avgCls = avg == null ? '' : (avg > 0 ? 'positive' : 'negative');
     const exHtml = v => v == null ? '--' : (v >= 0 ? '+' : '') + v;
     return `
@@ -1461,12 +1465,12 @@ function renderReversalTracked(t) {
             </div>
             <div class="metrics-row">
                 ${num(t.total, '跟踪样本')}
-                ${num(wr != null ? wr + '%' : '--', '结算胜率', wrCls)}
+                ${num(wr != null ? wr + '%' : '--', '结算胜率 ' + wrBadge)}
                 ${num(avg != null ? exHtml(avg) + '%' : '--', '平均收益', avgCls)}
                 ${num(pf != null ? pf.toFixed(2) : '--', '盈亏比')}
                 ${num(t1.win_rate != null ? t1.win_rate + '%' : '--', 'T+1 胜率')}
-                ${num(t.stop_loss_count || 0, '触发止损')}
-                ${num(t.take_profit_count || 0, '触发止盈')}
+                ${num(t.stop_loss_count || 0, '触发止损 <span class="badge badge-bad">亏损离场</span>')}
+                ${num(t.take_profit_count || 0, '触发止盈 <span class="badge badge-good">盈利离场</span>')}
             </div>
             ${renderReversalHistoryShell()}
         </div>`;
@@ -1612,10 +1616,10 @@ function renderReversalHistory(d) {
     // 已结算 = 有出场原因的行（未结算仍列出但标「持仓中」，不进胜率 —— 与后端一致）
     const settled = (d.exit_breakdown || [])
         .filter(b => b.reason).reduce((a, b) => a + b.n, 0);
-    const wrCls = s.win_rate == null ? '' : (s.win_rate >= 50 ? 'positive' : 'negative');
+    // R2：胜率/盈亏比等判断类数字中性，好坏进徽标；收益类保留 R1 涨跌色
+    const wrBadge = s.win_rate == null ? '' : (s.win_rate >= 50
+        ? '<span class="badge badge-good">达标</span>' : '<span class="badge badge-warn">偏低</span>');
     const avgCls = s.avg_return == null ? '' : (s.avg_return > 0 ? 'positive' : 'negative');
-    const pfCls = s.profit_factor == null ? '' : (s.profit_factor >= 1.35 ? 'positive'
-        : (s.profit_factor >= 1 ? '' : 'negative'));
     const chips = (d.exit_breakdown || []).map(b =>
         `<span class="exit-group-stat" title="占本窗口样本 ${(b.n / d.total * 100).toFixed(1)}%"
                style="color:${REV_TONE_COLOR[b.tone] || 'var(--text-muted)'}">${b.label} ${b.n}</span>`).join('');
@@ -1630,7 +1634,7 @@ function renderReversalHistory(d) {
         const color = REV_TONE_COLOR[it.exit_tone] || 'var(--text-muted)';
         const kk = it.kdj_k;
         const kd = kk == null ? '--'
-            : `<span${kk > 80 ? ' style="color:var(--negative)" title="K>80 高位，本线实测该档胜率最低"' : ''}>${Number(kk).toFixed(0)}</span>`;
+            : `<span${kk > 80 ? ' style="color:var(--status-warn)" title="⚠ K>80 高位，本线实测该档胜率最低"' : ''}>${Number(kk).toFixed(0)}</span>`;
         return `<tr>
             <td style="font-size:var(--fs-1)">${it.scan_date || '--'}</td>
             <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
@@ -1658,13 +1662,13 @@ function renderReversalHistory(d) {
         <div class="metrics-row" style="margin-bottom:10px">
             ${card(d.total, '跟踪样本', '', '近 ' + d.days + ' 天全部复盘记录（含未结算）')}
             ${card(settled, '已结算', '', '已触发出场的原因行；未结算不计入胜率')}
-            ${card(s.win_rate != null ? s.win_rate + '%' : '--', '结算胜率', wrCls, '仅有效已出场收益，>0 记胜；不以 T+n 补齐未结算交易')}
+            ${card(s.win_rate != null ? s.win_rate + '%' : '--', '结算胜率 ' + wrBadge, '', '仅有效已出场收益，>0 记胜；不以 T+n 补齐未结算交易')}
             ${card(s.avg_return != null ? (s.avg_return >= 0 ? '+' : '') + s.avg_return + '%' : '--', '平均收益', avgCls)}
-            ${card(s.profit_factor != null ? Number(s.profit_factor).toFixed(2) : '--', 'Profit factor', pfCls, '总盈利 / 总亏损绝对值；无亏损样本时未知')}
+            ${card(s.profit_factor != null ? Number(s.profit_factor).toFixed(2) : '--', 'Profit factor', '', '总盈利 / 总亏损绝对值；无亏损样本时未知')}
             ${card(s.best_return != null ? '+' + s.best_return + '%' : '--', '最佳', 'positive')}
             ${card(s.worst_return != null ? s.worst_return + '%' : '--', '最差', 'negative')}
-            ${card(s.stop_loss_count || 0, '触发止损', 'negative')}
-            ${card(s.take_profit_count || 0, '触发止盈', 'positive')}
+            ${card(s.stop_loss_count || 0, '触发止损 <span class="badge badge-bad">亏损离场</span>')}
+            ${card(s.take_profit_count || 0, '触发止盈 <span class="badge badge-good">盈利离场</span>')}
         </div>
         <div class="table-wrapper" style="max-height:440px;overflow-y:auto">
             <div style="font-size:var(--fs-2);color:var(--text-muted);margin-bottom:6px">
@@ -2215,8 +2219,7 @@ function renderSdTrack(items, st, updatedAt) {
         '<div class="sd-track-stats">' +
           stat('全部', totalAll + ' 笔', '', 'all') +
           stat('已平仓', (st.total_closed || 0) + ' 笔', '', 'closed') +
-          stat('胜率', st.win_rate == null ? '--' : st.win_rate + '%',
-               st.win_rate == null ? '' : (st.win_rate >= 50 ? 'pos' : 'neg')) +
+          stat('胜率', st.win_rate == null ? '--' : st.win_rate + '%', '') +
           stat('平均持仓', st.avg_hold_tdays == null ? '--' : st.avg_hold_tdays + ' 日') +
           stat('平均收益', _sdPct(st.avg_return), _sdPctCls(st.avg_return)) +
           stat('盈亏比', st.profit_factor == null ? '--' : st.profit_factor) +
@@ -2571,7 +2574,7 @@ function renderStockDeep(data) {
                 <h4 style="margin-top:8px">⚠️ 风险提示</h4>
                 <ul class="sd-reason-list">${risksHtml}</ul>
                 <div class="sd-plan">
-                    <div class="sd-plan-cell"><div class="lbl">参考入场价</div><div class="val" style="color:${_sdColor('var(--green)')}">${fmt(plan.entry_price)}</div></div>
+                    <div class="sd-plan-cell"><div class="lbl">参考入场价</div><div class="val" style="color:var(--accent)">${fmt(plan.entry_price)}</div></div>
                     <div class="sd-plan-cell"><div class="lbl">止损价</div><div class="val" style="color:var(--danger)">${fmt(plan.stop_loss)}</div><div class="sub">${plan.risk_pct != null ? '-' + fmt(plan.risk_pct,1) + '%' : ''}</div></div>
                     <div class="sd-plan-cell"><div class="lbl">止盈价</div><div class="val" style="color:#ffaa3c">${fmt(plan.take_profit)}</div><div class="sub">${plan.reward_pct != null ? '+' + fmt(plan.reward_pct,1) + '%' : ''}</div></div>
                 </div>
@@ -2984,7 +2987,7 @@ function exitStatChip(hz, perf) {
     }
     if (p.win_rate != null) {
         const wins = Math.round(p.win_rate * n / 100);
-        s += `<span class="exit-group-stat ${p.win_rate >= 50 ? 'positive' : 'negative'}" title="${n} 笔已建仓中 ${wins} 笔盈利；口径与「平均每笔」一致（含持仓浮盈，待回踩/未成交不计入）">胜率 ${p.win_rate}%</span>`;
+        s += `<span class="exit-group-stat" style="font-weight:400" title="${n} 笔已建仓中 ${wins} 笔盈利；口径与「平均每笔」一致（含持仓浮盈，待回踩/未成交不计入）">胜率 ${p.win_rate}%</span>`;
     }
     return s;
 }
@@ -3090,14 +3093,16 @@ function renderExitRows(list, maxHold) {
         const stopPx = detail.stop_loss != null ? detail.stop_loss : detail.stop_price;
         const risk = pctOf(stopPx);
         const ST_MAP = {
-            clear:  ['🔴', '已卖出', 'var(--danger)', 600],
-            hold:   ['🟢', '持有', 'var(--green, #10b981)', 600],
-            watching: ['🕐', '待回踩', '#ffaa3c', 600],
-            expired:  ['⚪', '未成交', 'var(--text-muted)', 400],
+            clear:  ['已卖出', 'badge badge-info'],
+            hold:   ['持有', 'badge badge-good'],
+            watching: ['待回踩', 'badge badge-warn'],
+            expired:  ['未成交', ''],
         };
         const _st = ST_MAP[it.status] || ST_MAP.hold;
         const tag = exitReasonTag(it);
-        const statusHtml = `<span style="color:${_st[2]};font-weight:${_st[3]}">${_st[0]} ${_st[1]}</span>`
+        const statusHtml = (_st[1]
+            ? `<span class="${_st[1]}">${_st[0]}</span>`
+            : `<span style="color:var(--text-muted);font-weight:400">${_st[0]}</span>`)
             + (tag ? `<div class="exit-sub">${tag}</div>` : '');
         // 持仓天数：待回踩/未成交未建仓，无天数可读
         const holdHtml = (filled && detail.hold_days != null)
@@ -3194,11 +3199,10 @@ async function loadRuleSignals() {
         box.innerHTML = '<div class="rule-sig-list">' + items.map(it => {
             const price = it.latest_close != null ? Number(it.latest_close).toFixed(2) : '--';
             const hitsTip = it.rule_hits != null ? (' · 今日命中 ' + it.rule_hits + ' 只') : '';
-            // 规则回测胜率徽章：≥55% 用涨色（优），<50% 用跌色警示（沿用 A股红涨绿跌配色）
+            // 规则回测胜率是质量判断（R2）：数字中性，高低只进悬浮说明
             const wr = it.rule_win_rate;
-            const wrCls = wr == null ? '' : (wr >= 55 ? 'idx-up' : (wr >= 50 ? '' : 'idx-down'));
             const wrHtml = wr != null
-                ? `<span class="${wrCls}" style="font-family:var(--font-mono)" title="该规则历史回测胜率（${it.rule_total_trades || 0} 笔交易）${wr < 50 ? ' · 低于50%，谨慎参考' : ''}">胜率 ${Number(wr).toFixed(1)}%</span>`
+                ? `<span style="font-family:var(--font-mono)" title="该规则历史回测胜率（${it.rule_total_trades || 0} 笔交易）${wr < 50 ? ' · 低于50%，谨慎参考' : ''}">胜率 ${Number(wr).toFixed(1)}%</span>`
                 : '<span style="color:var(--text-muted)">胜率 --</span>';
             return `<div class="rule-sig-row" onclick="openKline('${it.code}')">
                 <div class="rule-sig-main">
@@ -3752,19 +3756,21 @@ async function loadRecHistory() {
             const tStat = (k, label) => {
                 const s = summary[k];
                 if (!s || !s.n) return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:var(--fs-6)">--</div><div class="lbl">${label} 胜率</div></div>`;
-                const color = s.win_rate >= 50 ? 'var(--green, #10b981)' : 'var(--danger)';
+                // R2：胜率是质量判断，数字保持中性色，好坏只进徽标
+                const badge = s.win_rate >= 50
+                    ? '<span class="badge badge-good">达标</span>'
+                    : '<span class="badge badge-warn">偏低</span>';
                 const avg = s.avg_return;
                 const avgHtml = avg != null
                     ? `<div style="font-size:var(--fs-1);margin-top:3px" class="${avg>=0?'idx-up':'idx-down'}">${label} 平均收益 ${avg>=0?'+':''}${avg}%</div>`
                     : '';
-                return `<div class="metric-card"><div class="val" style="color:${color};font-size:var(--fs-6)">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span></div>${avgHtml}</div>`;
+                return `<div class="metric-card"><div class="val" style="color:var(--text-primary);font-size:var(--fs-6)">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span> ${badge}</div>${avgHtml}</div>`;
             };
             const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
             const avgSign = summary.avg_return >= 0 ? '+' : '';
             const bestCls = summary.best_return >= 0 ? 'idx-up' : 'idx-down';
             const worstCls = summary.worst_return >= 0 ? 'idx-up' : 'idx-down';
             const pf = summary.profit_factor || 0;
-            const pfCls = pf >= 1.5 ? 'idx-up' : (pf >= 1 ? '' : 'idx-down');
             summaryEl.innerHTML = `
                 <div class="metrics-row" style="margin-bottom:8px">
                     ${tStat('t1', 'T+1')}
@@ -3774,13 +3780,13 @@ async function loadRecHistory() {
                 </div>
                 <div class="metrics-row" style="margin-bottom:12px">
                     <div class="metric-card"><div class="val">${summary.total}</div><div class="lbl">连续推荐段数</div></div>
-                    <div class="metric-card"><div class="val" style="color:${summary.win_rate>=50?'var(--green, #10b981)':'var(--danger)'}">${summary.win_rate}%</div><div class="lbl">最终胜率</div></div>
+                    <div class="metric-card"><div class="val" style="color:var(--text-primary)">${summary.win_rate}%</div><div class="lbl">最终胜率 ${summary.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
                     <div class="metric-card"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
-                    <div class="metric-card"><div class="val ${pfCls}">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
+                    <div class="metric-card"><div class="val">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
                     <div class="metric-card"><div class="val ${bestCls}">+${summary.best_return}%</div><div class="lbl">最佳</div></div>
                     <div class="metric-card"><div class="val ${worstCls}">${summary.worst_return}%</div><div class="lbl">最差</div></div>
-                    <div class="metric-card"><div class="val" style="color:var(--danger)">${summary.stop_loss_count||0}</div><div class="lbl">触发止损</div></div>
-                    <div class="metric-card"><div class="val" style="color:var(--green, #10b981)">${summary.take_profit_count||0}</div><div class="lbl">触发止盈</div></div>
+                    <div class="metric-card"><div class="val">${summary.stop_loss_count||0}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
+                    <div class="metric-card"><div class="val">${summary.take_profit_count||0}</div><div class="lbl">触发止盈 <span class="badge badge-good">盈利离场</span></div></div>
                 </div>`;
         }
 
@@ -3794,9 +3800,9 @@ async function loadRecHistory() {
                 const pnlCls = r.pnl_pct >= 0 ? 'positive' : 'negative';
                 const sign = r.pnl_pct >= 0 ? '+' : '';
                 let status = '持有中';
-                if (r.hit_stop_loss) status = '<span style="color:var(--danger)">已止损</span>';
-                else if (r.exit_reason === 'trailing_stop') status = '<span style="color:var(--green, #10b981)">移止离场</span>';
-                else if (r.hit_take_profit) status = '<span style="color:var(--green, #10b981)">已止盈</span>';
+                if (r.hit_stop_loss) status = '<span class="badge badge-bad">已止损</span>';
+                else if (r.exit_reason === 'trailing_stop') status = '<span class="badge badge-good">移止离场</span>';
+                else if (r.hit_take_profit) status = '<span class="badge badge-good">已止盈</span>';
                 else if (r.exit_reason === 'max_hold_days') status = '<span style="color:var(--text-muted)">到期出场</span>';
                 const fmtRet = (v) => v != null ? `<span class="${v>=0?'positive':'negative'}">${v>=0?'+':''}${v}%</span>` : '--';
                 const firstDate = r.first_scan_date || r.scan_date || '';
@@ -3864,13 +3870,12 @@ async function loadOptimizerPanel() {
         // ① 诊断摘要（近30天短线）
         const s = diag && diag.summary && diag.summary.short;
         if (s) {
-            const wrColor = s.win_rate >= 50 ? 'var(--green, #10b981)' : 'var(--danger)';
             html += `<div class="metrics-row" style="margin-bottom:12px">
                 <div class="metric-card"><div class="val">${s.total}</div><div class="lbl">近30天短线推荐</div></div>
-                <div class="metric-card"><div class="val" style="color:${wrColor}">${s.win_rate}%</div><div class="lbl">胜率</div></div>
+                <div class="metric-card"><div class="val" style="color:var(--text-primary)">${s.win_rate}%</div><div class="lbl">胜率 ${s.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
                 <div class="metric-card"><div class="val ${s.avg_return>=0?'idx-up':'idx-down'}">${s.avg_return>=0?'+':''}${s.avg_return}%</div><div class="lbl">平均收益</div></div>
                 <div class="metric-card"><div class="val">${s.profit_factor}</div><div class="lbl">盈亏比</div></div>
-                <div class="metric-card"><div class="val" style="color:var(--danger)">${s.stop_hit}</div><div class="lbl">触发止损</div></div>
+                <div class="metric-card"><div class="val">${s.stop_hit}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
             </div>`;
         }
         // ② 诊断结论

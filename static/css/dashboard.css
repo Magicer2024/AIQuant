@@ -169,8 +169,8 @@ body::after {
 }
 .status-dot {
     width: 6px; height: 6px; border-radius: 50%;
-    background: #00e676;
-    box-shadow: 0 0 6px #00e676;
+    background: var(--negative);
+    box-shadow: 0 0 6px var(--negative);
 }
 
 /* ── Navigation ── */
@@ -279,9 +279,9 @@ body::after {
     color: var(--text-primary);
     display: flex; align-items: center; gap: 6px;
 }
-.data-status-cell .state.ok    { color: #00e676; }
-.data-status-cell .state.warn  { color: #ffab40; }
-.data-status-cell .state.bad   { color: #ff5252; }
+.data-status-cell .state.ok    { color: var(--status-good); }
+.data-status-cell .state.warn  { color: var(--status-warn); }
+.data-status-cell .state.bad   { color: var(--status-bad); }
 .data-status-cell .state.run   { color: var(--accent-bright); }
 .data-status-cell .time {
     font-size: var(--fs-1);
@@ -482,7 +482,7 @@ tr:hover td {
     50% { opacity: 0.2; }
 }
 .badge-done {
-    color: #00e676; background: rgba(var(--negative-rgb),0.1);
+    color: var(--negative); background: rgba(var(--negative-rgb),0.1);
     border: 1px solid rgba(var(--negative-rgb),0.2);
 }
 .badge-error {
@@ -492,6 +492,19 @@ tr:hover td {
 .badge-info {
     color: var(--accent); background: rgba(var(--accent-rgb),0.08);
     border: 1px solid rgba(var(--accent-rgb),0.15);
+}
+/* 状态徽标（方案A spec §2 R2）：好坏判断只进徽标，禁止直接染裸数字 */
+.badge-good {
+    color: var(--status-good); background: rgba(var(--green-rgb),0.10);
+    border: 1px solid rgba(var(--green-rgb),0.28);
+}
+.badge-warn {
+    color: var(--status-warn); background: rgba(var(--warning-rgb),0.10);
+    border: 1px solid rgba(var(--warning-rgb),0.28);
+}
+.badge-bad {
+    color: var(--status-bad); background: rgba(var(--positive-rgb),0.10);
+    border: 1px solid rgba(var(--positive-rgb),0.28);
 }
 
 /* ── Code link ── */
@@ -680,7 +693,7 @@ tr:hover td {
     box-shadow: 0 4px 12px rgba(0,0,0,0.25);
 }
 .toast.show { opacity: 1; transform: translateX(0); }
-.toast-success { background: #10b981; }
+.toast-success { background: var(--status-good); }
 .toast-error   { background: #ef4444; }
 .toast-warning { background: #f59e0b; color: #1a1a1a; }
 .toast-info    { background: #3b82f6; }
@@ -839,8 +852,8 @@ tr:hover td {
 .idx-price { font-size: var(--fs-5); font-weight: 700; color: var(--text-primary); font-family: var(--font-mono); }
 .idx-pct { font-size: var(--fs-3); margin-top: 2px; font-family: var(--font-mono); }
 .idx-trend { font-size: var(--fs-1); color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono); }
-.idx-up { color: #ff5252; }
-.idx-down { color: #00e676; }
+.idx-up { color: var(--positive); }
+.idx-down { color: var(--negative); }
 .north-card {
     background: linear-gradient(135deg, rgba(var(--accent-rgb),0.06), rgba(var(--accent-rgb),0.02));
     border-color: rgba(var(--accent-rgb),0.25);
@@ -932,8 +945,8 @@ tr:hover td {
 .pm-score, .pm-price { font-family: var(--font-mono); text-align: center; }
 .pm-score { font-size: var(--fs-4); font-weight: 800; color: var(--accent); }
 .pm-price { font-size: var(--fs-3); }
-.pm-buy { color: #ff5252; }
-.pm-tp { color: #00e676; }
+.pm-buy { color: var(--positive); }
+.pm-tp { color: var(--negative); }
 .pm-stop { color: var(--warning); }
 /* 最新价：填色跟随涨跌，下方小字涨幅提示 */
 .pm-last { line-height: 1.15; font-weight: 600; }
@@ -969,7 +982,7 @@ tr:hover td {
 /* ── 已突破确认价 高亮卡片（绿色强调：时机确认信号已触发，可入场）── */
 .action-card.breakout-card {
     border: 1px solid rgba(var(--negative-rgb),0.5);
-    border-left: 3px solid #00e676;
+    border-left: 3px solid var(--negative);
     background: linear-gradient(135deg, rgba(var(--negative-rgb),0.08), rgba(var(--accent-rgb),0.05) 45%, var(--bg-panel) 75%);
     box-shadow: 0 4px 18px rgba(var(--negative-rgb),0.12);
 }
@@ -980,7 +993,7 @@ tr:hover td {
 }
 .price-sub.confirm-broken {
     display: inline-block; margin-top: 2px; padding: 1px 6px;
-    color: #00e676; font-weight: 700;
+    color: var(--negative); font-weight: 700;
     background: rgba(var(--negative-rgb),0.12); border: 1px solid rgba(var(--negative-rgb),0.35);
     border-radius: 4px;
     animation: breakoutPulse 1.6s ease-in-out infinite;
@@ -1000,7 +1013,7 @@ tr:hover td {
 }
 .price-sub.confirm-safe {
     display: inline-block; margin-top: 2px; padding: 1px 6px;
-    color: #00e676; font-weight: 600;
+    color: var(--negative); font-weight: 600;
     background: rgba(var(--negative-rgb),0.10); border: 1px solid rgba(var(--negative-rgb),0.35);
     border-radius: 4px;
 }
@@ -1070,8 +1083,8 @@ tr:hover td {
     font-family: var(--font-mono);
     font-size: var(--fs-4); font-weight: 700; margin: 2px 0;
 }
-.price-cell.buy .price-val { color: #ff5252; }
-.price-cell.sell .price-val { color: #00e676; }
+.price-cell.buy .price-val { color: var(--positive); }
+.price-cell.sell .price-val { color: var(--negative); }
 .price-cell.stop .price-val { color: var(--warning); }
 .price-sub { font-size: var(--fs-1); color: var(--text-secondary); font-family: var(--font-mono); }
 .price-arrow {
@@ -1090,10 +1103,10 @@ tr:hover td {
     cursor: help;
 }
 .signal-badge .sig-emoji { font-size: var(--fs-3); }
-.signal-badge.sig-buy     { background: rgba(var(--negative-rgb),0.15); color: #00e676; border: 1px solid rgba(var(--negative-rgb),0.4); }
+.signal-badge.sig-buy     { background: rgba(var(--negative-rgb),0.15); color: var(--negative); border: 1px solid rgba(var(--negative-rgb),0.4); }
 .signal-badge.sig-add     { background: rgba(var(--warning-rgb),0.15); color: #ffab40; border: 1px solid rgba(var(--warning-rgb),0.4); }
 .signal-badge.sig-hold_watch { background: rgba(123,170,255,0.15); color: #7baaff; border: 1px solid rgba(123,170,255,0.4); }
-.signal-badge.sig-wait    { background: rgba(var(--positive-rgb),0.15); color: #ff5252; border: 1px solid rgba(var(--positive-rgb),0.4); }
+.signal-badge.sig-wait    { background: rgba(var(--positive-rgb),0.15); color: var(--positive); border: 1px solid rgba(var(--positive-rgb),0.4); }
 .signal-badge.sig-avoid   { background: rgba(91,136,194,0.15); color: #5b88c2; border: 1px solid rgba(91,136,194,0.4); }
 .signal-reasons {
     display: flex; flex-wrap: wrap; gap: 4px;
@@ -1102,7 +1115,7 @@ tr:hover td {
 .reason-chip.sig-reason-good {
     background: rgba(var(--negative-rgb),0.06);
     border-color: rgba(var(--negative-rgb),0.25);
-    color: #00e676;
+    color: var(--negative);
 }
 .reason-chip.sig-reason-warn {
     background: rgba(var(--warning-rgb),0.06);
@@ -1125,7 +1138,7 @@ tr:hover td {
 }
 .exit-advice-badge.exit-hold {
     background: rgba(var(--green-rgb),0.1);
-    color: #10b981;
+    color: var(--status-good);
     border: 1px solid rgba(var(--green-rgb),0.3);
 }
 .exit-advice-badge.exit-reduce {
@@ -1167,7 +1180,7 @@ tr:hover td {
     border: 1px solid rgba(var(--border-rgb),0.5);
 }
 .exit-group-stat.positive { color: var(--positive); }
-.exit-group-stat.negative { color: #00e676; }
+.exit-group-stat.negative { color: var(--negative); }
 .exit-group .table-wrapper { margin: 0; }
 
 /* 出场跟踪 · 嵌入今日推荐小板块底部的紧凑版 */
@@ -1315,9 +1328,9 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
     border-radius: 10px; font-weight: 600;
     font-family: var(--font-mono);
 }
-.rr-good { background: rgba(var(--negative-rgb),0.12); color: #00e676; border: 1px solid rgba(var(--negative-rgb),0.3); }
+.rr-good { background: rgba(var(--negative-rgb),0.12); color: var(--negative); border: 1px solid rgba(var(--negative-rgb),0.3); }
 .rr-ok   { background: rgba(var(--warning-rgb),0.12); color: var(--warning); border: 1px solid rgba(var(--warning-rgb),0.3); }
-.rr-bad  { background: rgba(var(--positive-rgb),0.12); color: #ff5252; border: 1px solid rgba(var(--positive-rgb),0.3); }
+.rr-bad  { background: rgba(var(--positive-rgb),0.12); color: var(--positive); border: 1px solid rgba(var(--positive-rgb),0.3); }
 
 /* ── 2-column grid for positions/watchlist ── */
 .grid-2col {
@@ -1460,11 +1473,11 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
     color: var(--accent);
     box-shadow: 0 0 12px rgba(var(--accent-rgb),0.4);
 }
-.bt-step.done { color: #00e676; }
+.bt-step.done { color: var(--negative); }
 .bt-step.done .bt-step-num {
     background: rgba(var(--negative-rgb),0.15);
-    border-color: #00e676;
-    color: #00e676;
+    border-color: var(--negative);
+    color: var(--negative);
 }
 .bt-step-line {
     flex: 1; height: 1px;
