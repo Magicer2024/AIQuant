@@ -35,21 +35,15 @@ MIN_N = 30                           # 已结算样本下限，未达不下结�
 
 def fetch(conn, since, until):
     rows = conn.execute("""
-        SELECT exit_return, hold_days FROM recommend_outcome
+        SELECT exit_return FROM recommend_outcome
         WHERE horizon='long' AND exit_return IS NOT NULL
           AND scan_date >= ? AND scan_date < ?""", (since, until)).fetchall()
     # 1c 归档表补历史（窗口滚动可能移出旧行，archive 为 append-only 全量）
     try:
         rows += conn.execute("""
-            SELECT exit_return, hold_days FROM recommend_outcome_archive
+            SELECT exit_return FROM recommend_outcome_archive
             WHERE horizon='long' AND exit_return IS NOT NULL
               AND scan_date >= ? AND scan_date < ?""", (since, until)).fetchall()
-        seen = set(); dedup = []
-        for r in rows:
-            if r[0] is None: continue
-            key = (r[0], r[1])
-            dedup.append(r)
-        rows = dedup
     except sqlite3.OperationalError:
         pass  # 无归档表则仅用主表
     return [r[0] for r in rows if r[0] is not None]
