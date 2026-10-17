@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017c">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017d">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -171,7 +171,7 @@
     <div id="syncProgressText" style="font-size:var(--fs-2); color:var(--text-secondary);"></div>
 </div>
 
-<div class="kline-overlay" id="klinePanel" onclick="if(event.target===this)closeKline()">
+<div class="kline-overlay" id="klinePanel" onclick="_drawerScrimClick(event, 'closeKline')">
     <div class="kline-popup">
         <button class="close-btn" onclick="closeKline()">&#x2715;</button>
         <!-- 副图指标切换按钮 -->
@@ -2027,11 +2027,36 @@ function closeSdDeep() {
     if (typeof renderSdPanelPlaceholder === 'function') renderSdPanelPlaceholder();
 }
 
-// ESC 关闭弹窗
+// 抽屉遮罩点击：先命中测试遮罩下方元素——若是可打开详情的行/卡片，关闭抽屉后把这一击转发过去
+// （P3「列表可见可点」：点行换内容不用先关再点）；其余情况仅关闭。
+function _drawerScrimClick(e, closeFn) {
+    if (e.target !== e.currentTarget) return;
+    var scrim = e.currentTarget;
+    var hit = null;
+    scrim.style.pointerEvents = 'none';
+    try { hit = document.elementFromPoint(e.clientX, e.clientY); } finally { scrim.style.pointerEvents = ''; }
+    var target = null;
+    if (hit) {
+        var cand = hit.closest('.action-card, .sum-row, .pick-mini-row, .idx-clickable, .code-link, .sd-chip, [onclick]');
+        if (cand) {
+            var oc = cand.getAttribute('onclick') || '';
+            if (/openKline|openSdDeep|openStockDeep|openIndexKline|showFactor/.test(oc)
+                || cand.matches('.action-card, .sum-row, .pick-mini-row, .idx-clickable, .code-link, .sd-chip')) {
+                target = cand;
+            }
+        }
+    }
+    if (typeof window[closeFn] === 'function') window[closeFn]();
+    if (target) setTimeout(function () { try { target.click(); } catch (err) {} }, 250);
+}
+
+// Esc 关闭抽屉（深析优先，其次 K 线）
 document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
         var p = document.getElementById('sdDeepPanel');
-        if (p && p.classList.contains('open')) closeSdDeep();
+        if (p && p.classList.contains('open')) { closeSdDeep(); return; }
+        var k = document.getElementById('klinePanel');
+        if (k && k.classList.contains('open')) closeKline();
     }
 });
 
