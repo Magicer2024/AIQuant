@@ -973,7 +973,14 @@ TUNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
     },
     "long_trailing_pct": {
         # 长线移动止盈回撤比例：持仓 60+ 日波动更大，回撤阈值放宽到 15%（趋势破坏确认）。
-        "default": 0.15, "type": float,
+        # 2026-10-17 15%→20%（任务2 E2t_20，Yu Fang 批准）：2015-2026 八臂网格中唯一
+        # 五条事前判据全绿——ΔEV +6.21pp/笔、WF 两折一致(+2.47/+10.93)、drop-one-year
+        # 全正、top5% 尾部贡献反升 10.3pp、p10 仅 -0.3pp（左尾仍由 MA120 止损接管）。
+        # 代价如实：平均持有 147→191 日、下跌主导年浮盈回吐略多。
+        # 跟踪与回滚：tools/track_trailing_rollout.py 月度对账，实测 ΔEV < 回放 50%
+        # （即 <+3.1pp）→ 报管理A转 Yu Fang 回滚（改回 0.15 即完全回退，无状态依赖）。
+        # 依据全文见群共享 task2_replay/report_e2e3b_grid.md。
+        "default": 0.20, "type": float,
         "min": 0.05, "max": 0.40, "label": "长线移动止盈回撤比例(自高点)",
     },
     "mid_atr_stop_mult": {
