@@ -541,6 +541,43 @@ document.addEventListener('click', function (e) {
     });
 }, true);
 
+// ── P4 #7：行情数字刷新 300ms tint 闪（涨红底/跌绿底淡出，仅 .idx-price 行情单元格；
+//    判断/收益类数字不染，R1 口径不变）。纯 DOM 观察比对，render 函数与接口零触碰。──
+(function () {
+    var mem = {};
+    function flash(el, up) {
+        var cls = up ? 'flash-up' : 'flash-down';
+        el.classList.remove('flash-up', 'flash-down');
+        void el.offsetWidth;                       // 强制 reflow 重启动画
+        el.classList.add(cls);
+        setTimeout(function () { el.classList.remove(cls); }, 340);
+    }
+    function scan() {
+        var cards = document.querySelectorAll('#indexCards .idx-card');
+        for (var i = 0; i < cards.length; i++) {
+            var nameEl = cards[i].querySelector('.idx-name');
+            var priceEl = cards[i].querySelector('.idx-price');
+            if (!nameEl || !priceEl) continue;
+            var v = parseFloat((priceEl.textContent || '').replace(/[^\d.\-]/g, ''));
+            if (isNaN(v)) continue;
+            var key = nameEl.textContent.trim();
+            if (mem[key] != null && v !== mem[key]) flash(priceEl, v > mem[key]);
+            mem[key] = v;
+        }
+    }
+    if ('MutationObserver' in window) {
+        var content = document.getElementById('content');
+        if (content) {
+            var pending = false;
+            new MutationObserver(function () {
+                if (pending) return;
+                pending = true;
+                requestAnimationFrame(function () { pending = false; scan(); });
+            }).observe(content, { childList: true, subtree: true });
+        }
+    }
+})();
+
 // 切页防抖：120ms 内连续点击导航只执行最后一次内容加载。
 // 旧实现每次点击都立刻 cancelAll+骨架屏+loadTab，快速点两页时第一页的加载全部白做。
 // 导航高亮点击即更新（即时视觉反馈，且不依赖延迟后的内容加载）。

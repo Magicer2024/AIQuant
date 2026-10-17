@@ -1917,3 +1917,13 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 .field-ctl:focus { outline: none; border-color: var(--accent-dim); box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.12); }
 .field-ctl::-webkit-calendar-picker-indicator { opacity: .55; cursor: pointer; }
 .field-ctl:hover::-webkit-calendar-picker-indicator { opacity: .9; }
+
+/* ── 价格 tint 闪（P4#7，spec §3-4/7）：涨红底/跌绿底 300ms 淡出，仅行情单元格 ── */
+@keyframes priceFlashUp   { from { background: var(--tint-bad); }  to { background: transparent; } }
+@keyframes priceFlashDown { from { background: var(--tint-good); } to { background: transparent; } }
+.idx-price { border-radius: 4px; }
+.idx-price.flash-up   { animation: priceFlashUp   0.3s ease-out; }
+.idx-price.flash-down { animation: priceFlashDown 0.3s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+    .idx-price.flash-up, .idx-price.flash-down { animation: none; }
+}
