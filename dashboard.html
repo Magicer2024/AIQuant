@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017g">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017h">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -162,6 +162,8 @@
     <button class="nav-item active" onclick="switchTab('home')">今日</button>
     <button class="nav-item" onclick="switchTab('track')">跟踪</button>
     <button class="nav-item" onclick="switchTab('research')">研判</button>
+    <button class="nav-item" onclick="switchTab('l06')">验证</button>
+    <button class="nav-item" onclick="switchTab('disc')">纪律</button>
     <button class="nav-item" onclick="switchTab('settings')">设置</button>
     <div class="anchor-bar" id="anchorBar" role="navigation" aria-label="面板导航"></div>
 </nav>
@@ -207,6 +209,14 @@
         <div id="sdDeepBody"></div>
         <div id="sdDeepChart" style="width:100%;height:0;display:none"></div>
         <div id="sdDeepIndicators" style="display:none"></div>
+    </div>
+</div>
+
+<!-- L06 报告 / 盲核 全宽抽屉（spec §7.4：460px 放不下双图+差异表，走全宽） -->
+<div class="kline-overlay" id="rpPanel" onclick="_drawerScrimClick(event, 'closeRpPanel')">
+    <div class="rp-popup" role="dialog" aria-modal="true" aria-label="验证报告">
+        <button class="close-btn" onclick="closeRpPanel()" aria-label="关闭抽屉">&#x2715;</button>
+        <div id="rpBody"></div>
     </div>
 </div>
 
@@ -657,6 +667,8 @@ function _doSwitchTab(tab) {
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
         window.scrollTo(0, _tabScroll[tab] || 0);     // P3#6：恢复该 tab 的滚动位置
         if (tab === 'research') restoreStockDeep();   // cache 恢复时重绘个股深度图表
+        if (tab === 'l06') resumeL06Timers();          // cache 恢复时重启分诊/深跑计时（显示层）
+        if (tab === 'disc') resumeDiscTimers();        // 偏离单倒计时同理
         renderAnchorBar(tab); initAnchorNav();        // tab 内迷你锚点随内容重建
         return;
     }
@@ -671,6 +683,8 @@ async function loadTab(tab) {
         if (tab === 'home') await loadHomeTab(c);
         else if (tab === 'track') await loadTrackTab(c);
         else if (tab === 'research') await loadResearchTab(c);
+        else if (tab === 'l06') await loadL06Tab(c);
+        else if (tab === 'disc') await loadDiscTab(c);
         else if (tab === 'settings') await loadSettingsTab(c);
 
         c.firstElementChild?.classList.add('tab-content');
@@ -2196,9 +2210,11 @@ function _drawerScrimClick(e, closeFn) {
     if (target) setTimeout(function () { try { target.click(); } catch (err) {} }, 250);
 }
 
-// Esc 关闭抽屉（深析优先，其次 K 线）
+// Esc 关闭抽屉（报告全宽抽屉优先，其次深析，最后 K 线）
 document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
+        var r = document.getElementById('rpPanel');
+        if (r && r.classList.contains('open')) { closeRpPanel(); return; }
         var p = document.getElementById('sdDeepPanel');
         if (p && p.classList.contains('open')) { closeSdDeep(); return; }
         var k = document.getElementById('klinePanel');
@@ -2221,7 +2237,7 @@ document.addEventListener('click', function (e) {
             popup.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
             function (el) { return !el.disabled && el.offsetParent !== null; });
     }
-    ['klinePanel', 'sdDeepPanel'].forEach(function (id) {
+    ['klinePanel', 'sdDeepPanel', 'rpPanel'].forEach(function (id) {
         var panel = document.getElementById(id);
         if (!panel || !('MutationObserver' in window)) return;
         new MutationObserver(function () {
@@ -2244,7 +2260,7 @@ document.addEventListener('click', function (e) {
         if (e.key !== 'Tab') return;
         var panel = document.querySelector('.kline-overlay.open');
         if (!panel) return;
-        var popup = panel.querySelector('.kline-popup, .sd-deep-popup') || panel;
+        var popup = panel.querySelector('.kline-popup, .sd-deep-popup, .rp-popup') || panel;
         var f = focusables(popup);
         if (!f.length) return;
         var first = f[0], last = f[f.length - 1];
@@ -4757,7 +4773,7 @@ function onAutoSyncDone(msg) {
     // 任务12 遗留③：4 标签 IA 后按当前 tab 刷新对应内容，不再假设数据面板在首页。
     const c = document.getElementById('content');
     if (!c || typeof currentTab === 'undefined') return;
-    var loaders = { home: loadHomeTab, track: loadTrackTab, research: loadResearchTab, settings: loadSettingsTab };
+    var loaders = { home: loadHomeTab, track: loadTrackTab, research: loadResearchTab, l06: loadL06Tab, disc: loadDiscTab, settings: loadSettingsTab };
     var fn = loaders[currentTab];
     if (fn) {
         if (TabState && TabState.states) TabState.states[currentTab] = null;   // 旧缓存作废
@@ -5642,6 +5658,1047 @@ function openQuotePage() {
         url = quoteUrlFor(code);
     }
     window.open(url, '_blank', 'noopener');
+}
+
+// ─── L06 验证闭环 + 纪律装置包视图（T3/T4 前端，契约：shared/specs/L06_spec.md §8、JH4_spec.md §8/§9）───
+// 计时口径：倒计时只是显示层，判定以服务端 created_at→decided_at 为准（L06_spec §2，防关标签页绕计时）。
+
+var L06_TRIAGE_BUDGET = 1800;   // 与后端 TRIAGE_BUDGET_SECONDS 对齐（仅显示层）
+
+function rpEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (ch) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+    });
+}
+function rpPct(v, dp) {   // 小数口径（引擎指标）→ 百分比文本；max_drawdown 为负小数
+    if (v == null || isNaN(v)) return '--';
+    return (Number(v) * 100).toFixed(dp == null ? 1 : dp) + '%';
+}
+function rpPctRaw(v, dp) {  // 已是百分数的字段（判例档案 exec_pnl_pct_* 列，单位待联调确认）
+    if (v == null || isNaN(v)) return '--';
+    return Number(v).toFixed(dp == null ? 1 : dp) + '%';
+}
+function rpSigned(v, txt) {
+    var cls = v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
+    return '<span class="' + cls + '">' + txt + '</span>';
+}
+function rpLocalDate(str) { return new Date(String(str || '').replace(' ', 'T')); }
+function rpMmss(sec) {
+    sec = Math.max(0, Math.round(sec));
+    return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+function rpCountdownText(target) {
+    var ms = target - Date.now();
+    var neg = ms < 0;
+    ms = Math.abs(ms);
+    var h = Math.floor(ms / 3600000), m = Math.floor(ms % 3600000 / 60000), s = Math.floor(ms % 60000 / 1000);
+    return (neg ? '已超 ' : '') + (h > 0 ? h + ' 时 ' : '') + m + ' 分 ' + s + ' 秒';
+}
+function rpIsoWeek(d) {
+    var t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    var day = t.getUTCDay() || 7;
+    t.setUTCDate(t.getUTCDate() + 4 - day);
+    var y = t.getUTCFullYear(), ys = new Date(Date.UTC(y, 0, 1));
+    return y + '-' + String(Math.ceil(((t - ys) / 86400000 + 1) / 7)).padStart(2, '0');
+}
+function rpJsonPost(key, url, body) {
+    return RequestManager.fetch(key, url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+}
+
+var L06_CHECKS = [
+    ['T1', '条件可表达', '指标都能在目录取到？不成立 → LOGIC'],
+    ['T2', '未来函数硬门', '仅 open/high/low/close/volume 可作当日决策依据；派生分（fusion_score 等）只能按决策日之前取数。此门不可跳过'],
+    ['T3', '数据可得性', '窗口覆盖率 ≥80% 且指标非空率 ≥70%；不足 → defer（数据问题不杀想法）'],
+    ['T4', '样本量下限', '预计成信号 ≥30 笔；不足 → SAMPLE（统计无意义）'],
+    ['T5', '可成交性', '次日开盘口径不可成交占比 ≤30%；超 → LIQUIDITY'],
+    ['T6', '重复覆盖', '与现有规则 Jaccard≥0.8 须写明「与已有规则不同在哪」才许 pass'],
+    ['T7', '频率档位', '隐含持有 3~20 交易日才算中频；不符 → 改档或判死'],
+];
+var L06_DEATH_LABEL = {
+    LOGIC: '逻辑不成立', DATA: '数据不可得', SAMPLE: '样本不足', LIQUIDITY: '不可成交',
+    COST: '成本蚕食', REGIME: '环境依赖', WEAK: '信号偏弱', NONE: '值得推进',
+};
+var L06_DEATH_CODES = ['LOGIC', 'DATA', 'SAMPLE', 'LIQUIDITY', 'REGIME'];
+var PF_ANCHOR_KINDS = ['price_below', 'drawdown_from_entry', 'giveback_from_peak', 'deadline', 'indicator_below', 'unlock_event'];
+var PF_INDICATORS = ['fusion_score', 'vol_ratio', 'chip_conc', 'close_vs_ma20', 'j', 'rsi14'];
+
+// ═══ Tab 验证(l06) ═══
+var _l06Active = null;   // {idea, attempt, overtimeShown, verdict, bundleId}
+
+async function loadL06Tab(container) {
+    var wk = rpIsoWeek(new Date());
+    container.innerHTML = `
+        <div class="panel" id="panelL06New">
+            <div class="panel-header">
+                <h3>录入新想法 · 30 分钟验证闭环</h3>
+                <span class="text-muted" style="font-size:var(--fs-2)">计时只压分诊闸；深跑（一题三跑：近窗现实 × 全窗现实 × 近窗理想）异步进行，不占预算</span>
+            </div>
+            <div class="rp-form">
+                <div class="rp-form-row">
+                    <label>标题（4~120 字）<input id="l06Title" maxlength="120" placeholder="例：超卖股回踩 EMA20 企稳买入"></label>
+                    <label>隐含持有天数<input id="l06Hold" type="number" min="1" max="999" value="10"></label>
+                </div>
+                <label>一句话假设（人话）<textarea id="l06Hypo" rows="2" placeholder="为什么觉得这样能赚？一句话说清"></textarea></label>
+                <label>选股条件 JSON（直接喂规则引擎）<textarea id="l06Cond" rows="3" placeholder='[{"field":"close_vs_ma20","op":"<","value":-0.03}]'></textarea></label>
+                <button class="btn btn-primary" onclick="l06SubmitIdea()">保存并开始分诊</button>
+            </div>
+        </div>
+
+        <div class="panel" id="panelL06Active" style="display:none"></div>
+
+        <div class="panel" id="panelL06Queue">
+            <div class="panel-header">
+                <h3>想法队列</h3>
+                <button class="btn btn-sm" onclick="loadL06Queue()">刷新</button>
+            </div>
+            <div id="l06QueueBody"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
+        </div>
+
+        <div class="panel" id="panelL06Review">
+            <div class="panel-header">
+                <h3>一周复盘</h3>
+                <span class="rp-form-inline"><input id="l06ReviewWeek" type="text" value="${wk}" size="8" aria-label="ISO 周">
+                <button class="btn btn-sm" onclick="loadL06Review()">查周判据</button></span>
+            </div>
+            <div id="l06ReviewBody" class="rp-review-hint">成功判据：≥3/5 想法在 30 分钟内出 pass/fail 且死因被明说；多数 timeout 则优先砍分诊项而非砍计时器。</div>
+        </div>
+    `;
+    loadL06Queue();
+}
+
+async function l06SubmitIdea() {
+    var title = (document.getElementById('l06Title').value || '').trim();
+    var hypo = (document.getElementById('l06Hypo').value || '').trim();
+    var condText = (document.getElementById('l06Cond').value || '').trim();
+    var hold = parseInt(document.getElementById('l06Hold').value, 10);
+    if (title.length < 4 || title.length > 120) { showToast('标题需 4~120 字', 'warning'); return; }
+    if (!hypo) { showToast('一句话假设必填', 'warning'); return; }
+    var conditions = [];
+    if (condText) {
+        try { conditions = JSON.parse(condText); } catch (e) { showToast('条件 JSON 解析失败：' + e.message, 'error'); return; }
+        if (!Array.isArray(conditions) || !conditions.length) { showToast('条件至少一条', 'warning'); return; }
+    }
+    var indicators = [];
+    conditions.forEach(function (c) { if (c && c.field && indicators.indexOf(c.field) < 0) indicators.push(c.field); });
+    try {
+        var resp = await rpJsonPost('l06-idea-new', API + '/l06/idea', {
+            title: title, hypothesis: hypo, conditions_json: JSON.stringify(conditions),
+            indicators_json: JSON.stringify(indicators), implied_hold_days: isNaN(hold) ? null : hold,
+        });
+        var d = (resp && resp.data) || {};
+        showToast('想法已保存，分诊计时开始', 'success');
+        l06OpenTriage({
+            id: d.idea_id != null ? d.idea_id : d.id, title: title,
+            deadline_at: d.deadline_at, created_at: d.created_at, status: 'triaging',
+        }, 1);
+        loadL06Queue();
+    } catch (e) {
+        showToast('保存失败：' + (e.message || e), 'error');
+    }
+}
+
+function l06DeadlineDate(idea) {
+    if (idea.deadline_at) return rpLocalDate(idea.deadline_at);
+    var d = rpLocalDate(idea.created_at);
+    d.setSeconds(d.getSeconds() + L06_TRIAGE_BUDGET);
+    return d;
+}
+
+function l06OpenTriage(idea, attempt) {
+    _l06Active = { idea: idea, attempt: attempt || 1, overtimeShown: false, verdict: null, bundleId: null };
+    var host = document.getElementById('panelL06Active');
+    if (!host) return;
+    host.style.display = '';
+    host.innerHTML =
+        '<div class="panel-header"><h3>分诊闸 · ' + rpEsc(idea.title) + '（第 ' + (attempt || 1) + ' 次）</h3>' +
+        '<span class="rp-count" id="l06Countdown">--</span></div>' +
+        '<div class="rp-triage-note">30 分钟预算从<b>想法录入瞬间</b>起算，只管这一关。超时不自动判死，但必须当场二选一：补 defer（写明缺什么）或判 fail。' +
+        '「深跑」按钮在 verdict=pass 前锁定。</div>' +
+        l06ChecklistHtml() +
+        '<div class="rp-verdict-row" id="l06VerdictRow">' +
+        '<button class="btn btn-primary" onclick="l06SubmitVerdict(\'pass\')">pass · 允许深跑</button>' +
+        '<button class="btn" onclick="l06SubmitVerdict(\'fail\')">fail</button>' +
+        '<button class="btn" onclick="l06SubmitVerdict(\'defer\')">defer（补齐再来）</button>' +
+        '</div>';
+    _l06StartTick();
+}
+
+function l06ChecklistHtml() {
+    var rows = L06_CHECKS.map(function (c) {
+        return '<div class="rp-check-row" data-check="' + c[0] + '">' +
+            '<span class="rp-check-id">' + c[0] + '</span>' +
+            '<span class="rp-check-name">' + c[1] + '<em>' + c[2] + '</em></span>' +
+            '<span class="rp-check-opts">' +
+            '<label><input type="radio" name="chk_' + c[0] + '" value="pass" checked>pass</label>' +
+            '<label><input type="radio" name="chk_' + c[0] + '" value="fail">fail</label>' +
+            '<label><input type="radio" name="chk_' + c[0] + '" value="not_evaluated">未做</label>' +
+            '</span>' +
+            '<input class="rp-check-note" data-note="' + c[0] + '" placeholder="依据数字（可选）" maxlength="200" aria-label="' + c[0] + ' 依据">' +
+            '</div>';
+    }).join('');
+    return '<div class="rp-check-list" id="l06CheckList">' + rows + '</div>';
+}
+
+function l06CollectChecks() {
+    return L06_CHECKS.map(function (c) {
+        var row = document.querySelector('.rp-check-row[data-check="' + c[0] + '"]');
+        var state = 'not_evaluated';
+        if (row) {
+            var checked = row.querySelector('input[type=radio]:checked');
+            if (checked) state = checked.value;
+        }
+        var noteEl = document.querySelector('.rp-check-note[data-note="' + c[0] + '"]');
+        var note = (noteEl && noteEl.value || '').trim();
+        return { id: c[0], state: state, note: note };
+    });
+}
+
+function _l06StartTick() {
+    timerManager.clear('l06-tick');
+    if (!_l06Active) return;
+    var deadline = l06DeadlineDate(_l06Active.idea);
+    timerManager.setInterval('l06-tick', function () {
+        var el = document.getElementById('l06Countdown');
+        if (!el || !_l06Active) { timerManager.clear('l06-tick'); return; }
+        var left = (deadline - Date.now()) / 1000;
+        el.textContent = rpCountdownText(deadline);
+        el.classList.toggle('over', left < 0);
+        if (left < 0 && !_l06Active.overtimeShown && !_l06Active.verdict) l06ShowOvertime(deadline);
+    }, 1000);
+}
+
+// L06_spec §2 超时后展示三块：① 已用时长+超时限 ② 检查项清单 ③ 二选一（补 defer / 判 fail）
+function l06ShowOvertime(deadline) {
+    if (!_l06Active) return;
+    _l06Active.overtimeShown = true;
+    var row = document.getElementById('l06VerdictRow');
+    if (!row) return;
+    var used = Math.round((Date.now() - (deadline.getTime() - L06_TRIAGE_BUDGET * 1000)) / 1000);
+    row.innerHTML =
+        '<div class="rp-overtime">' +
+        '<div class="rp-overtime-1">⏱ 已用 ' + rpMmss(used) + ' / 预算 30:00 —— 超时不自动判死，但不许「再跑一会儿」：当场二选一。</div>' +
+        '<div class="rp-overtime-2">检查项状态见上表，未做的项会随 defer/fail 一并入库留痕。</div>' +
+        '<div class="rp-overtime-3">' +
+        '<button class="btn btn-primary" onclick="l06SubmitVerdict(\'defer\')">补 defer（写明缺什么，≥10 字）</button>' +
+        '<button class="btn btn-danger" onclick="l06SubmitVerdict(\'fail\')">判 fail（放弃此想法）</button>' +
+        '</div></div>';
+}
+
+async function l06SubmitVerdict(verdict) {
+    if (!_l06Active || _l06Active.verdict) return;
+    var idea = _l06Active.idea;
+    var checks = l06CollectChecks();
+    var body = { triage_attempt: _l06Active.attempt, checks: checks, verdict: verdict };
+    if (verdict === 'pass') {
+        var t2 = checks.filter(function (c) { return c.id === 'T2'; })[0];
+        if (!t2 || t2.state !== 'pass') { showToast('T2 未来函数是硬门，不通过不许 pass（服务端也会重算兜底）', 'error'); return; }
+        var t6 = checks.filter(function (c) { return c.id === 'T6'; })[0];
+        if (t6 && t6.state === 'fail' && (t6.note || '').replace(/\s/g, '').length < 10) {
+            showToast('T6 判为重复覆盖：pass 前须在 T6 依据里写满 10 字「与已有规则不同在哪」', 'warning'); return;
+        }
+    }
+    if (verdict === 'fail') {
+        var code = prompt('死因码（LOGIC / DATA / SAMPLE / LIQUIDITY / REGIME 之一）：', 'LOGIC');
+        if (code == null) return;
+        code = code.trim().toUpperCase();
+        if (L06_DEATH_CODES.indexOf(code) < 0) { showToast('死因码不在枚举内', 'error'); return; }
+        body.death_step = code;
+    }
+    if (verdict === 'defer') {
+        var reason = prompt('缺什么（数据/口径，≥10 字，进欠账列表）：', '');
+        if (reason == null) return;
+        if (reason.replace(/\s/g, '').length < 10) { showToast('defer 理由需 ≥10 字', 'warning'); return; }
+        body.defer_reason = reason.trim();
+    }
+    try {
+        await rpJsonPost('l06-triage', API + '/l06/idea/' + idea.id + '/triage', body);
+        _l06Active.verdict = verdict;
+        timerManager.clear('l06-tick');
+        var host = document.getElementById('panelL06Active');
+        if (verdict === 'pass') {
+            host.innerHTML = '<div class="panel-header"><h3>分诊通过 · ' + rpEsc(idea.title) + '</h3><span class="rp-badge ok">pass</span></div>' +
+                '<div class="rp-triage-note">深跑是异步任务，不计入 30 分钟、无倒计时。提交后自动并行跑 3 组对照。</div>' +
+                '<div id="l06RunBlock"><button class="btn btn-primary" onclick="l06StartRun()">启动一题三跑（A近窗现实 / B全窗现实 / C近窗理想）</button></div>';
+        } else {
+            host.innerHTML = '<div class="panel-header"><h3>分诊落定 · ' + rpEsc(idea.title) + '</h3>' +
+                '<span class="rp-badge ' + (verdict === 'defer' ? 'warn' : 'bad') + '">' + verdict + '</span></div>' +
+                '<div class="rp-triage-note">' + (verdict === 'defer' ? '已进欠账列表（不排队周末批量）。补齐后可再分诊一次，第二次仍超时将强制 fail。' : '想法终止，未产生任何回测任务（省算力也省「不忍关」）。') + '</div>';
+        }
+        loadL06Queue();
+    } catch (e) {
+        showToast('分诊提交失败：' + (e.message || e), 'error');
+    }
+}
+
+async function l06StartRun() {
+    var idea = _l06Active && _l06Active.idea;
+    if (!idea) return;
+    try {
+        var resp = await rpJsonPost('l06-run', API + '/l06/idea/' + idea.id + '/run', {});
+        var d = (resp && resp.data) || {};
+        _l06Active.bundleId = d.bundle_id != null ? d.bundle_id : d.id;
+        showToast('三跑已提交，异步执行中', 'success');
+        _l06PollBundle();
+    } catch (e) {
+        showToast('启动失败：' + (e.message || e), 'error');
+    }
+}
+
+function _l06PollBundle() {
+    timerManager.poll('l06-run-poll', async function () {
+        if (!_l06Active || !_l06Active.bundleId) { timerManager.clear('l06-run-poll'); return; }
+        var host = document.getElementById('l06RunBlock');
+        try {
+            var resp = await RequestManager.fetch('l06-bundle-poll', API + '/l06/bundle/' + _l06Active.bundleId);
+            var d = (resp && resp.data) || {};
+            var ready = d.ready === true || (d.metrics && d.combos);
+            if (!ready) {
+                if (host) host.innerHTML = _l06RunProgressHtml(d);
+                return;
+            }
+            timerManager.clear('l06-run-poll');
+            if (host) host.innerHTML = '<button class="btn btn-primary" onclick="openRpReport(' + _l06Active.bundleId + ')">打开验证报告</button>';
+            openRpReport(_l06Active.bundleId);
+            loadL06Queue();
+        } catch (e) {
+            if (host) host.innerHTML = panelError('loadL06Queue');
+            timerManager.clear('l06-run-poll');
+        }
+    }, 5000, true);
+}
+
+function _l06RunProgressHtml(d) {
+    // 深跑阶段无倒计时（spec §2）：只展示 3 个 task 进度轮询
+    var combos = d.combos || [];
+    var rows = combos.map(function (c) {
+        var st = (d.statuses && d.statuses[c.code]) || c.status || 'running';
+        return '<div class="rp-run-row"><b>' + rpEsc(c.code) + '</b> ' + rpEsc(c.window || '') + ' × ' + rpEsc(c.cost_tier || '') +
+            '<span class="rp-run-st st-' + rpEsc(st) + '">' + rpEsc(st) + '</span></div>';
+    }).join('');
+    return '<div class="rp-run">' + (rows || '<div class="rp-run-row">三跑进行中，每 5 秒刷新…</div>') + '</div>';
+}
+
+var L06_QUEUE_GROUPS = [
+    ['new', '待分诊'], ['triaging', '分诊中'], ['deferred', '欠账（defer）'],
+    ['passed', '已过闸未跑'], ['run_complete', '已完成'], ['failed', '已判死'], ['timeout', '超时'],
+];
+
+async function loadL06Queue() {
+    var box = document.getElementById('l06QueueBody');
+    if (!box) return;
+    try {
+        var resp = await RequestManager.fetch('l06-queue', API + '/l06/queue');
+        var items = ((resp && resp.data) || {}).items || [];
+        _l06QueueCache = {};
+        items.forEach(function (it) { _l06QueueCache[it.id] = it; });
+        if (!items.length) { box.innerHTML = '<div class="empty-state">队列是空的。录入第一个想法吧。</div>'; return; }
+        var byStatus = {};
+        items.forEach(function (it) { (byStatus[it.status] = byStatus[it.status] || []).push(it); });
+        var html = '';
+        L06_QUEUE_GROUPS.forEach(function (g) {
+            var list = byStatus[g[0]];
+            if (!list || !list.length) return;
+            html += '<div class="rp-q-group"><div class="rp-q-title">' + g[1] + ' · ' + list.length + '</div>';
+            list.forEach(function (it) { html += _l06QueueRow(it); });
+            html += '</div>';
+        });
+        box.innerHTML = html;
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">队列加载失败（后端 /api/l06/queue 未就绪？） ' +
+            '<button class="btn btn-sm" onclick="loadL06Queue()">重试</button></div>';
+    }
+}
+
+function _l06QueueRow(it) {
+    var act = '';
+    var deadlineHint = '';
+    if (it.status === 'new' || it.status === 'triaging') {
+        act = '<button class="sd-op" onclick=' + JSON.stringify('l06ResumeTriage(' + it.id + ')') + '>进入分诊</button>';
+        if (it.created_at) deadlineHint = '<span class="rp-q-deadline" data-created="' + rpEsc(it.created_at) + '"></span>';
+    } else if (it.status === 'deferred') {
+        act = '<button class="sd-op" onclick=' + JSON.stringify('l06ResumeTriage(' + it.id + ', 2)') + '>再分诊（第2次）</button>';
+        if (it.defer_reason) act += '<span class="rp-q-defer">' + rpEsc(it.defer_reason) + '</span>';
+    } else if (it.status === 'passed') {
+        act = '<button class="sd-op" onclick=' + JSON.stringify('l06ResumeTriage(' + it.id + ')') + '>启动深跑</button>';
+    } else if (it.status === 'run_complete') {
+        act = it.bundle_id ? '<button class="sd-op" onclick="openRpReport(' + it.bundle_id + ')">看报告</button>' : '';
+    } else if (it.death_step) {
+        act = '<span class="rp-death rp-d-' + rpEsc(it.death_step.toLowerCase()) + '">' + rpEsc(L06_DEATH_LABEL[it.death_step] || it.death_step) + '</span>';
+    }
+    return '<div class="rp-q-row" data-id="' + it.id + '"><span class="rp-q-name">' + rpEsc(it.title) + '</span>' +
+        deadlineHint + act + '</div>';
+}
+
+// 从队列恢复分诊现场（attempt=2 用于 defer 后补齐再分诊）；直接用队列缓存，不自造 spec 外参数
+var _l06QueueCache = {};
+async function l06ResumeTriage(ideaId, attempt) {
+    var it = _l06QueueCache[ideaId];
+    if (!it) {
+        try {
+            await loadL06Queue();
+            it = _l06QueueCache[ideaId];
+        } catch (e) { /* 提示在下一行统一给 */ }
+    }
+    if (!it) { showToast('想法不存在，先刷新队列', 'error'); return; }
+    if (it.status === 'passed') {
+        _l06Active = { idea: it, attempt: 1, overtimeShown: false, verdict: 'pass', bundleId: it.bundle_id || null };
+        var host = document.getElementById('panelL06Active');
+        if (host) {
+            host.style.display = '';
+            host.innerHTML = '<div class="panel-header"><h3>已过闸 · ' + rpEsc(it.title) + '</h3><span class="rp-badge ok">pass</span></div>' +
+                '<div id="l06RunBlock">' + (it.bundle_id
+                    ? '<button class="btn btn-primary" onclick="openRpReport(' + it.bundle_id + ')">打开验证报告</button>'
+                    : '<button class="btn btn-primary" onclick="l06StartRun()">启动一题三跑</button>') + '</div>';
+        }
+        if (!it.bundle_id) return;
+        return;
+    }
+    l06OpenTriage(it, attempt || 1);
+}
+
+function resumeL06Timers() {
+    // TabState 缓存恢复路径：重启显示层计时器
+    if (document.getElementById('l06Countdown') && _l06Active && !_l06Active.verdict) _l06StartTick();
+    if (_l06Active && _l06Active.bundleId && document.getElementById('l06RunBlock')) _l06PollBundle();
+}
+
+async function loadL06Review() {
+    var box = document.getElementById('l06ReviewBody');
+    if (!box) return;
+    var week = (document.getElementById('l06ReviewWeek') || {}).value || rpIsoWeek(new Date());
+    try {
+        var resp = await RequestManager.fetch('l06-review', API + '/l06/review?week=' + encodeURIComponent(week));
+        var d = (resp && resp.data) || {};
+        var chips = '';
+        Object.keys(d).forEach(function (k) {
+            var v = d[k];
+            if (v == null || typeof v === 'object') return;
+            chips += '<span class="rp-stat-chip"><b>' + rpEsc(k) + '</b> ' + rpEsc(v) + '</span>';
+        });
+        var items = d.items || [];
+        var tbl = items.length ? '<table class="rp-tbl"><thead><tr><th>想法</th><th>verdict</th><th>死因</th><th>分诊用时</th></tr></thead><tbody>' +
+            items.map(function (it) {
+                return '<tr><td>' + rpEsc(it.title) + '</td><td>' + rpEsc(it.verdict || it.status || '--') + '</td><td>' +
+                    (it.death_step ? rpEsc(L06_DEATH_LABEL[it.death_step] || it.death_step) : '--') + '</td><td>' +
+                    (it.elapsed_seconds != null ? rpMmss(it.elapsed_seconds) : '--') + '</td></tr>';
+            }).join('') + '</tbody></table>' : '';
+        box.innerHTML = '<div class="rp-stats">' + chips + '</div>' + (tbl || '<div class="empty-state">本周期无数据</div>');
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">复盘加载失败：' + rpEsc(e.message || e) + '（后端 /api/l06/review 未就绪？）</div>';
+    }
+}
+
+// ═══ L06 报告抽屉（全宽：现实实线 + 理想虚线 同坐标叠两线 + 差异表；B 走切换，不三条同叠）═══
+var rpState = { bundle: null, mode: 'cost', curves: {} };
+
+function rpOpenDrawer(bodyHtml) {
+    var body = document.getElementById('rpBody');
+    if (body) body.innerHTML = bodyHtml;
+    document.getElementById('rpPanel').classList.add('open');
+}
+function closeRpPanel() {
+    document.getElementById('rpPanel').classList.remove('open');
+    ChartManager.dispose('rp-nav');
+}
+function rpBody(html) {
+    var el = document.getElementById('rpBody');
+    if (el) el.innerHTML = html;
+}
+
+async function openRpReport(bundleId) {
+    rpOpenDrawer('<div class="rp-loading">报告加载中…</div>');
+    var resp;
+    try {
+        resp = await RequestManager.fetch('l06-bundle-open', API + '/l06/bundle/' + bundleId);
+    } catch (e) {
+        rpBody('<div class="panel-error">报告加载失败：' + rpEsc(e.message || e) + '</div>');
+        return;
+    }
+    var d = (resp && resp.data) || {};
+    rpState.bundle = d;
+    rpState.mode = 'cost';
+    rpState.curves = {};
+    rpBody(rpReportHtml(d));
+    await rpLoadCurves(d);
+    rpRenderNavChart();
+}
+
+function _rpCombo(d, code) {
+    return (d.combos || []).filter(function (c) { return c.code === code; })[0];
+}
+function _rpParseMaybeJson(v) {
+    if (v == null) return null;
+    if (typeof v === 'string') { try { return JSON.parse(v); } catch (e) { return null; } }
+    return v;
+}
+
+function rpReportHtml(d) {
+    var title = d.idea_title || d.title || '验证报告';
+    var step = (d.death_step || '').toUpperCase();
+    var triage = _rpParseMaybeJson(d.triage) || d.triage || {};
+    var mmss = triage.elapsed_seconds != null ? rpMmss(triage.elapsed_seconds) : '--';
+    var checks = _rpParseMaybeJson(triage.checks_json || triage.checks) || [];
+    var checkLine = Array.isArray(checks) ? checks.map(function (c) {
+        var mark = c.state === 'pass' ? '✓' : (c.state === 'fail' ? '✗' : '·');
+        return c.id + ' ' + mark + (c.note ? '(' + rpEsc(c.note) + ')' : '');
+    }).join('　') : '';
+    var ec = d.execution_config || d._execution_config || {};
+    var comboA = _rpCombo(d, 'A'), comboB = _rpCombo(d, 'B');
+    var clamp = d.window_clamped
+        ? '<span class="rp-warn">窗口不足已截断：实际 ' + rpEsc((comboB && comboB.window_days) || '?') + ' 交易日，勿当 3 年结论读</span>' : '';
+    var cannotProve = _rpParseMaybeJson(d.cannot_prove);
+    var proveHtml = Array.isArray(cannotProve) && cannotProve.length
+        ? '<ul class="rp-noprov">' + cannotProve.map(function (x) { return '<li>' + rpEsc(x) + '</li>'; }).join('') + '</ul>'
+        : '<div class="rp-warn">⚠ 本报告缺「不能证明什么」段落 —— spec §7.3/R7 硬约束，后端补齐前此报告不可作为下单依据</div>';
+
+    return '' +
+    '<div class="rp-head">' +
+        '<h2>' + rpEsc(title) + '</h2>' +
+        '<div class="rp-concl"><span class="rp-death rp-d-' + rpEsc((step || 'none').toLowerCase()) + '">死因：' + rpEsc(L06_DEATH_LABEL[step] || '—') + '</span>' +
+        '<span class="rp-concl-text">' + rpEsc(d.conclusion_text || '') + '</span></div>' +
+        '<div class="rp-meta">分诊：用时 ' + mmss + ' / 预算 30:00，verdict=' + rpEsc(triage.verdict || d.triage_verdict || '--') +
+        '，attempt=' + rpEsc(triage.triage_attempt || d.triage_attempt || 1) + '</div>' +
+        (checkLine ? '<div class="rp-checks">' + checkLine + '</div>' : '') +
+    '</div>' +
+    '<div class="rp-sec"><h4>执行配置与数据版本（同框可比的前提）</h4>' +
+        '<div class="rp-kv">' +
+        '<span>A/B 窗口：<b>' + rpEsc((_rpCombo(d, 'A') || {}).window_days || '?') + ' / ' + rpEsc((_rpCombo(d, 'B') || {}).window_days || '?') + ' 交易日</b></span>' +
+        '<span>数据版本：<b>' + rpEsc(d.data_version || '--') + '</b></span>' +
+        Object.keys(ec).map(function (k) { return '<span>' + rpEsc(k) + '：<b>' + rpEsc(ec[k]) + '</b></span>'; }).join('') +
+        '</div>' + clamp +
+    '</div>' +
+    '<div class="rp-sec"><h4>净值同框</h4>' +
+        '<div class="segmented" role="group" aria-label="对比轴切换">' +
+        '<button class="seg-btn active" id="rpSegCost" onclick="rpSetMode(\'cost\')">成本轴：A 现实 vs C 理想（同近窗）</button>' +
+        '<button class="seg-btn" id="rpSegRegime" onclick="rpSetMode(\'regime\')">环境轴：A 近窗 vs B 全窗（同现实）</button>' +
+        '</div>' +
+        '<div class="rp-chart" id="rpNavChart" role="img" aria-label="净值曲线对比"></div>' +
+        '<div id="rpMetricsTable"></div>' +
+    '</div>' +
+    '<div class="rp-sec"><h4>死因推导</h4><div class="rp-text">' + rpEsc(d.death_detail || d.conclusion_text || '（后端未给出推导过程）') + '</div></div>' +
+    '<div class="rp-sec"><h4>本报告不能证明什么</h4>' + proveHtml + '</div>' +
+    (d.report_md_path ? '<div class="rp-sec rp-fpath">存档：' + rpEsc(d.report_md_path) + '</div>' : '');
+}
+
+function rpSetMode(mode) {
+    rpState.mode = mode;
+    var c = document.getElementById('rpSegCost'), r = document.getElementById('rpSegRegime');
+    if (c) c.classList.toggle('active', mode === 'cost');
+    if (r) r.classList.toggle('active', mode === 'regime');
+    rpRenderNavChart();
+}
+
+async function rpLoadCurves(d) {
+    // 曲线数据源：优先 bundle 内联 equity_curve；缺则回落现成 per-task 结果接口（后端已实现）
+    var combos = d.combos || [];
+    await Promise.all(combos.map(async function (c) {
+        if (Array.isArray(c.equity_curve) && c.equity_curve.length) { rpState.curves[c.code] = c.equity_curve; return; }
+        if (!c.task_id) return;
+        try {
+            var resp = await RequestManager.fetch('rp-curve-' + c.code, API + '/backtest/' + c.task_id + '/result');
+            var r = ((resp || {}).data || {}).data || {};
+            if (Array.isArray(r.equity_curve)) rpState.curves[c.code] = r.equity_curve;
+        } catch (e) { /* 单条曲线缺失不阻塞整页 */ }
+    }));
+}
+
+function _rpNavPoints(curve) {
+    if (!curve || !curve.length) return [];
+    var base = Number(curve[0].total) || 1;
+    return curve.map(function (p) { return [p.date, Number(((Number(p.total) || 0) / base).toFixed(5))]; });
+}
+
+function rpRenderNavChart() {
+    var d = rpState.bundle;
+    if (!d) return;
+    var dom = document.getElementById('rpNavChart');
+    var tblBox = document.getElementById('rpMetricsTable');
+    if (dom) {
+        var pair = rpState.mode === 'cost' ? ['C', 'A'] : ['A', 'B'];
+        var labelOf = { A: '现实·近窗', B: '现实·全窗', C: '理想·零成本', D: '理想·全窗' };
+        // 两版同框：现实实线 / 理想虚线；不做三条同叠（COST 与 REGIME 两轴不混读）
+        var baseDates = (rpState.curves[pair[1]] || []).map(function (p) { return p[0]; });
+        if (!baseDates.length) baseDates = (rpState.curves[pair[0]] || []).map(function (p) { return p[0]; });
+        var series = pair.map(function (code) {
+            var pts = rpState.curves[code] || [];
+            var map = {};
+            pts.forEach(function (p) { map[p[0]] = p[1]; });
+            var aligned = baseDates.map(function (dt) { return map[dt] != null ? map[dt] : null; });
+            var ideal = code === 'C' || code === 'D';
+            var color = code === 'A' ? cssVar('--accent', '#2f6fed')
+                : code === 'B' ? cssVar('--status-warn', '#e6a23c')
+                : cssVar('--text-secondary', '#8a93a6');
+            return {
+                name: code + ' ' + (labelOf[code] || code),
+                type: 'line', showSymbol: false, connectNulls: false,
+                lineStyle: { type: ideal ? 'dashed' : 'solid', width: 2, color: color },
+                itemStyle: { color: color },
+                data: aligned,
+            };
+        });
+        var chart = ChartManager.get('rp-nav', dom);
+        chart.setOption({
+            animation: false,
+            color: [cssVar('--text-secondary', '#8a93a6'), cssVar('--accent', '#2f6fed')],
+            tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '--' : Number(v).toFixed(3); } },
+            legend: { top: 0, textStyle: { color: cssVar('--text-secondary', '#555'), fontSize: 11 } },
+            grid: { left: 46, right: 18, top: 30, bottom: 26 },
+            xAxis: { type: 'category', data: baseDates, axisLabel: { color: cssVar('--text-muted', '#999'), fontSize: 10 }, axisLine: { lineStyle: { color: cssVar('--border', '#ddd') } } },
+            yAxis: { type: 'value', scale: true, axisLabel: { color: cssVar('--text-muted', '#999'), fontSize: 10 }, splitLine: { lineStyle: { color: cssVar('--border', '#eee') } } },
+            series: series,
+        }, true);
+    }
+    if (tblBox) tblBox.innerHTML = rpMetricsTableHtml(d);
+}
+
+function _rpMetricRow(label, key, fmt) {
+    var m = (rpState.bundle && rpState.bundle.metrics) || {};
+    fmt = fmt || rpPct;
+    var av = (m.A || {})[key], bv = (m.B || {})[key], cv = (m.C || {})[key];
+    return { label: label, a: av, b: bv, c: cv, fmt: fmt };
+}
+
+function rpMetricsTableHtml(d) {
+    var m = d.metrics || {};
+    if (!m || (!m.A && !m.C && !m.B)) return '<div class="empty-state">指标未就绪</div>';
+    var rows = [
+        _rpMetricRow('累计收益', 'cumulative_return'),
+        _rpMetricRow('年化收益', 'annual_return'),
+        _rpMetricRow('胜率', 'win_rate'),
+        _rpMetricRow('Sharpe', 'sharpe_ratio', function (v) { return v == null || isNaN(v) ? '--' : Number(v).toFixed(2); }),
+        _rpMetricRow('最大回撤', 'max_drawdown'),
+        _rpMetricRow('交易数', 'total_trades', function (v) { return v == null || isNaN(v) ? '--' : String(v); }),
+    ];
+    var html;
+    if (rpState.mode === 'cost') {
+        html = '<table class="rp-tbl"><thead><tr><th>指标</th><th>理想 C</th><th>现实 A</th><th>差（C−A）</th></tr></thead><tbody>' +
+            rows.map(function (r) {
+                var gap = (typeof r.c === 'number' && typeof r.a === 'number') ? fmtGap(r.c - r.a, r.fmt) : '--';
+                var rawGap = (typeof r.c === 'number' && typeof r.a === 'number') ? r.c - r.a : null;
+                return '<tr><td>' + r.label + '</td><td>' + r.fmt(r.c) + '</td><td>' + r.fmt(r.a) + '</td><td>' +
+                    (rawGap == null ? gap : rpSigned(rawGap, gap)) + '</td></tr>';
+            }).join('') +
+            (m.cost_gap != null ? '<tr class="rp-costgap"><td>成本蚕食 cost_gap</td><td colspan="3">' + rpPct(m.cost_gap) + '（同期收益被佣金/印花/滑点吃掉的量）</td></tr>' : '') +
+            '</tbody></table>';
+    } else {
+        var aD = (_rpCombo(d, 'A') || {}).window_days || '?', bD = (_rpCombo(d, 'B') || {}).window_days || '?';
+        html = '<table class="rp-tbl"><thead><tr><th>指标</th><th>A ' + rpEsc(aD) + 'td（近窗）</th><th>B ' + rpEsc(bD) + 'td（全窗）</th></tr></thead><tbody>' +
+            rows.map(function (r) { return '<tr><td>' + r.label + '</td><td>' + r.fmt(r.a) + '</td><td>' + r.fmt(r.b) + '</td></tr>'; }).join('') +
+            '</tbody></table>';
+    }
+    return html;
+}
+function fmtGap(v, fmt) {
+    if (fmt === rpPct) return (v >= 0 ? '+' : '') + rpPct(v);
+    var s = fmt(v);
+    return v >= 0 ? '+' + s : s;
+}
+
+// ═══ Tab 纪律(disc)：交易计划卡 / 偏离单 / 校准 / 封存盲核 / 判例档案（JH4_spec §8/§9）═══
+
+async function loadDiscTab(container) {
+    container.innerHTML = `
+        <div class="panel" id="panelDiscDev">
+            <div class="panel-header"><h3>偏离单 · 待放行/已放行</h3>
+            <span class="text-muted" style="font-size:var(--fs-2)">进场偏离 24h 延迟放行；放行当日 15:00 未复核自动失效，不可复活。<b>止损/减仓等出场全豁免，不进这里。</b></span></div>
+            <div id="discPendingBody"><div class="skeleton-stack"><i></i><i></i></div></div>
+        </div>
+
+        <div class="panel" id="panelDiscPlan">
+            <div class="panel-header"><h3>交易计划 · 理由卡</h3>
+            <button class="btn btn-primary btn-sm" onclick="showDiscPlanForm()">+ 建卡</button></div>
+            <div class="sd-chips" id="discPlanChips"></div>
+            <div id="discPlanBody"><div class="skeleton-stack"><i></i><i></i></div></div>
+        </div>
+
+        <div class="panel" id="panelDiscCalib">
+            <div class="panel-header"><h3>风控参数校准 · 按历史真实割肉点</h3>
+            <button class="btn btn-sm" onclick="discRunCalibration()">重算</button></div>
+            <div id="discCalibBody"><div class="skeleton-stack"><i></i></div></div>
+        </div>
+
+        <div class="panel" id="panelDiscSeal">
+            <div class="panel-header"><h3>封存到期 · 盲核队列</h3>
+            <span class="text-muted" style="font-size:var(--fs-2)">先只看结果作答，提交后才揭示封存原件（顺序由后端强制）</span></div>
+            <div id="discSealBody"><div class="skeleton-stack"><i></i></div></div>
+        </div>
+
+        <div class="panel" id="panelDiscCase">
+            <div class="panel-header"><h3>判例档案 · 拦住 vs 买了</h3>
+            <span class="rp-form-inline"><input id="discCaseWeek" type="text" value="${rpIsoWeek(new Date())}" size="8" aria-label="ISO 周">
+            <button class="btn btn-sm" onclick="loadDiscCases()">查</button></span></div>
+            <div id="discCaseBody"><div class="skeleton-stack"><i></i></div></div>
+        </div>
+    `;
+    loadDiscPending();
+    loadDiscPlans('alive');
+    loadDiscCalib();
+    loadDiscSeal();
+    loadDiscCases();
+}
+
+function resumeDiscTimers() {
+    if (document.querySelector('#discPendingBody [data-release]')) _discStartTick();
+}
+
+var _DISC_PLAN_STATUSES = ['alive', 'invalidated', 'stale', 'draft', 'closed_won', 'closed_dead'];
+
+async function loadDiscPending() {
+    var box = document.getElementById('discPendingBody');
+    if (!box) return;
+    try {
+        var resp = await RequestManager.fetch('disc-pending', API + '/deviation/pending');
+        var items = ((resp && resp.data) || {}).items || [];
+        if (!items.length) { box.innerHTML = '<div class="empty-state">没有待处理偏离单。手痒还没变成行动，很好。</div>'; return; }
+        box.innerHTML = items.map(_discPendingRow).join('');
+        _discStartTick();
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">偏离单加载失败（/api/deviation/pending 未就绪？）<button class="btn btn-sm" onclick="loadDiscPending()">重试</button></div>';
+    }
+}
+
+function _discPendingRow(it) {
+    var rules = _rpParseMaybeJson(it.deviation_rules_json) || [];
+    var tierNote = it.tier === 'soft_hold' ? '<span class="rp-tier">10 分钟档 · 仅提醒</span>' : '';
+    var action = '';
+    if (it.status === 'released') {
+        action = '<button class="sd-op" onclick="discDeviateConfirm(' + it.id + ')">复核确认</button>' +
+                 '<button class="sd-op" onclick="discDeviateExecute(' + it.id + ')">已在券商执行</button>' +
+                 '<span class="rp-expire">放行当日 15:00 未确认自动失效</span>';
+    } else {
+        action = '<span class="rp-count2" data-release="' + rpEsc(it.release_at) + '" data-expire="' + rpEsc(it.expire_at) + '" data-status="' + rpEsc(it.status) + '"></span>';
+    }
+    return '<div class="rp-q-row disc-dev">' +
+        '<b>' + rpEsc(it.code) + '</b><span>' + rpEsc(it.action) + ' ' + rpEsc(it.qty) + ' 股 ≈ ' + rpEsc(it.amount_ref) + ' 元</span>' +
+        '<span class="rp-why">命中：' + rpEsc(rules.join ? rules.join('/') : rules) + '</span>' + tierNote +
+        (it.retry_of ? '<span class="rp-warn">同一念头重提（' + rpEsc(it.retry_of) + '）</span>' : '') +
+        action + '</div>';
+}
+
+function _discStartTick() {
+    timerManager.setInterval('disc-tick', function () {
+        document.querySelectorAll('#discPendingBody [data-release]').forEach(function (el) {
+            var rel = rpLocalDate(el.getAttribute('data-release'));
+            var exp = rpLocalDate(el.getAttribute('data-expire'));
+            if (!el.getAttribute('data-release') || isNaN(rel.getTime())) { el.textContent = ''; return; }
+            if (Date.now() < rel.getTime()) el.textContent = '距放行 ' + rpCountdownText(rel);
+            else if (exp && Date.now() > exp.getTime()) { el.textContent = '已过失效时点（以服务端为准）'; el.classList.add('over'); }
+            else el.textContent = '已放行 · ' + rpCountdownText(exp) + '后失效';
+        });
+    }, 1000);
+}
+
+async function discDeviateConfirm(id) {
+    try {
+        await rpJsonPost('disc-dev-c', API + '/deviation/' + id + '/confirm', {});
+        showToast('已确认放行', 'success'); loadDiscPending();
+    } catch (e) { showToast('确认失败：' + (e.message || e), 'error'); }
+}
+async function discDeviateExecute(id) {
+    try {
+        await rpJsonPost('disc-dev-e', API + '/deviation/' + id + '/execute', {});
+        showToast('已标记执行，进判例档案', 'success'); loadDiscPending();
+    } catch (e) { showToast('标记失败：' + (e.message || e), 'error'); }
+}
+
+var _discPlanStatus = 'alive';
+async function loadDiscPlans(status) {
+    _discPlanStatus = status || _discPlanStatus || 'alive';
+    var chips = document.getElementById('discPlanChips');
+    if (chips) {
+        chips.innerHTML = _DISC_PLAN_STATUSES.map(function (s) {
+            return '<span class="sd-chip' + (s === _discPlanStatus ? ' sd-chip-active' : '') + '" onclick="loadDiscPlans(\'' + s + '\')">' + s + '</span>';
+        }).join('');
+    }
+    var box = document.getElementById('discPlanBody');
+    if (!box) return;
+    try {
+        var resp = await RequestManager.fetch('disc-plans', API + '/plan/list?status=' + _discPlanStatus);
+        var items = ((resp && resp.data) || {}).items || [];
+        if (!items.length) { box.innerHTML = '<div class="empty-state">无「' + _discPlanStatus + '」状态计划卡</div>'; return; }
+        box.innerHTML = items.map(_discPlanRow).join('');
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">计划卡加载失败（/api/plan/list 未就绪？）<button class="btn btn-sm" onclick="loadDiscPlans()">重试</button></div>';
+    }
+}
+
+function _discPlanRow(it) {
+    var anchors = _rpParseMaybeJson(it.anchors_json) || it.anchors || [];
+    var alive = it.status === 'alive';
+    var anchorHtml = (Array.isArray(anchors) ? anchors : []).map(function (a) {
+        var dead = a.state === 'dead';
+        return '<span class="rp-anchor' + (dead ? ' dead' : '') + '">' + rpEsc(a.anchor_kind) + ' ≤ ' + rpEsc(a.threshold_num) + (dead ? ' ✗已死' : '') + '</span>';
+    }).join('');
+    return '<div class="rp-plan-card st-' + rpEsc(it.status) + '">' +
+        '<div class="rp-plan-head"><b>' + rpEsc(it.code) + ' ' + rpEsc(it.name || '') + '</b>' +
+        '<span class="rp-st rp-st-' + rpEsc(it.status) + '">' + rpEsc(it.status) + '</span>' +
+        (it.violated_at ? '<span class="rp-viol">违反持仓日 ' + rpEsc(it.violated_at) + '</span>' : '') +
+        '<span class="rp-meta-r">信心 ' + rpEsc(it.confidence) + ' · 预期 ' + rpPctRaw(it.expected_return_pct != null && it.expected_return_pct > 1 ? it.expected_return_pct : (it.expected_return_pct || 0) * 100, 1) +
+        ' / ' + rpEsc(it.expected_horizon_days) + ' 日 · 仓位 ' + rpPctRaw(it.position_pct != null && it.position_pct > 1 ? it.position_pct : (it.position_pct || 0) * 100, 1) + '</span></div>' +
+        '<div class="rp-plan-thesis">' + rpEsc(it.thesis) + '</div>' +
+        '<div class="rp-plan-anchors">' + anchorHtml + (it.params_source ? '<span class="rp-tier">参数：' + rpEsc(it.params_source) + '</span>' : '') + '</div>' +
+        '</div>';
+}
+
+function showDiscPlanForm() {
+    var html =
+        '<div class="rp-form">' +
+        '<div class="rp-form-row"><label>代码<input id="pfCode" maxlength="10" placeholder="600519"></label>' +
+        '<label>追价上限 max_buy_price<input id="pfMaxBuy" type="number" step="0.01" min="0"></label></div>' +
+        '<label>买入理由 thesis（15~500 字，禁止与旧卡复制粘贴，后端查重要求 delta_note）<textarea id="pfThesis" rows="3" maxlength="500"></textarea></label>' +
+        '<div class="rp-anchors-box"><span class="rp-anchor-label">数字失效锚（≥1 条，≤4 条；数字必填，无数字不收）</span>' +
+        '<div id="pfAnchorRows"></div>' +
+        '<button class="btn btn-sm" onclick="pfAddAnchor()">+ 加锚</button></div>' +
+        '<div class="rp-form-row">' +
+        '<label>预期收益（%）<input id="pfExpRet" type="number" step="0.5" placeholder="如 10"></label>' +
+        '<label>预期天数（1~60）<input id="pfExpDays" type="number" min="1" max="60" value="10"></label>' +
+        '<label>信心度（0.05~0.95，禁 1）<input id="pfConf" type="number" step="0.05" min="0.05" max="0.95" value="0.6"></label>' +
+        '<label>仓位上限（%）<input id="pfPosPct" type="number" step="0.5" min="0" max="20"></label></div>' +
+        '<div class="rp-form-row">' +
+        '<label>止损%（留空=用校准建议/默认-6）<input id="pfStop" type="number" step="0.5" placeholder="-6"></label>' +
+        '<label>移动止盈%<input id="pfTrail" type="number" step="0.5" placeholder="可选"></label>' +
+        '<label>最长持有日<input id="pfMaxHold" type="number" min="1" value="10"></label></div>' +
+        '<button class="btn btn-primary" onclick="discSubmitPlan()">存为计划卡</button>' +
+        '<span class="text-muted" style="font-size:var(--fs-1)">前端校验只是省往返，以后端 422 结构化错误为准</span>' +
+        '</div>';
+    showModal('新建交易计划卡 · 理由卡三件套', html, 760);
+    pfAddAnchor();
+}
+
+function pfAddAnchor() {
+    var box = document.getElementById('pfAnchorRows');
+    if (!box || box.querySelectorAll('.pf-anchor').length >= 4) return;
+    var row = document.createElement('div');
+    row.className = 'pf-anchor';
+    row.innerHTML = '<select class="pf-kind" onchange="pfAnchorKindChange(this)">' +
+        PF_ANCHOR_KINDS.map(function (k) { return '<option value="' + k + '">' + k + '</option>'; }).join('') + '</select>' +
+        '<input class="pf-thr" type="number" step="any" placeholder="数字阈值（必填）">' +
+        '<select class="pf-ind" style="display:none">' +
+        PF_INDICATORS.map(function (k) { return '<option>' + k + '</option>'; }).join('') +
+        '</select>' +
+        '<button class="sd-op danger" onclick="this.parentNode.remove()">×</button>';
+    box.appendChild(row);
+}
+function pfAnchorKindChange(sel) {
+    var row = sel.closest('.pf-anchor');
+    var ind = row.querySelector('.pf-ind');
+    var thr = row.querySelector('.pf-thr');
+    ind.style.display = sel.value === 'indicator_below' ? '' : 'none';
+    if (sel.value === 'drawdown_from_peak' || sel.value === 'giveback_from_peak' || sel.value === 'drawdown_from_entry') {
+        thr.placeholder = '负小数，如 -0.12'; thr.value = '';
+    } else if (sel.value === 'deadline') {
+        thr.placeholder = '到期日 YYYYMMDD 数字';
+    } else if (sel.value === 'unlock_event') {
+        thr.placeholder = '解禁/减持比例，如 0.05';
+    } else {
+        thr.placeholder = '数字阈值（必填）';
+    }
+}
+
+async function discSubmitPlan() {
+    var g = function (id) { return document.getElementById(id); };
+    var anchors = [];
+    document.querySelectorAll('.pf-anchor').forEach(function (row) {
+        var kind = row.querySelector('.pf-kind').value;
+        var thrRaw = (row.querySelector('.pf-thr').value || '').trim();
+        var thr = Number(thrRaw);
+        if (!thrRaw || isNaN(thr)) return;   // 无数字锚直接不收（R3 前端镜像）
+        var a = { anchor_kind: kind, threshold_num: thr };
+        if (kind === 'indicator_below') a.indicator = row.querySelector('.pf-ind').value;
+        anchors.push(a);
+    });
+    if (!anchors.length) { showToast('至少一条带数字的失效锚（ANCHOR_NO_NUMBER）', 'error'); return; }
+    var thesis = (g('pfThesis').value || '').trim();
+    if (thesis.length < 15 || thesis.length > 500) { showToast('thesis 需 15~500 字', 'warning'); return; }
+    var conf = Number(g('pfConf').value);
+    if (!(conf >= 0.05 && conf <= 0.95)) { showToast('信心度限 0.05~0.95（1.0 视为未填写）', 'warning'); return; }
+    var maxBuy = Number(g('pfMaxBuy').value);
+    if (!(maxBuy > 0)) { showToast('追价上限必填且 >0（偏离判定 D3 用）', 'warning'); return; }
+    var risk = {};
+    if (g('pfStop').value !== '') risk.stop_loss_pct = Number(g('pfStop').value) / 100;
+    if (g('pfTrail').value !== '') risk.trailing_pct = Number(g('pfTrail').value) / 100;
+    if (g('pfMaxHold').value !== '') risk.max_hold_days = Number(g('pfMaxHold').value);
+    var body = {
+        code: (g('pfCode').value || '').trim(),
+        thesis: thesis,
+        entry_trigger: { max_buy_price: maxBuy },
+        anchors: anchors,
+        expected_return_pct: Number(g('pfExpRet').value) / 100,
+        expected_horizon_days: Number(g('pfExpDays').value),
+        confidence: conf,
+        position_pct: Number(g('pfPosPct').value) / 100,
+        risk_params: risk,
+    };
+    try {
+        await rpJsonPost('disc-plan-new', API + '/plan', body);
+        showToast('计划卡已存（原件 append-only，修订=新 revision）', 'success');
+        closeModal();
+        loadDiscPlans('alive');
+    } catch (e) {
+        showToast('建卡被拒：' + (e.message || e), 'error');
+    }
+}
+
+var DISC_CALIB_LABEL = {
+    calibrated: ['ok', '已按个人样本校准'],
+    pooled: ['warn', '样本不足分层门槛，池化估计'],
+    low_sample: ['warn', '低样本，保守兜底值'],
+    uncalibrated: ['muted', '无个人样本，沿用默认'],
+};
+
+async function loadDiscCalib() {
+    var box = document.getElementById('discCalibBody');
+    if (!box) return;
+    try {
+        var resp = await RequestManager.fetch('disc-calib', API + '/calibration/current');
+        var d = (resp && resp.data) || {};
+        var st = DISC_CALIB_LABEL[d.status] || DISC_CALIB_LABEL.uncalibrated;
+        var nums;
+        if (d.status === 'uncalibrated' || d.stop_loss_pct == null) {
+            // R8：uncalibrated 时 API 不返回建议值，前端也不许显示数字
+            nums = '<div class="rp-calib-none">暂无校准值 —— 校准是季度累积物，不是即时交付物</div>';
+        } else {
+            nums = '<div class="rp-calib-grid">' +
+                '<div class="sd-plan-cell"><div class="lbl">建议止损</div><div class="val neg">' + rpPct(d.stop_loss_pct) + '</div><div class="sub">设在你真下得去手的位置之内</div></div>' +
+                '<div class="sd-plan-cell"><div class="lbl">建议单仓上限</div><div class="val">' + rpPct(d.max_single_position_pct) + '</div><div class="sub">打到止损的损失≈你真接受过的损失</div></div>' +
+                '<div class="sd-plan-cell"><div class="lbl">样本</div><div class="val">' + rpEsc(d.n_samples != null ? d.n_samples : '--') + '</div><div class="sub">' + rpEsc(d.regime_stratum || '') + ' 层 · as_of ' + rpEsc(d.as_of || '') + '</div></div>' +
+                '</div>';
+        }
+        box.innerHTML = '<div class="rp-calib"><span class="rp-badge ' + st[0] + '">' + st[1] + '</span>' + nums +
+            '<div class="rp-text muted" style="margin-top:8px">' + rpEsc(d.cannot_prove || '本结论基于历史割肉样本，不证明未来你能扛住这个回撤。') + '</div></div>';
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">校准卡加载失败（/api/calibration/current 未就绪？）<button class="btn btn-sm" onclick="loadDiscCalib()">重试</button></div>';
+    }
+}
+
+async function discRunCalibration() {
+    try {
+        await rpJsonPost('disc-calib-run', API + '/calibration/run', {});
+        showToast('校准已重算（新行入档，旧值不覆盖）', 'success');
+        loadDiscCalib();
+    } catch (e) { showToast('重算失败：' + (e.message || e), 'error'); }
+}
+
+async function loadDiscSeal() {
+    var box = document.getElementById('discSealBody');
+    if (!box) return;
+    try {
+        var resp = await RequestManager.fetch('disc-seal-due', API + '/l09/due');
+        var items = ((resp && resp.data) || {}).items || [];
+        if (!items.length) { box.innerHTML = '<div class="empty-state">无到期封存件。封存件在下单时被自动创建。</div>'; return; }
+        // 到期提醒页只列 code 与「已到期」——不显示任何封存内容（JH4_spec §6.4 / R10）
+        box.innerHTML = items.map(function (it) {
+            return '<div class="rp-q-row"><b>' + rpEsc(it.code) + '</b><span>已到期 ' + rpEsc(it.due_on || '') + '</span>' +
+                '<button class="sd-op" onclick="discBlindStart(' + it.id + ')">开始盲核</button></div>';
+        }).join('');
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">盲核队列加载失败（/api/l09/due 未就绪？）<button class="btn btn-sm" onclick="loadDiscSeal()">重试</button></div>';
+    }
+}
+
+async function discBlindStart(id) {
+    rpOpenDrawer('<div class="rp-loading">拉取结果指标（不含封存内容）…</div>');
+    try {
+        var resp = await RequestManager.fetch('l09-blind-' + id, API + '/l09/' + id + '/blind');
+        var d = (resp && resp.data) || {};
+        var res = d.result || d.result_metrics || d;
+        var chips = ['interval_return', 'period_return', 'max_drawdown', 'worst_case_triggered', 'hit_expected']
+            .filter(function (k) { return res[k] != null; })
+            .map(function (k) {
+                var v = res[k];
+                var txt = (typeof v === 'number' && Math.abs(v) <= 3) ? rpPct(v) : String(v);
+                return '<span class="rp-stat-chip"><b>' + k + '</b> ' + rpEsc(txt) + '</span>';
+            }).join('');
+        rpBody(
+            '<div class="rp-head"><h2>盲核 · 第一步：只看结果作答</h2>' +
+            '<div class="rp-meta">封存原件此刻不可见。先写下你「现在记得的」当时的预期，提交后才对照（防事后记忆重写）。</div></div>' +
+            '<div class="rp-sec"><h4>结果数据</h4><div class="rp-stats">' + (chips || rpEsc(JSON.stringify(res))) + '</div></div>' +
+            '<div class="rp-form">' +
+            '<div class="rp-field-label">当时预期兑现了吗？</div><span class="rp-radio-row">' +
+            '<label><input type="radio" name="rcv" value="yes">兑现</label>' +
+            '<label><input type="radio" name="rcv" value="partial">部分</label>' +
+            '<label><input type="radio" name="rcv" value="no">没兑现</label></span>' +
+            '<div class="rp-form-row"><label>我现在「记得」当时写的预期收益是（%）<input id="blExp" type="number" step="0.5"></label></div>' +
+            '<label>我此刻的解释（≤200 字）<textarea id="blReason" rows="3" maxlength="200"></textarea></label>' +
+            '<button class="btn btn-primary" onclick="discBlindSubmit(' + id + ')">提交作答并揭示封存原件</button>' +
+            '</div>');
+    } catch (e) {
+        rpBody('<div class="panel-error">盲核数据失败：' + rpEsc(e.message || e) + '</div>');
+    }
+}
+
+async function discBlindSubmit(id) {
+    var rcvEl = document.querySelector('input[name=rcv]:checked');
+    if (!rcvEl) { showToast('先作答是否兑现', 'warning'); return; }
+    var exp = document.getElementById('blExp').value;
+    var reason = (document.getElementById('blReason').value || '').trim();
+    if (exp === '' || isNaN(Number(exp))) { showToast('填写你现在记得的预期收益（%）', 'warning'); return; }
+    var answer = { recall_verdict: rcvEl.value, recall_expected_pct: Number(exp) / 100, recall_reason: reason };
+    // 答案提交端点未列在 JH4_spec §8 表：先按 POST /blind 提交，不存在则回退为 reveal 带答案
+    var d;
+    try {
+        await rpJsonPost('l09-answer-' + id, API + '/l09/' + id + '/blind', answer);
+        var r2 = await rpJsonPost('l09-reveal-' + id, API + '/l09/' + id + '/reveal', {});
+        d = (r2 && r2.data) || {};
+    } catch (e1) {
+        try {
+            var r3 = await rpJsonPost('l09-reveal-fb-' + id, API + '/l09/' + id + '/reveal', answer);
+            d = (r3 && r3.data) || {};
+        } catch (e) {
+            showToast('盲核流程失败：' + (e.message || e) + '（未作答时 reveal 应返回 409，属正常防线）', 'error');
+            return;
+        }
+    }
+    var sealed = d.sealed || d.decision || d;
+    var cmp = d.comparison || d;
+    rpBody(
+            '<div class="rp-head"><h2>盲核 · 第二步：封存原件 vs 此刻的你</h2>' +
+            '<div class="rp-meta">sealed_at ' + rpEsc(sealed.sealed_at || '--') + '（哈希链留痕，事后不可改）</div></div>' +
+            '<div class="rp-sec"><h4>当时封存的原话</h4>' +
+            '<div class="rp-text"><b>论点：</b>' + rpEsc(sealed.thesis_snapshot || '--') + '</div>' +
+            '<div class="rp-kv"><span>预期：<b>' + rpPct(sealed.expected_return_pct) + '</b></span>' +
+            '<span>信心：<b>' + rpEsc(sealed.confidence) + '</b></span>' +
+            '<span>最坏情形：<b>' + rpPct(sealed.worst_case_pct) + '</b></span></div>' +
+            '<div class="rp-text"><b>反证（当时的你写的「可能错在哪」）：</b>' + rpEsc(sealed.falsifier || '--') + '</div></div>' +
+            '<div class="rp-sec"><h4>对照结果</h4><div class="rp-stats">' +
+            '<span class="rp-stat-chip"><b>记忆偏差 gap_expected</b> ' + (cmp.gap_expected != null ? rpSigned(cmp.gap_expected, rpPct(cmp.gap_expected)) : '--') + '</span>' +
+            '<span class="rp-stat-chip"><b>信心命中</b> ' + rpEsc(cmp.confidence_hit != null ? cmp.confidence_hit : '--') + '</span>' +
+            '<span class="rp-stat-chip"><b>最坏情形成真</b> ' + rpEsc(cmp.worst_case_hit != null ? cmp.worst_case_hit : '--') + '</span>' +
+            '<span class="rp-stat-chip"><b>解释漂移度</b> ' + (cmp.explanation_diverged != null ? Number(cmp.explanation_diverged).toFixed(2) : '--') + '</span>' +
+            '</div>' +
+            '<div class="rp-triage-note">gap 系统性为正 = 你在事后抬地平线；worst_case_hit 为假 = 你事前想象的风险承受比真实承受轻。逐案攒着，不做曲线。</div></div>');
+    loadDiscSeal();
+}
+
+async function loadDiscCases() {
+    var box = document.getElementById('discCaseBody');
+    if (!box) return;
+    var week = (document.getElementById('discCaseWeek') || {}).value || rpIsoWeek(new Date());
+    try {
+        var resp = await RequestManager.fetch('disc-cases', API + '/case-file?week=' + encodeURIComponent(week));
+        var d = (resp && resp.data) || {};
+        var items = d.items || [];
+        var stats = d.stats || {};
+        var chips = '<span class="rp-stat-chip"><b>自动过期率</b> ' + (stats.expired_rate != null ? rpPct(stats.expired_rate) : '--') + '</span>' +
+            '<span class="rp-stat-chip"><b>本周提交</b> ' + rpEsc(stats.submitted_week != null ? stats.submitted_week : '--') + '</span>' +
+            '<span class="rp-stat-chip"><b>上周提交</b> ' + rpEsc(stats.submitted_prev_week != null ? stats.submitted_prev_week : '--') + '</span>';
+        if (!items.length) { box.innerHTML = '<div class="rp-stats">' + chips + '</div><div class="empty-state">本周无判例</div>'; return; }
+        var tbl = '<table class="rp-tbl"><thead><tr><th>代码</th><th>动作</th><th>结局</th>' +
+            '<th colspan="3">买了（执行后 5/10/20 日）</th><th colspan="3">拦住了（反事实 5/10/20 日）</th><th>最大逆行</th></tr></thead><tbody>' +
+            items.map(function (it) {
+                var bought = ['exec_pnl_pct_5', 'exec_pnl_pct_10', 'exec_pnl_pct_20'].map(function (k) { return '<td>' + rpPctRaw(it[k]) + '</td>'; }).join('');
+                // counterfactual_* 按小数口径渲染；exec_pnl_pct_* 按百分数口径（命名含 pct）——单位以联调为准
+                var blocked = ['counterfactual_5', 'counterfactual_10', 'counterfactual_20'].map(function (k) { return '<td>' + rpPct(it[k]) + '</td>'; }).join('');
+                return '<tr><td>' + rpEsc(it.code) + '</td><td>' + rpEsc(it.action || '') + '</td><td>' + rpEsc(it.outcome || '') + '</td>' +
+                    bought + blocked + '<td>' + rpPct(it.worst_adverse_pct) + '</td></tr>';
+            }).join('') + '</tbody></table>';
+        box.innerHTML = '<div class="rp-stats">' + chips + '</div>' + tbl +
+            '<div class="rp-triage-note">两列并看：拦住的多数是涨是跌 → 装置在创造价值还是只造摩擦。季度回看，别用一周样本下结论。</div>';
+    } catch (e) {
+        box.innerHTML = '<div class="panel-error">判例加载失败（/api/case-file 未就绪？）<button class="btn btn-sm" onclick="loadDiscCases()">重试</button></div>';
+    }
 }
 
 // ─── Init ───
