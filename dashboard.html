@@ -2116,6 +2116,54 @@ document.addEventListener('keydown', function (e) {
     }
 });
 
+// ── P4 N-1/N-2：抽屉焦点管理 ──
+// 记录抽屉外最后一次可交互点击元素，关闭后焦点归位；打开/Tab 时焦点锁在抽屉内。
+var _drawerTrigger = null;
+document.addEventListener('click', function (e) {
+    if (!e.target || !e.target.closest) return;
+    if (e.target.closest('.kline-overlay')) return;   // 抽屉内点击不更新触发器
+    var t = e.target.closest('button, a, input, select, [onclick], .action-card, .sum-row, .pick-mini-row, .idx-clickable, .sd-chip, .code-link');
+    if (t) _drawerTrigger = t;
+}, true);
+(function () {
+    function focusables(popup) {
+        return Array.prototype.filter.call(
+            popup.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+            function (el) { return !el.disabled && el.offsetParent !== null; });
+    }
+    ['klinePanel', 'sdDeepPanel'].forEach(function (id) {
+        var panel = document.getElementById(id);
+        if (!panel || !('MutationObserver' in window)) return;
+        new MutationObserver(function () {
+            if (panel.classList.contains('open')) {
+                var btn = panel.querySelector('.close-btn');
+                if (btn && !panel.contains(document.activeElement)) { try { btn.focus(); } catch (e) {} }
+            } else if (_drawerTrigger && document.contains(_drawerTrigger)) {
+                try {
+                    // N-1 归位（✕/Esc/遮罩统一在此处理）；div 类触发器（卡片/行）原生不可聚焦，补 tabindex=-1
+                    if (!_drawerTrigger.matches('button, a, input, select, textarea, [tabindex]')) {
+                        _drawerTrigger.setAttribute('tabindex', '-1');
+                    }
+                    _drawerTrigger.focus();
+                } catch (e) {}
+            }
+        }).observe(panel, { attributes: true, attributeFilter: ['class'] });
+    });
+    // N-2 焦点陷阱：抽屉打开时 Tab 循环限定在抽屉内
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Tab') return;
+        var panel = document.querySelector('.kline-overlay.open');
+        if (!panel) return;
+        var popup = panel.querySelector('.kline-popup, .sd-deep-popup') || panel;
+        var f = focusables(popup);
+        if (!f.length) return;
+        var first = f[0], last = f[f.length - 1];
+        if (!panel.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+})();
+
 function renderSdPanelPlaceholder() {
     var box = document.getElementById('stockDeepContent');
     if (!box) return;
@@ -3217,6 +3265,18 @@ function renderStockDeepChart(data) {
     chart.__sdGridCount = opt.grid.length;
     _sdBindMarkFocus(chart);
     _sdApplyPlanLines(chart, opt);
+    // P4 任务16 批次1（管理A 授权：仅 ECharts 布局参数）：460px 深析抽屉窄版下
+    // 撑开 grid 左右边距防成交量轴长标签裁切；副标题 hint 按图宽换行不再溢出。
+    // 数据字段 / 计算 / 接口零触碰。
+    var _cw = dom.getBoundingClientRect().width;
+    if (_cw && _cw < 560) {
+        var _grids = Array.isArray(opt.grid) ? opt.grid : (opt.grid ? [opt.grid] : []);
+        _grids.forEach(function (g) { g.left = 64; g.right = 12; });
+        if (opt.title && opt.title.subtextStyle) {
+            opt.title.subtextStyle = Object.assign({}, opt.title.subtextStyle,
+                { fontSize: 9, width: Math.max(140, _cw - 32), overflow: 'break' });
+        }
+    }
     chart.clear();
     chart.setOption(opt);
     chart.resize();
