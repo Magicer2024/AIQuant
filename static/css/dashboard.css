@@ -1904,3 +1904,16 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
 .back-top.show { opacity: 1; transform: none; pointer-events: auto; }
 .back-top:hover { color: var(--accent); border-color: var(--border-glow); }
 @media (max-width: 600px) { .back-top { right: 14px; bottom: 16px; } }
+
+/* ── 表单控件统一（P4#11）：date input 归入 .field-ctl，日历图标提可见 ── */
+.field-ctl {
+    padding: 4px 10px;
+    font-family: var(--font-mono); font-size: var(--fs-2);
+    background: var(--bg-input); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    transition: border-color 0.2s ease-out, box-shadow 0.2s ease-out;
+}
+.field-ctl:hover { border-color: var(--border-glow); }
+.field-ctl:focus { outline: none; border-color: var(--accent-dim); box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.12); }
+.field-ctl::-webkit-calendar-picker-indicator { opacity: .55; cursor: pointer; }
+.field-ctl:hover::-webkit-calendar-picker-indicator { opacity: .9; }

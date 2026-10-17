@@ -656,7 +656,7 @@ async function loadHomeTab(container) {
                     <button class="seg-btn" data-hz="long" onclick="setPicksSegment('long')">长线</button>
                 </div>
                 <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">复制</button>
-                <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks().then(function(){ applyPicksSegment(); })" style="font-size:var(--fs-2);padding:2px 6px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+                <input type="date" id="pickDate" class="field-ctl" value="" autocomplete="off" onchange="loadTodayPicks().then(function(){ applyPicksSegment(); })">
                 <span class="text-muted" style="font-size:var(--fs-2)" title="基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）">默认简略 · 点「详情」展开 ⓘ</span>
             </div>
             <div id="todayPicks" class="action-plan-grid"><div class="skeleton-stack"><i></i><i></i><i></i><i></i></div></div>
@@ -939,6 +939,7 @@ async function loadSettingsTab(container) {
                 </select>
                 <button class="btn btn-primary btn-sm" id="btnHomeSync" onclick="homeSync()">立即同步行情</button>
                 <button class="btn btn-sm" id="btnHomeRecalc" onclick="homeRecalc()">立即重算打分</button>
+                <span class="last-ok" id="lastSyncOk" style="font-size:var(--fs-1);color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.04em"></span>
                 <span class="inline-progress" id="homeInlineProgress"></span>
             </div>
         </div>
@@ -964,11 +965,20 @@ async function loadSettingsTab(container) {
     `;
 
     await Promise.all([
-        loadSyncStatusPanel(),
+        loadSyncStatusPanel().then(fillLastSyncOk),   // P4#12：状态渲染后在重试按钮旁补「最后成功 HH:mm」
         loadOptimizerPanel(),
         loadExplainerGrid(),
         loadMaintenanceTab(document.getElementById('maintenanceHost')),
     ]);
+}
+
+// P4 #12：错误恢复要给出上下文——同步/重算按钮旁常驻「最后成功 HH:mm」小字
+function fillLastSyncOk() {
+    var el = document.getElementById('lastSyncOk');
+    if (!el) return;
+    var t = document.getElementById('syncDataTime');
+    var m = t && (t.textContent || '').match(/(\d{2}:\d{2})/);
+    el.textContent = m ? ('最后成功 ' + m[1]) : '';
 }
 
 
