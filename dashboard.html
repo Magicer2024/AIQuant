@@ -250,6 +250,8 @@ function setTheme(id) {
     if (sel) sel.value = id;
     resolveKlinePalette();
     if (window._klineCache) renderKlineWithIndicators(window._klineCache);
+    // TX-1：深析弹窗打开时用缓存数据随新主题即时重建图表（不重新请求）
+    if (_sdDeepMode && _sd.data) { try { renderStockDeepChart(_sd.data); } catch (e) {} }
 }
 
 function initThemeSwitcher() {
@@ -922,6 +924,8 @@ async function loadMarketOverview() {
         console.error('market overview failed', e);
         const sub = document.getElementById('heroSub');
         if (sub) sub.textContent = '市场数据加载失败';
+        const gridEl = document.getElementById('indexCards');
+        if (gridEl) gridEl.innerHTML = panelError('loadMarketOverview');
     }
 }
 
@@ -1935,14 +1939,19 @@ function renderSdPanelPlaceholder() {
 async function loadStockDeep() {
     var box = document.getElementById('stockDeepContent');
     if (!box) return;
-    _sd.list = _sdLoadHistory();
-    renderSdChips();
-    // 盘后自动产出的「明日候选」与「推荐跟踪」随板块一起加载，不必手动点按钮
-    loadSdMarket();
-    loadSdTrack();
-    // 不默认选中：进板块只展示候选 + 跟踪 + 历史 chips，由用户主动点 chip / 搜索 / 选候选
-    _sd.idx = -1; _sd.code = null; _sd.data = null;
-    renderSdPanelPlaceholder();
+    try {
+        _sd.list = _sdLoadHistory();
+        renderSdChips();
+        // 盘后自动产出的「明日候选」与「推荐跟踪」随板块一起加载，不必手动点按钮
+        // （两者内部 catch 已渲染统一「加载失败·重试」态）
+        loadSdMarket();
+        loadSdTrack();
+        // 不默认选中：进板块只展示候选 + 跟踪 + 历史 chips，由用户主动点 chip / 搜索 / 选候选
+        _sd.idx = -1; _sd.code = null; _sd.data = null;
+        renderSdPanelPlaceholder();
+    } catch (e) {
+        box.innerHTML = panelError('loadStockDeep');
+    }
 }
 
 function renderSdChips() {
@@ -2117,7 +2126,7 @@ async function loadSdMarket() {
         };
         _renderSdMarket();
     } catch(e) {
-        box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">扫描失败：' + (e.message || e) + '</div>';
+        box.innerHTML = panelError('loadSdMarket');
     }
 }
 
@@ -2260,7 +2269,7 @@ async function loadSdTrack(opts) {
             if (btn && btn.scrollIntoView) btn.scrollIntoView({ block: 'center' });
         }
     } catch (e) {
-        if (box) box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:var(--fs-2)">跟踪读取失败：' + (e.message || e) + '</div>';
+        if (box) box.innerHTML = panelError('loadSdTrack');
     }
 }
 

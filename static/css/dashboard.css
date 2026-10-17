@@ -452,9 +452,12 @@ input:focus, select:focus {
 .header h1 { white-space: nowrap; }
 .header-status #last-update { white-space: nowrap; }
 @media (max-width: 600px) {
-    .header { padding: 12px 16px; }
+    .header { padding: 12px 16px; flex-wrap: wrap; }
     .header h1 { font-size: var(--fs-3); }
     .content { padding: 16px 12px; }
+    /* TX-3：375px 下 header-status 区（主题选择器+就绪）换行收纳，消除横向溢出 */
+    .header-status { max-width: 100%; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+    .theme-switcher select { max-width: 46vw; }
 }
 
 /* ── Table ── */
@@ -482,7 +485,7 @@ table { width: 100%; border-collapse: collapse; }
 th {
     padding: var(--sp-2) var(--sp-3); text-align: left;
     font-family: var(--font-sans); font-size: var(--fs-1); font-weight: 500;
-    letter-spacing: 0.04em; color: var(--text-secondary);
+    letter-spacing: 0.04em; color: var(--text-primary);
     text-transform: uppercase;
     background: var(--bg-panel);
     border-bottom: 2px solid var(--border);
@@ -1996,6 +1999,9 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
     --success: #0a9e5f; --success-rgb: 10, 158, 95;
     --green: #059669; --green-rgb: 5, 150, 105;
     --cool: #3b82f6; --cold: #64748b;
+    /* TX-2：状态色加深档随主题覆盖，白底徽章对比 ≥4.5:1（实测 #067647 5.4 / #b45309 5.0 / #cc1f1f 5.9） */
+    --status-good: #067647; --status-warn: #b45309; --status-bad: #cc1f1f;
+    --text-muted: #6b7280;  /* 原 #8a93a6 白底仅 3.1，加深至 4.8 */
     --chart-axis: #6b7280; --chart-grid: #e5e7eb; --chart-split: #eef0f3;
     --chart-panel: #ffffff; --chart-title: #111827; --chart-muted: #6b7280;
     --chart-up: #d93036; --chart-down: #0a9e5f;
