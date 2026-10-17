@@ -676,19 +676,19 @@ async function loadHomeTab(container) {
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
                 <span class="text-muted" style="font-size:var(--fs-2)">窗口</span>
-                <select id="jgDays" class="btn btn-sm" onchange="loadJgTrack()" style="padding:3px 8px">
+                <select id="jgDays" class="field-select" onchange="loadJgTrack()">
                     <option value="20">近 20 交易日</option>
                     <option value="60">近 60 交易日</option>
                     <option value="120">近 120 交易日</option>
                 </select>
                 <span class="text-muted" style="font-size:var(--fs-2)">机构净买</span>
-                <select id="jgMinCnt" class="btn btn-sm" onchange="loadJgTrack()" style="padding:3px 8px">
+                <select id="jgMinCnt" class="field-select" onchange="loadJgTrack()">
                     <option value="2">≥ 2 次</option>
                     <option value="3">≥ 3 次</option>
                     <option value="5">≥ 5 次</option>
                 </select>
                 <span class="text-muted" style="font-size:var(--fs-2)">排序</span>
-                <select id="jgSort" class="btn btn-sm" onchange="loadJgTrack()" style="padding:3px 8px">
+                <select id="jgSort" class="field-select" onchange="loadJgTrack()">
                     <option value="cum_ratio">建仓力度（净买额/流通市值）</option>
                     <option value="vs_cost">现价低于成本优先</option>
                 </select>
@@ -5257,7 +5257,8 @@ loadTab('home');
 async function loadMaintenanceTab(c) {
     c.innerHTML = `
     <div class="page" style="padding:20px;">
-        <h2 style="margin:0 0 20px 0; font-size:var(--fs-4);">系统维护 · 数据修正</h2>
+        <div class="panel" style="margin-bottom:20px;">
+        <div class="panel-header"><h3>系统维护 · 数据修正</h3></div>
         
         <!-- 全量历史修正 -->
         <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:20px; margin-bottom:20px;">
@@ -5273,12 +5274,11 @@ async function loadMaintenanceTab(c) {
                 <div style="display:flex; gap:12px; align-items:end; margin-bottom:12px;">
                     <div style="flex:1;">
                         <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">执行时间</label>
-                        <input type="time" id="scheduleTime" value="10:00" 
-                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
+                        <input type="time" id="scheduleTime" value="10:00" class="field-block">
                     </div>
                     <div style="flex:1;">
                         <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">数据源</label>
-                        <select id="scheduleSource" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
+                        <select id="scheduleSource" class="field-block">
                             <option value="tx">腾讯 (稳定)</option>
                             <option value="em">东方财富 (偶尔反爬)</option>
                             <option value="both">双源交叉验证</option>
@@ -5286,20 +5286,18 @@ async function loadMaintenanceTab(c) {
                     </div>
                     <div style="flex:1;">
                         <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">并发数</label>
-                        <input type="number" id="scheduleThreads" value="2" min="1" max="8"
-                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
+                        <input type="number" id="scheduleThreads" value="2" min="1" max="8" class="field-block">
                     </div>
                     <div style="flex:1;">
                         <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">限速 (秒/只)</label>
-                        <input type="number" id="scheduleRateLimit" value="1.0" min="0.1" max="10" step="0.1"
-                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
+                        <input type="number" id="scheduleRateLimit" value="1.0" min="0.1" max="10" step="0.1" class="field-block">
                     </div>
                 </div>
                 <div style="display:flex; gap:8px;">
-                    <button onclick="scheduleFixHistory()" style="flex:1; padding:10px; background:var(--accent); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
+                    <button class="btn btn-primary" onclick="scheduleFixHistory()" style="max-width:280px; padding:10px 16px;">
                         添加定时任务
                     </button>
-                    <button onclick="loadScheduledJobs()" style="padding:10px 16px; background:var(--bg-root); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
+                    <button class="btn" onclick="loadScheduledJobs()" style="padding:10px 16px;">
                         刷新列表
                     </button>
                 </div>
@@ -5318,10 +5316,10 @@ async function loadMaintenanceTab(c) {
                     立即启动全量历史修正（不定时），任务将在后台运行。
                 </p>
                 <div style="display:flex; gap:8px;">
-                    <button onclick="runFixHistoryNow(false)" style="flex:1; padding:10px; background:var(--success); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
+                    <button class="btn btn-danger" onclick="runFixHistoryNow(false)" style="max-width:280px; padding:10px 16px;">
                         立即执行 (实际修正)
                     </button>
-                    <button onclick="runFixHistoryNow(true)" style="flex:1; padding:10px; background:var(--warning); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
+                    <button class="btn btn-primary" onclick="runFixHistoryNow(true)" style="max-width:280px; padding:10px 16px;">
                         试运行 (只检测)
                     </button>
                 </div>
@@ -5333,6 +5331,7 @@ async function loadMaintenanceTab(c) {
             <h3 style="margin:0 0 12px 0; font-size:var(--fs-4); color:var(--text-primary);">任务进度</h3>
             <div id="fixHistoryProgressContent" style="color:var(--text-secondary); font-size:var(--fs-3);"></div>
         </div>
+        </div><!-- /panel 系统维护 -->
     </div>
     `;
     
@@ -5377,7 +5376,7 @@ async function loadScheduledJobs() {
         }
         
         container.innerHTML = jobs.map(job => `
-            <div style="background:var(--bg-root); border:1px solid var(--border); border-radius:4px; padding:12px; margin-bottom:8px;">
+            <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--r-sm); padding:12px; margin-bottom:8px;">
                 <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:8px;">
                     <div>
                         <div style="font-size:var(--fs-3); font-weight:500; color:var(--text-primary);">每天 ${job.time}</div>
@@ -5386,8 +5385,7 @@ async function loadScheduledJobs() {
                             并发: ${job.threads} · 限速: ${job.rate_limit}s
                         </div>
                     </div>
-                    <button onclick="cancelScheduledJob('${job.id}')" 
-                            style="padding:4px 8px; background:var(--danger); color:white; border:none; border-radius:3px; cursor:pointer; font-size:var(--fs-1);">
+                    <button class="btn btn-danger btn-sm" onclick="cancelScheduledJob('${job.id}')">
                         取消
                     </button>
                 </div>
