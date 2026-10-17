@@ -331,7 +331,7 @@ def test_start_scheduler_disabled_does_nothing(monkeypatch):
 
 
 def test_start_scheduler_registers_daily_job_and_thread(monkeypatch):
-    """开启：注册唯一一个每日 19:00 job，标记 enabled 并起调度线程"""
+    """开启：注册 19:00 同步与 21:30 双源夜检两个每日 job，标记 enabled 并起调度线程"""
     monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
     monkeypatch.setattr(runner, "_recover_and_persist", lambda: ["t-zombie"])
 
@@ -340,8 +340,9 @@ def test_start_scheduler_registers_daily_job_and_thread(monkeypatch):
 
     try:
         jobs = runner._SCHEDULER.get_jobs()
-        assert len(jobs) == 1
+        assert len(jobs) == 2
         assert (jobs[0].at_time.hour, jobs[0].at_time.minute) == (19, 0)
+        assert (jobs[1].at_time.hour, jobs[1].at_time.minute) == (21, 30)
         assert SCHEDULER_RUNNING["enabled"] is True
         t = SCHEDULER_THREAD["t"]
         assert t is not None and t.is_alive() and t.daemon is True

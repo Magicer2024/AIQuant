@@ -30,6 +30,8 @@ _MAX_RETRIES = 3
 _BASE_RETRY_DELAY = 30 * 60  # 30 分钟
 _DAILY_SYNC_TIME = "19:00"
 _DAILY_SYNC_JOB_ID = "daily_sync_1900"
+# L05 双源夜检：21:30 在 19:00 主同步+重算链（含退避重试最晚 ~21:00）完成后跑
+_NIGHT_CHECK_TIME = "21:30"
 
 
 def _evaluate_holdings():
@@ -336,6 +338,8 @@ def start_scheduler():
     _SCHEDULER.clear()
     _SCHEDULER.every().day.at(_DAILY_SYNC_TIME).do(_job_sync)
     print(f"[Scheduler] 每日 {_DAILY_SYNC_TIME} 盘后自动数据同步（含龙虎榜）")
+    _SCHEDULER.every().day.at(_NIGHT_CHECK_TIME).do(_job_night_check)
+    print(f"[Scheduler] 每日 {_NIGHT_CHECK_TIME} 双源夜检（持仓+信号池，只读差异清单）")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)
@@ -362,6 +366,25 @@ def _submit_daily_sync_task(source):
     if not task_repo.claim_task(sub["task_id"], token).get("claimed"):
         return sub["task_id"], None
     return sub["task_id"], token
+
+
+def _job_night_check():
+    """L05 双源夜检（T1）：持仓+信号池 vs 腾讯副源差异清单，只读、best-effort 不阻断调度。
+
+    非交易日跳过（周末重复核对同一存量只产生噪音并浪费接口配额）。
+    """
+    try:
+        from core.trade_calendar import is_trading_day
+        today = date.today().strftime("%Y-%m-%d")
+        if not is_trading_day(today):
+            print("[Scheduler] 双源夜检：非交易日，跳过")
+            return
+        from tools.night_check import run_and_report
+        res = run_and_report()
+        print(f"[Scheduler] 双源夜检 {res['summary']} → {res['report_path']}")
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
 
 def _job_sync():
