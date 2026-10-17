@@ -316,6 +316,76 @@ CREATE TRIGGER protect_stage_delete BEFORE DELETE ON task_stage
 BEGIN SELECT RAISE(ABORT,'阶段记录不可删除'); END;
 """
 
+# 任务1c（2026-10-17，Yu Fang 批准的数据层修复包）：
+#   source 列=推荐来源标记（live=当日链路 / backfill=事后回填观察池），
+#     仅 recommend_outcome；默认 'live' 保证旧进程写入自动落默认值。
+#   exit_code 列=出场原因结构化枚举（stop_loss/trailing_stop/fixed_tp/
+#     max_hold_days/no_fill/expired/other），exit_reason 保留为展示文本；
+#     shadow 表同步加列——两表共用评估函数，列必须对齐。
+#   recommend_outcome_archive=窗口先清后重写前的同事务快照（append-only，
+#     主键含 policy_version：同一参数版本内最新快照覆盖旧快照，跨版本全保留）。
+#   存量归类：反转首日 scan_date<2026-09-24（stock_signal 该线最早 9/24）→backfill；
+#     自由文本 exit_reason 按前缀规则一次性映射（规则与 core.outcome_tracker
+#     ::exit_code_for_reason 一致，中文模板来自 exit_advisor 的 f-string）。
+_TASK1C_OUTCOME_SQL = """
+ALTER TABLE recommend_outcome ADD COLUMN source TEXT NOT NULL DEFAULT 'live';
+ALTER TABLE recommend_outcome ADD COLUMN exit_code TEXT;
+ALTER TABLE recommend_outcome_shadow ADD COLUMN exit_code TEXT;
+CREATE TABLE recommend_outcome_archive (
+    policy_version TEXT NOT NULL,
+    archived_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    code           TEXT NOT NULL,
+    scan_date      TEXT NOT NULL,
+    horizon        TEXT NOT NULL,
+    strategy       TEXT,
+    entry_price    REAL,
+    stop_loss      REAL,
+    take_profit    REAL,
+    fusion_score   REAL,
+    t1_return      REAL,
+    t2_return      REAL,
+    t3_return      REAL,
+    t5_return      REAL,
+    t10_return     REAL,
+    max_return     REAL,
+    min_return     REAL,
+    hit_stop       INTEGER,
+    hit_tp         INTEGER,
+    exit_reason    TEXT,
+    exit_code      TEXT,
+    exit_date      TEXT,
+    exit_return    REAL,
+    evaluated_at   TEXT,
+    source         TEXT,
+    PRIMARY KEY (code, scan_date, horizon, strategy, policy_version)
+);
+CREATE INDEX idx_outcome_archive_scan ON recommend_outcome_archive(scan_date);
+UPDATE recommend_outcome SET source = 'backfill'
+ WHERE strategy = '反转首日' AND scan_date < '2026-09-24';
+UPDATE recommend_outcome SET exit_code = CASE
+    WHEN exit_reason IN ('stop_loss','trailing_stop','max_hold_days','no_fill',
+                         'expired','holding','watching','data_pending','cancelled')
+        THEN exit_reason
+    WHEN exit_reason LIKE '收盘跌破止损价%' THEN 'stop_loss'
+    WHEN exit_reason LIKE '移动止盈%' THEN 'trailing_stop'
+    WHEN exit_reason LIKE '收盘达到止盈价%' THEN 'fixed_tp'
+    WHEN exit_reason LIKE '持仓满%' THEN 'max_hold_days'
+    WHEN exit_reason IS NOT NULL THEN 'other'
+    ELSE NULL END
+  WHERE exit_code IS NULL AND exit_reason IS NOT NULL;
+UPDATE recommend_outcome_shadow SET exit_code = CASE
+    WHEN exit_reason IN ('stop_loss','trailing_stop','max_hold_days','no_fill',
+                         'expired','holding','watching','data_pending','cancelled')
+        THEN exit_reason
+    WHEN exit_reason LIKE '收盘跌破止损价%' THEN 'stop_loss'
+    WHEN exit_reason LIKE '移动止盈%' THEN 'trailing_stop'
+    WHEN exit_reason LIKE '收盘达到止盈价%' THEN 'fixed_tp'
+    WHEN exit_reason LIKE '持仓满%' THEN 'max_hold_days'
+    WHEN exit_reason IS NOT NULL THEN 'other'
+    ELSE NULL END
+  WHERE exit_code IS NULL AND exit_reason IS NOT NULL;
+"""
+
 
 def init_db():
     """初始化数据库，创建所有表"""
@@ -1100,6 +1170,7 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
                      "ON CONFLICT(version) DO NOTHING")
         _apply_versioned_migration(conn, "002_unified_signal_model", _UNIFIED_MODEL_SQL)
         _apply_versioned_migration(conn, "003_task_orchestration", _TASK_ORCHESTRATION_SQL)
+        _apply_versioned_migration(conn, "004_task1c_outcome_columns", _TASK1C_OUTCOME_SQL)
 
     print(f"[DB] 数据库初始化完成: {DB_PATH}")
 
