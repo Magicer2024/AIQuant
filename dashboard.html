@@ -11,19 +11,19 @@
     <link rel="stylesheet" href="/static/css/dashboard.css?v=20260911">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
-        .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:13px}
+        .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
         .sd-search:focus{outline:none;border-color:var(--accent)}
         .sd-nav{display:flex;align-items:center;gap:8px}
-        .sd-count{font-size:12px;color:var(--text-secondary);font-family:var(--font-mono)}
+        .sd-count{font-size:var(--fs-2);color:var(--text-secondary);font-family:var(--font-mono)}
         .sd-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
-        .sd-chip{cursor:pointer;padding:4px 10px;font-size:12px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:14px;color:var(--text-secondary)}
+        .sd-chip{cursor:pointer;padding:4px 10px;font-size:var(--fs-2);background:var(--bg-elevated);border:1px solid var(--border);border-radius:14px;color:var(--text-secondary)}
         .sd-chip:hover{border-color:var(--accent);color:var(--text-primary)}
         .sd-chip.sd-chip-active{background:rgba(var(--accent-rgb),.14);border-color:var(--accent);color:var(--text-primary);font-weight:600}
-        .sd-chip-src{opacity:.6;margin-left:4px;font-size:10px}
-        .sd-chip-del{margin-left:6px;background:transparent;border:none;color:var(--text-muted);font-size:14px;line-height:1;cursor:pointer;padding:0 2px}
+        .sd-chip-src{opacity:.6;margin-left:4px;font-size:var(--fs-1)}
+        .sd-chip-del{margin-left:6px;background:transparent;border:none;color:var(--text-muted);font-size:var(--fs-3);line-height:1;cursor:pointer;padding:0 2px}
         .sd-chip-del:hover{color:var(--danger)}
-        .sd-chips-empty{font-size:12px;color:var(--text-muted)}
-        .sd-market-title{font-size:13px;font-weight:600;color:var(--text-primary);margin:10px 0 8px;display:flex;align-items:center;gap:6px}
+        .sd-chips-empty{font-size:var(--fs-2);color:var(--text-muted)}
+        .sd-market-title{font-size:var(--fs-3);font-weight:600;color:var(--text-primary);margin:10px 0 8px;display:flex;align-items:center;gap:6px}
         .sd-market-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
         @media(max-width:1280px){.sd-market-grid{grid-template-columns:repeat(3,1fr)}}
         @media(max-width:900px){.sd-market-grid{grid-template-columns:repeat(2,1fr)}}
@@ -31,76 +31,76 @@
         .sd-market-card{cursor:pointer;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:9px 11px;transition:border-color .15s,box-shadow .15s;display:flex;flex-direction:column;gap:5px;min-height:108px}
         .sd-market-card:hover{border-color:var(--accent);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.18)}
         .sd-market-head{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:20px}
-        .sd-market-name{font-size:13px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-        .sd-market-meta{font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
-        .sd-market-prices{display:flex;gap:3px 8px;flex-wrap:wrap;font-size:11px;color:var(--text-secondary);font-family:var(--font-mono);line-height:1.6}
+        .sd-market-name{font-size:var(--fs-3);font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+        .sd-market-meta{font-size:var(--fs-1);color:var(--text-muted);font-family:var(--font-mono)}
+        .sd-market-prices{display:flex;gap:3px 8px;flex-wrap:wrap;font-size:var(--fs-1);color:var(--text-secondary);font-family:var(--font-mono);line-height:1.6}
         .sd-market-prices b{color:var(--text-muted);font-weight:500;margin-right:2px;font-family:inherit}
         .sd-market-prices .sd-price-entry{color:var(--accent);font-weight:600}
         .sd-market-reasons{display:flex;gap:4px;flex-wrap:wrap;margin-top:auto}
-        .sd-market-reasons .reason-chip{font-size:10px;padding:1px 6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .sd-market-empty-col{grid-column:1/-1;text-align:center;padding:30px 14px;color:var(--text-muted);font-size:12px}
+        .sd-market-reasons .reason-chip{font-size:var(--fs-1);padding:1px 6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .sd-market-empty-col{grid-column:1/-1;text-align:center;padding:30px 14px;color:var(--text-muted);font-size:var(--fs-2)}
         /* 双层候选：主推（实际建仓，资金有限只做这批） / 信息储备（展开看，可不建仓） */
         .sd-market-card.is-main{border-color:rgba(var(--accent-rgb),.42);background:linear-gradient(180deg,rgba(var(--accent-rgb),.055),transparent 62%)}
         .sd-market-card.is-main:hover{box-shadow:0 0 0 1px rgba(var(--accent-rgb),.32)}
-        .sd-badge-main{font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(var(--accent-rgb),.15);color:var(--accent);font-weight:700;letter-spacing:.4px;flex:none}
+        .sd-badge-main{font-size:var(--fs-1);padding:1px 5px;border-radius:3px;background:rgba(var(--accent-rgb),.15);color:var(--accent);font-weight:700;letter-spacing:.4px;flex:none}
         .sd-market-card.is-reserve{opacity:.8}
         .sd-market-card.is-reserve:hover{opacity:1}
-        .sd-sec-label{font-size:11px;color:var(--text-muted);margin:2px 0 6px;display:flex;align-items:center;gap:5px}
+        .sd-sec-label{font-size:var(--fs-1);color:var(--text-muted);margin:2px 0 6px;display:flex;align-items:center;gap:5px}
         .sd-sec-label b{color:var(--text-secondary);font-weight:600}
         .sd-more-wrap{margin-top:9px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-        .sd-more-toggle{font-size:11px;color:var(--text-muted);background:transparent;border:1px dashed var(--border);border-radius:6px;padding:4px 11px;cursor:pointer;transition:color .15s,border-color .15s;font-family:inherit}
+        .sd-more-toggle{font-size:var(--fs-1);color:var(--text-muted);background:transparent;border:1px dashed var(--border);border-radius:6px;padding:4px 11px;cursor:pointer;transition:color .15s,border-color .15s;font-family:inherit}
         .sd-more-toggle:hover{color:var(--accent);border-color:var(--accent)}
         .sd-scan-progress{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px}
-        .sd-scan-progress .row{display:flex;justify-content:space-between;font-size:12px;color:var(--text-secondary);margin-bottom:5px}
+        .sd-scan-progress .row{display:flex;justify-content:space-between;font-size:var(--fs-2);color:var(--text-secondary);margin-bottom:5px}
         .sd-scan-progress .bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
         .sd-scan-progress .fill{height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width 0.3s}
-        .sd-scan-progress .msg{font-size:11px;color:var(--text-muted);margin-top:5px}
+        .sd-scan-progress .msg{font-size:var(--fs-1);color:var(--text-muted);margin-top:5px}
         .sd-summary{display:flex;gap:10px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--border);margin-bottom:14px}
         .sd-metric{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:8px 12px;min-width:120px}
-        .sd-metric .lbl{font-size:10px;color:var(--text-muted);letter-spacing:.04em}
-        .sd-metric .val{font-size:16px;font-weight:600;color:var(--text-primary);margin-top:2px}
-        .sd-metric .sub{font-size:11px;color:var(--text-secondary);margin-top:2px}
+        .sd-metric .lbl{font-size:var(--fs-1);color:var(--text-muted);letter-spacing:.04em}
+        .sd-metric .val{font-size:var(--fs-4);font-weight:600;color:var(--text-primary);margin-top:2px}
+        .sd-metric .sub{font-size:var(--fs-1);color:var(--text-secondary);margin-top:2px}
         .sd-grid-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
         @media(max-width:900px){.sd-grid-2col{grid-template-columns:1fr}}
         .sd-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
-        .sd-card h4{margin:0 0 6px;font-size:13px;color:var(--text-primary)}
-        .sd-card .sd-card-desc{font-size:12px;color:var(--text-secondary);line-height:1.6}
-        .sd-kv{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--text-secondary)}
+        .sd-card h4{margin:0 0 6px;font-size:var(--fs-3);color:var(--text-primary)}
+        .sd-card .sd-card-desc{font-size:var(--fs-2);color:var(--text-secondary);line-height:1.6}
+        .sd-kv{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:var(--fs-2);color:var(--text-secondary)}
         .sd-kv b{color:var(--text-primary)}
         .sd-signal{display:grid;grid-template-columns:150px 1fr;gap:14px;align-items:stretch;margin-bottom:14px}
         @media(max-width:700px){.sd-signal{grid-template-columns:1fr}}
         .sd-signal-side{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center}
         .sd-signal-emoji{font-size:44px;line-height:1}
-        .sd-signal-level{font-size:18px;font-weight:700}
-        .sd-signal-note{font-size:11px;color:var(--text-secondary)}
+        .sd-signal-level{font-size:var(--fs-4);font-weight:700}
+        .sd-signal-note{font-size:var(--fs-1);color:var(--text-secondary)}
         .sd-plan{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
         @media(max-width:600px){.sd-plan{grid-template-columns:1fr}}
-        .sd-plan-cell{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center}
-        .sd-plan-cell .lbl{font-size:11px;color:var(--text-muted)}
-        .sd-plan-cell .val{font-size:18px;font-weight:700;margin-top:4px}
-        .sd-plan-cell .sub{font-size:11px;color:var(--text-secondary);margin-top:2px}
+        .sd-plan-cell{background:var(--bg-root);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center}
+        .sd-plan-cell .lbl{font-size:var(--fs-1);color:var(--text-muted)}
+        .sd-plan-cell .val{font-size:var(--fs-4);font-weight:700;margin-top:4px}
+        .sd-plan-cell .sub{font-size:var(--fs-1);color:var(--text-secondary);margin-top:2px}
         .sd-reason-list{list-style:none;margin:0;padding:0}
-        .sd-reason-list li{font-size:12px;line-height:1.7;color:var(--text-secondary);padding-left:14px;position:relative}
+        .sd-reason-list li{font-size:var(--fs-2);line-height:1.7;color:var(--text-secondary);padding-left:14px;position:relative}
         .sd-reason-list li::before{content:'·';position:absolute;left:0;color:var(--accent)}
         .sd-reason-list li.sd-risk::before{color:var(--danger)}
         .sd-chart{width:100%;height:420px;margin-top:4px}
-        .sd-chart-hint{font-size:11px;color:var(--text-muted);margin:4px 0 2px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+        .sd-chart-hint{font-size:var(--fs-1);color:var(--text-muted);margin:4px 0 2px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
         .sd-chart-hint b{font-weight:600}
         .sd-timeline{max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px}
-        .sd-tl-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-size:12px}
+        .sd-tl-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-size:var(--fs-2)}
         .sd-tl-item:nth-child(even){background:rgba(var(--accent-rgb),.05)}
         .sd-tl-item .date{font-family:var(--font-mono);color:var(--text-secondary);width:84px;flex:none}
         .sd-tl-item .close{width:64px;text-align:right;font-family:var(--font-mono);color:var(--text-primary);flex:none}
         .sd-tl-item .pct{width:56px;text-align:right;font-family:var(--font-mono);flex:none}
         .sd-tl-item .lvl{width:88px;flex:none}
         .sd-tl-item .brief{flex:1;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .sd-lvl-chip{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+        .sd-lvl-chip{display:inline-block;padding:2px 8px;border-radius:10px;font-size:var(--fs-1);font-weight:600}
         .sd-lvl-buy{background:rgba(var(--green-rgb),.16);color:var(--green)}
         .sd-lvl-add{background:rgba(255,170,60,.16);color:#ffaa3c}
         .sd-lvl-hold{background:rgba(var(--accent-rgb),.14);color:var(--accent)}
         .sd-lvl-sell{background:rgba(var(--danger-rgb),.14);color:var(--danger)}
-        .sd-tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;margin-right:6px;vertical-align:middle}
-        .sd-trade-table{width:100%;border-collapse:collapse;font-size:11px;color:var(--text-secondary)}
+        .sd-tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:var(--fs-1);margin-right:6px;vertical-align:middle}
+        .sd-trade-table{width:100%;border-collapse:collapse;font-size:var(--fs-1);color:var(--text-secondary)}
         .sd-trade-table th{position:sticky;top:0;background:var(--bg-elevated);color:var(--text-muted);font-weight:600;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;z-index:1}
         .sd-trade-table td{padding:6px 8px;border-bottom:1px solid var(--border);font-family:var(--font-mono);white-space:nowrap}
         .sd-trade-table tr:last-child td{border-bottom:none}
@@ -113,23 +113,23 @@
         .sd-track-stat.clickable:hover{border-color:var(--accent)}
         .sd-track-stat.active{border-color:var(--accent);background:rgba(var(--accent-rgb),.10)}
         .sd-track-stat.active .lbl{color:var(--accent)}
-        .sd-track-stat .lbl{font-size:10px;color:var(--text-muted);letter-spacing:.03em}
-        .sd-track-stat .val{font-size:14px;font-weight:600;color:var(--text-primary);font-family:var(--font-mono);margin-top:1px}
+        .sd-track-stat .lbl{font-size:var(--fs-1);color:var(--text-muted);letter-spacing:.03em}
+        .sd-track-stat .val{font-size:var(--fs-3);font-weight:600;color:var(--text-primary);font-family:var(--font-mono);margin-top:1px}
         .sd-track-stat .val.pos{color:var(--positive)}
         .sd-track-stat .val.neg{color:var(--negative)}
         .sd-track-table .num{font-family:var(--font-mono)}
         .sd-track-table .pos{color:var(--positive)}
         .sd-track-table .neg{color:var(--negative)}
         .sd-track-table td.name-td{font-family:inherit;white-space:normal}
-        .sd-st{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;white-space:nowrap}
+        .sd-st{display:inline-block;padding:1px 7px;border-radius:9px;font-size:var(--fs-1);white-space:nowrap}
         .sd-st-holding{background:rgba(var(--accent-rgb),.16);color:var(--accent)}
         .sd-st-watching{background:rgba(var(--warning-rgb),.14);color:var(--warning)}
         .sd-st-closed{background:rgba(var(--success-rgb),.12);color:var(--success)}
         .sd-st-expired{background:rgba(var(--text-muted),.12);color:var(--text-muted)}
-        .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:11px;padding:1px 6px;cursor:pointer;margin-right:4px}
+        .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:var(--fs-1);padding:1px 6px;cursor:pointer;margin-right:4px}
         .sd-op:hover{border-color:var(--accent);color:var(--text-primary)}
         .sd-op.danger:hover{border-color:var(--danger);color:var(--danger)}
-        .sd-track-note{font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.6}
+        .sd-track-note{font-size:var(--fs-1);color:var(--text-muted);margin-top:6px;line-height:1.6}
     </style>
     <script>
         // 尽早应用已保存主题，避免首屏闪烁（FOUC）
@@ -171,9 +171,9 @@
         <div id="syncProgressBar" style="flex:1; height:8px; background:var(--border); border-radius:4px; overflow:hidden;">
             <div id="syncProgressFill" style="height:100%; width:0%; background:var(--accent); border-radius:4px; transition:width 0.3s;"></div>
         </div>
-        <span id="syncProgressPct" style="font-size:12px; color:var(--text-secondary); white-space:nowrap;">0%</span>
+        <span id="syncProgressPct" style="font-size:var(--fs-2); color:var(--text-secondary); white-space:nowrap;">0%</span>
     </div>
-    <div id="syncProgressText" style="font-size:12px; color:var(--text-secondary);"></div>
+    <div id="syncProgressText" style="font-size:var(--fs-2); color:var(--text-secondary);"></div>
 </div>
 
 <div class="kline-overlay" id="klinePanel" onclick="if(event.target===this)closeKline()">
@@ -527,7 +527,7 @@ async function loadHomeTab(container) {
                 <div class="hero-greeting" id="heroGreeting">早上好 👋</div>
                 <div class="hero-title">今天投资，看这一页就够了</div>
                 <div class="hero-sub" id="heroSub">正在加载市场状态…</div>
-                <div class="hero-fund-tip" style="margin-top:8px;padding:8px 12px;background:rgba(255,171,64,0.08);border-left:3px solid var(--warning);border-radius:4px;font-size:13px;color:var(--text-secondary)">
+                <div class="hero-fund-tip" style="margin-top:8px;padding:8px 12px;background:rgba(255,171,64,0.08);border-left:3px solid var(--warning);border-radius:4px;font-size:var(--fs-3);color:var(--text-secondary)">
                     <span id="accountBudgetHint">正在读取参考账户配置…</span>
                 </div>
             </div>
@@ -540,7 +540,7 @@ async function loadHomeTab(container) {
         <div class="panel" id="dataStatusPanel">
             <div class="panel-header">
                 <h3>📊 数据状态</h3>
-                <span class="text-muted" id="dataStatusHint" style="font-size:12px"></span>
+                <span class="text-muted" id="dataStatusHint" style="font-size:var(--fs-2)"></span>
             </div>
             <div class="data-status-grid">
                 <div class="data-status-cell">
@@ -555,8 +555,8 @@ async function loadHomeTab(container) {
                 </div>
             </div>
             <div class="data-status-actions">
-                <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.05em">同步范围</span>
-                <select id="syncTargetSel" style="padding:4px 8px;font-family:var(--font-mono);font-size:11px">
+                <span style="font-size:var(--fs-1);color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.05em">同步范围</span>
+                <select id="syncTargetSel" style="padding:4px 8px;font-family:var(--font-mono);font-size:var(--fs-1)">
                     <option value="watchlist" selected>仅自选股</option>
                     <option value="all">全市场</option>
                 </select>
@@ -571,7 +571,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>市场速览</h3>
-                <span class="text-muted" id="marketUpdatedAt" style="font-size:12px"></span>
+                <span class="text-muted" id="marketUpdatedAt" style="font-size:var(--fs-2)"></span>
             </div>
             <div id="indexCards" class="index-grid">加载中…</div>
         </div>
@@ -580,8 +580,8 @@ async function loadHomeTab(container) {
             <div class="panel-header">
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
                 <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">📋 一键复制</button>
-                <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:12px;padding:2px 6px;background:var(--bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
-                <span class="text-muted" style="font-size:12px">基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）</span>
+                <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:var(--fs-2);padding:2px 6px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
+                <span class="text-muted" style="font-size:var(--fs-2)">基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）</span>
             </div>
             <div id="todayPicks" class="action-plan-grid">加载中…</div>
         </div>
@@ -589,7 +589,7 @@ async function loadHomeTab(container) {
         <div class="panel" id="stockDeepPanel">
             <div class="panel-header">
                 <h3>🎯 个股深度 · 买卖建议</h3>
-                <span class="text-muted" id="sdHint" style="font-size:12px">切换个股后自动学习其历史走势、量价关系与涨跌节奏，给出近期可执行建议</span>
+                <span class="text-muted" id="sdHint" style="font-size:var(--fs-2)">切换个股后自动学习其历史走势、量价关系与涨跌节奏，给出近期可执行建议</span>
             </div>
             <div class="sd-toolbar">
                 <input class="sd-search" id="sdSearch" list="sdDatalist" placeholder="🔍 输入代码或名称（如 600100 / TCL科技），回车分析"
@@ -611,7 +611,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>反转首日观察 · 首次站上 MA20 的低位入场</h3>
-                <span class="text-muted" style="font-size:12px" id="reversalPicksHint">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池</span>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池</span>
             </div>
             <div id="reversalPicks" class="action-plan-grid">加载中…</div>
         </div>
@@ -619,27 +619,27 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>机构席位建仓跟踪 · 龙虎榜机构专用席位</h3>
-                <span class="text-muted" style="font-size:12px" id="jgTrackHint">加载中…</span>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="jgTrackHint">加载中…</span>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-                <span class="text-muted" style="font-size:12px">窗口</span>
+                <span class="text-muted" style="font-size:var(--fs-2)">窗口</span>
                 <select id="jgDays" class="btn btn-sm" onchange="loadJgTrack()" style="padding:3px 8px">
                     <option value="20">近 20 交易日</option>
                     <option value="60">近 60 交易日</option>
                     <option value="120">近 120 交易日</option>
                 </select>
-                <span class="text-muted" style="font-size:12px">机构净买</span>
+                <span class="text-muted" style="font-size:var(--fs-2)">机构净买</span>
                 <select id="jgMinCnt" class="btn btn-sm" onchange="loadJgTrack()" style="padding:3px 8px">
                     <option value="2">≥ 2 次</option>
                     <option value="3">≥ 3 次</option>
                     <option value="5">≥ 5 次</option>
                 </select>
-                <span class="text-muted" style="font-size:12px">排序</span>
+                <span class="text-muted" style="font-size:var(--fs-2)">排序</span>
                 <select id="jgSort" class="btn btn-sm" onchange="loadJgTrack()" style="padding:3px 8px">
                     <option value="cum_ratio">建仓力度（净买额/流通市值）</option>
                     <option value="vs_cost">现价低于成本优先</option>
                 </select>
-                <span class="text-muted" style="font-size:11px;margin-left:auto">成本 = 按机构净买额加权的上榜日收盘价（估算）</span>
+                <span class="text-muted" style="font-size:var(--fs-1);margin-left:auto">成本 = 按机构净买额加权的上榜日收盘价（估算）</span>
             </div>
             <div id="jgTrackMetrics" class="metrics-row" style="margin-bottom:10px"></div>
             <div id="jgTrackTable">加载中…</div>
@@ -666,7 +666,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>历史持仓收益 · 已实现盈亏统计</h3>
-                <span class="text-muted" style="font-size:12px">减仓 / 平仓时按卖出价与成本价计算收益率，逐笔留存</span>
+                <span class="text-muted" style="font-size:var(--fs-2)">减仓 / 平仓时按卖出价与成本价计算收益率，逐笔留存</span>
             </div>
             <div id="positionHistory">加载中…</div>
         </div>
@@ -674,7 +674,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>推荐复盘 · 过去60天推荐的真实表现与出场结果</h3>
-                <span class="text-muted" style="font-size:12px" id="recHistoryUpdatedAt"></span>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="recHistoryUpdatedAt"></span>
             </div>
             <div id="recHistorySummary"></div>
             <div id="recHistoryTable">加载中…</div>
@@ -684,7 +684,7 @@ async function loadHomeTab(container) {
             <div class="panel-header">
                 <h3>策略优化 · 每日诊断与参数建议</h3>
                 <button class="btn btn-sm" onclick="runOptimizerNow()">立即寻优</button>
-                <span class="text-muted" style="font-size:12px" id="optimizerUpdatedAt">同步后自动诊断，每周五盘后寻优，建议需人工采纳</span>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="optimizerUpdatedAt">同步后自动诊断，每周五盘后寻优，建议需人工采纳</span>
             </div>
             <div id="optimizerPanel">加载中…</div>
         </div>
@@ -692,7 +692,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>新手入门 · 量化指标速查</h3>
-                <span class="text-muted" style="font-size:12px">点指标看白话解释</span>
+                <span class="text-muted" style="font-size:var(--fs-2)">点指标看白话解释</span>
             </div>
             <div id="explainerGrid" class="explainer-grid"></div>
         </div>
@@ -813,13 +813,13 @@ async function loadMarketOverview() {
         const breadthHtml = (br.up_count || br.down_count) ? `
             <div class="idx-card">
                 <div class="idx-name">涨跌家数</div>
-                <div class="idx-price"><span class="idx-up">${br.up_count||0}</span><span style="font-size:14px;color:var(--text-muted)"> / </span><span class="idx-down">${br.down_count||0}</span></div>
-                <div class="idx-trend" style="color:var(--text-secondary);font-size:11px">${br.label || ''}</div>
+                <div class="idx-price"><span class="idx-up">${br.up_count||0}</span><span style="font-size:var(--fs-3);color:var(--text-muted)"> / </span><span class="idx-down">${br.down_count||0}</span></div>
+                <div class="idx-trend" style="color:var(--text-secondary);font-size:var(--fs-1)">${br.label || ''}</div>
             </div>
             <div class="idx-card">
                 <div class="idx-name">两市成交额</div>
-                <div class="idx-price">${br.total_amount != null ? Number(br.total_amount).toLocaleString() : '--'}<span style="font-size:14px;color:var(--text-muted)"> 亿</span></div>
-                <div class="idx-trend" style="color:var(--text-secondary);font-size:11px">${br.trade_date || ''}</div>
+                <div class="idx-price">${br.total_amount != null ? Number(br.total_amount).toLocaleString() : '--'}<span style="font-size:var(--fs-3);color:var(--text-muted)"> 亿</span></div>
+                <div class="idx-trend" style="color:var(--text-secondary);font-size:var(--fs-1)">${br.trade_date || ''}</div>
             </div>
         ` : '';
         if (grid) grid.innerHTML = idxHtml + breadthHtml;
@@ -834,7 +834,7 @@ async function loadMarketOverview() {
             const thrHint = aw.sig_threshold != null ?
                 ` · 阈值${Number(aw.sig_threshold).toFixed(0)}${aw.adaptive_enabled ? '(自适应)' : ''}` : '';
             const weightEl = document.createElement('div');
-            weightEl.style.cssText = 'margin-top:8px;padding:6px 12px;background:rgba(var(--accent-rgb),0.06);border-radius:6px;font-size:11px;color:var(--text-secondary)';
+            weightEl.style.cssText = 'margin-top:8px;padding:6px 12px;background:rgba(var(--accent-rgb),0.06);border-radius:6px;font-size:var(--fs-1);color:var(--text-secondary)';
             weightEl.innerHTML = `🎯 短线打分: ${engineHint}${thrHint} · ${regimeEmoji} ${aw.regime_label}`;
             if (grid) grid.parentElement.appendChild(weightEl);
         }
@@ -986,7 +986,7 @@ async function loadTodayPicks(isFallback) {
                 showToast('所选日期 ' + picked + ' 无推荐，已切换到最新数据日', 'info', 3000);
                 return loadTodayPicks(true);
             }
-            box.innerHTML = '<div class="empty-state">暂无推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到「高级筛选」跑一遍打分</span></div>';
+            box.innerHTML = '<div class="empty-state">暂无推荐数据<br><span style="color:var(--text-muted);font-size:var(--fs-2)">先到「高级筛选」跑一遍打分</span></div>';
             return;
         }
         box.innerHTML = HORIZON_GROUPS.map(g => renderPickGroup(g, groups[g.key] || [])).join('');
@@ -1101,7 +1101,7 @@ function renderPickMiniRow(it, hz) {
     const rrCls = rr == null ? '' : (rr >= 2 ? 'rr-good' : (rr >= 1 ? 'rr-ok' : 'rr-bad'));
     const rrHtml = rr != null
         ? `<span class="rr-tag ${rrCls}">${rr.toFixed(2)}</span>`
-        : '<span style="color:var(--text-muted);font-size:11px">--</span>';
+        : '<span style="color:var(--text-muted);font-size:var(--fs-1)">--</span>';
     const label = (sg.label || '').replace(/"/g, '');
     // 抄底类短线 = 回踩确认入场：买入价语义是「回踩买点」，非次日直接买
     const pullback = hz === 'short' && it.strategy && it.strategy !== '隔日动量';
@@ -1132,7 +1132,7 @@ function renderPickMiniRow(it, hz) {
 // 小板块内容区：简略列表 / 完整推荐卡
 function renderPickGroupBody(g, list) {
     if (!list.length) {
-        return '<div class="empty-state" style="padding:16px;font-size:12px">该周期暂无推荐，请先在首页点「立即重算打分」</div>';
+        return '<div class="empty-state" style="padding:16px;font-size:var(--fs-2)">该周期暂无推荐，请先在首页点「立即重算打分」</div>';
     }
     if (PICK_EXPANDED[g.key]) {
         return '<div class="action-plan-grid">' + list.map(it => renderPickCard(it)).join('') + '</div>';
@@ -1254,7 +1254,7 @@ async function loadJgTrack() {
     const days = (document.getElementById('jgDays') || {}).value || 20;
     const minCnt = (document.getElementById('jgMinCnt') || {}).value || 2;
     const sort = (document.getElementById('jgSort') || {}).value || 'cum_ratio';
-    box.innerHTML = '<div class="text-muted" style="font-size:13px">加载中…</div>';
+    box.innerHTML = '<div class="text-muted" style="font-size:var(--fs-3)">加载中…</div>';
     try {
         const resp = await RequestManager.fetch(
             'jg-track',
@@ -1268,7 +1268,7 @@ async function loadJgTrack() {
         }
         renderJgMetrics(d);
         if (!items.length) {
-            box.innerHTML = `<div class="empty-state">近 ${days} 个交易日无「机构净买 ≥ ${minCnt} 次」的股票<br><span style="color:var(--text-muted);font-size:12px">本栏目只收录有本地行情的主板/创业板票（科创板、北交所未接入行情）</span></div>`;
+            box.innerHTML = `<div class="empty-state">近 ${days} 个交易日无「机构净买 ≥ ${minCnt} 次」的股票<br><span style="color:var(--text-muted);font-size:var(--fs-2)">本栏目只收录有本地行情的主板/创业板票（科创板、北交所未接入行情）</span></div>`;
             return;
         }
         box.innerHTML = renderJgTable(items);
@@ -1289,7 +1289,7 @@ function renderJgMetrics(d) {
     const el = document.getElementById('jgTrackMetrics');
     if (!el) return;
     const card = (val, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:24px">${val}</div><div class="lbl">${lbl}</div></div>`;
+        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${val}</div><div class="lbl">${lbl}</div></div>`;
     el.innerHTML =
         card(d.count || 0, `命中（机构净买≥${d.min_cnt || 2}次）`) +
         card(d.above_cost || 0, '现价高于机构成本', '', '机构浮盈') +
@@ -1306,23 +1306,23 @@ function renderJgTable(items) {
             ? `${Number(it.band_low).toFixed(2)} ~ ${Number(it.band_high).toFixed(2)}`
             : '--';
         return `<tr style="cursor:pointer" onclick="openKline('${it.code}')">
-            <td><b>${it.name || it.code}</b><div style="font-size:11px;color:var(--text-muted)">${it.code}</div></td>
+            <td><b>${it.name || it.code}</b><div style="font-size:var(--fs-1);color:var(--text-muted)">${it.code}</div></td>
             <td><b>${it.cnt_in}</b><span style="color:var(--text-muted)">/${it.cnt_total}次</span></td>
             <td>${_jgFmtAmt(it.cum_net)}</td>
             <td>${it.cum_ratio != null ? Number(it.cum_ratio).toFixed(2) + '%' : '--'}</td>
-            <td><b>${it.cost_est != null ? Number(it.cost_est).toFixed(2) : '--'}</b><div style="font-size:11px;color:var(--text-muted)" title="各上榜日最低~最高（前复权）">带 ${band}</div></td>
+            <td><b>${it.cost_est != null ? Number(it.cost_est).toFixed(2) : '--'}</b><div style="font-size:var(--fs-1);color:var(--text-muted)" title="各上榜日最低~最高（前复权）">带 ${band}</div></td>
             <td>${it.last_close != null ? Number(it.last_close).toFixed(2) : '--'}</td>
             <td class="${vsCls}"><b>${vsTxt}</b></td>
             <td>${it.buyers_max || 0} / ${it.sellers_max || 0}</td>
-            <td style="font-size:11px;color:var(--text-muted)">${it.last_date || ''}</td>
+            <td style="font-size:var(--fs-1);color:var(--text-muted)">${it.last_date || ''}</td>
         </tr>`;
     }).join('');
     return `<div class="table-wrapper" style="max-height:460px;overflow-y:auto">
-        <table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-card)"><tr>
+        <table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-panel)"><tr>
         <th>股票</th><th>机构净买</th><th>累计净买额</th><th>占流通市值</th>
         <th>成本估算 / 价格带</th><th>现价</th><th>现价 vs 成本</th><th>机构 买/卖</th><th>最后上榜</th>
         </tr></thead><tbody>${rows}</tbody></table>
-        <div style="font-size:11.5px;color:var(--text-muted);margin-top:8px;line-height:1.6">
+        <div style="font-size:var(--fs-1);color:var(--text-muted);margin-top:8px;line-height:1.6">
         ⚠ 本栏目是<b>资金动向与成本位参考，不是收益信号</b>。实测机构买卖方向对次日收益<b>无区分度</b>：
         机构净买 +0.72% vs 机构净卖 +0.66%（Δ 不显著）；同样「近20日上榜≥4次」时净卖方反而略高（+1.19% vs +0.94%）。
         有用的只是「价位」——<b>现价低于机构成本＝机构被套</b>，属风险提示。<br>
@@ -1374,7 +1374,7 @@ async function loadReversalPicks() {
         }
         let html = renderReversalStats(data.stats || {}, data.enabled);
         if (!items.length) {
-            html += `<div class="empty-state" style="grid-column:1 / -1">今日无「反转首日」候选<br><span style="color:var(--text-muted);font-size:12px">条件：首破 MA20 + 大阳 ≥5% + 量比 ≥1.5 + 非涨停${data.enabled === false ? '（信号线当前关闭）' : ''}</span></div>`;
+            html += `<div class="empty-state" style="grid-column:1 / -1">今日无「反转首日」候选<br><span style="color:var(--text-muted);font-size:var(--fs-2)">条件：首破 MA20 + 大阳 ≥5% + 量比 ≥1.5 + 非涨停${data.enabled === false ? '（信号线当前关闭）' : ''}</span></div>`;
         } else {
             html += items.map(it => renderReversalCard(it)).join('');
         }
@@ -1389,7 +1389,7 @@ async function loadReversalPicks() {
 // 反转首日 · 诚实统计条 + 免责横幅（成绩单不随当日有无信号消失）
 function renderReversalStats(s, enabled) {
     const numCard = (val, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:22px">${val}</div><div class="lbl">${lbl}</div></div>`;
+        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${val}</div><div class="lbl">${lbl}</div></div>`;
     const by = s.excess_by_year || {};
     const bySeq = ['2024', '2025', '2026']
         .map(y => by[y] != null ? (by[y] >= 0 ? '+' : '') + by[y] : null)
@@ -1404,14 +1404,14 @@ function renderReversalStats(s, enabled) {
         : '';
     return `
         <div style="grid-column:1 / -1">
-            <div style="margin-bottom:8px;padding:7px 11px;border-radius:6px;background:rgba(60,180,255,0.07);border:1px solid rgba(60,180,255,0.28);font-size:11.5px;color:var(--text-secondary);line-height:1.7">
+            <div style="margin-bottom:8px;padding:7px 11px;border-radius:6px;background:rgba(60,180,255,0.07);border:1px solid rgba(60,180,255,0.28);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.7">
                 <b>⚠ 观察池，不是买入推荐</b>：本线唯一确定的价值＝<b>入场位低</b>——首次站上 MA20 那天，信号日中位偏离 MA20 仅 ${s.median_ext != null ? s.median_ext : '--'}%，且只响一次。
                 实测市场中性超额 <b>${exHtml(s.excess_pp)}pp（t=${exHtml(s.t)}）</b>、分年 ${byTxt} 三年一致，
                 但<b>胜率 ${s.win_rate != null ? s.win_rate : '--'}% 未达 52% 门槛</b>，扣交易成本后不足 0.1%/笔 ⇒ 不构成独立可交易 alpha。
                 本线<b>不占今日推荐名额</b>；自 2026-09-24 起<b>纳入推荐复盘</b>
                 （strategy='反转首日' 独立成组，不改变短线推荐线成绩）。${offnote}
             </div>
-            <div style="margin-bottom:8px;padding:7px 11px;border-radius:6px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.30);font-size:11.5px;color:var(--text-secondary);line-height:1.7">
+            <div style="margin-bottom:8px;padding:7px 11px;border-radius:6px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.30);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.7">
                 <b style="color:var(--warning, #d97706)">⚠ 收益高度集中于创业板（当前账户未开通该权限，不可交易）</b>：
                 实盘跟踪 951→<b>485</b> 条按主板口径重算后，
                 创业板子样本 n=466 胜率 <b>58.9%</b>／均 +2.38%（PF 1.99），
@@ -1438,8 +1438,8 @@ function renderReversalTracked(t) {
     const head = `style="grid-column:1 / -1;margin-top:4px;border-top:1px dashed var(--border, rgba(128,128,128,0.25));padding-top:8px"`;
     if (!t.total) {
         return `<div ${head}>
-            <span style="font-weight:600;font-size:12.5px">📈 实盘跟踪（已纳入推荐复盘 · 独立成组）</span>
-            <div style="margin-top:6px;padding:6px 10px;border-radius:6px;background:rgba(60,180,255,0.05);border:1px dashed rgba(60,180,255,0.30);font-size:11.5px;color:var(--text-muted);line-height:1.7">
+            <span style="font-weight:600;font-size:var(--fs-2)">📈 实盘跟踪（已纳入推荐复盘 · 独立成组）</span>
+            <div style="margin-top:6px;padding:6px 10px;border-radius:6px;background:rgba(60,180,255,0.05);border:1px dashed rgba(60,180,255,0.30);font-size:var(--fs-1);color:var(--text-muted);line-height:1.7">
                 等待首批信号结算：本线自 2026-09-24 起写入推荐复盘（strategy='反转首日'），
                 后续交易日按「次日开盘建仓 → 移动止盈/止损/到期」自动评估。
                 该组与短线推荐线<b>分开统计</b>，不会拉低或拉高短线成绩。
@@ -1447,7 +1447,7 @@ function renderReversalTracked(t) {
         </div>`;
     }
     const num = (v, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:22px">${v}</div><div class="lbl">${lbl}</div></div>`;
+        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${v}</div><div class="lbl">${lbl}</div></div>`;
     const wr = t.win_rate, avg = t.avg_return, pf = t.profit_factor, t1 = t.t1 || {};
     const wrCls = wr == null ? '' : (wr >= 50 ? 'positive' : 'negative');
     const avgCls = avg == null ? '' : (avg > 0 ? 'positive' : 'negative');
@@ -1455,8 +1455,8 @@ function renderReversalTracked(t) {
     return `
         <div ${head}>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-                <span style="font-weight:600;font-size:12.5px">📈 实盘跟踪（纳入推荐复盘 · 独立成组）</span>
-                <span class="text-muted" style="font-size:11px">次日开盘建仓 → 移动止盈/止损/到期 · 与短线推荐线分开统计</span>
+                <span style="font-weight:600;font-size:var(--fs-2)">📈 实盘跟踪（纳入推荐复盘 · 独立成组）</span>
+                <span class="text-muted" style="font-size:var(--fs-1)">次日开盘建仓 → 移动止盈/止损/到期 · 与短线推荐线分开统计</span>
                 <span class="reason-chip" style="background:rgba(128,128,128,0.10);color:var(--text-muted)" title="跟踪组与卡片同口径，只统计可交易的主板（未开通创业板/科创板权限）；上方全样本统计仍是全线口径（含创业板），故两者数值不可直接对比">主板口径</span>
             </div>
             <div class="metrics-row">
@@ -1482,17 +1482,17 @@ function renderReversalHistoryShell() {
     return `
         <div style="margin-top:10px;border-top:1px dashed var(--border, rgba(128,128,128,0.25));padding-top:8px">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                <span style="font-weight:600;font-size:12.5px">📜 历史表现</span>
+                <span style="font-weight:600;font-size:var(--fs-2)">📜 历史表现</span>
                 <select id="revHistDays" class="btn btn-sm" style="padding:3px 8px"
                         title="统计窗口（改窗口后已展开的列表会自动重取）"
                         onchange="onReversalHistDaysChange()">${opts}</select>
                 <button id="revHistBtn" class="btn btn-sm" onclick="toggleReversalHistory()">查看近 ${_revHist.days} 天列表</button>
-                <label class="text-muted" style="font-size:11.5px;display:flex;align-items:center;gap:4px;cursor:pointer"
+                <label class="text-muted" style="font-size:var(--fs-1);display:flex;align-items:center;gap:4px;cursor:pointer"
                        title="结算滞后 5~10 个交易日，最近几十行尚未出场（收益列为空）⇒ 勾选后只列已出场的行">
                     <input type="checkbox" id="revHistSettled"${_revHist.settledOnly ? ' checked' : ''}
                            onchange="onReversalHistSettledChange()" style="margin:0">只看已结算
                 </label>
-                <span class="text-muted" style="font-size:11px">主板口径 · 与上方实盘跟踪同源同数学（仅窗口不同）</span>
+                <span class="text-muted" style="font-size:var(--fs-1)">主板口径 · 与上方实盘跟踪同源同数学（仅窗口不同）</span>
             </div>
             <div id="revHistBox" style="display:none;margin-top:8px"></div>
         </div>`;
@@ -1561,7 +1561,7 @@ async function loadReversalHistory() {
     _syncRevHistBtn();
     // 显形由本函数负责：shell 渲染出的容器恒为 display:none
     box.style.display = _revHist.open ? '' : 'none';
-    box.innerHTML = '<div class="text-muted" style="font-size:12px;padding:8px 0">加载中…</div>';
+    box.innerHTML = '<div class="text-muted" style="font-size:var(--fs-2);padding:8px 0">加载中…</div>';
     try {
         // key 按窗口区分：RequestManager 会 cancel 同 key 的在途请求，
         // 用同一个 key 切窗口会互相打断
@@ -1597,17 +1597,17 @@ function renderReversalHistory(d) {
     const items = _revHist.settledOnly ? all.filter(it => it.settled) : all;
     const s = d.summary || {};
     if (!all.length) {
-        return `<div class="empty-state">近 ${d.days || _revHist.days} 天无「反转首日」复盘记录<br><span style="color:var(--text-muted);font-size:12px">本线主板口径日均约 10 条；若整个窗口为空，先确认每日同步链路已跑到本线</span></div>`;
+        return `<div class="empty-state">近 ${d.days || _revHist.days} 天无「反转首日」复盘记录<br><span style="color:var(--text-muted);font-size:var(--fs-2)">本线主板口径日均约 10 条；若整个窗口为空，先确认每日同步链路已跑到本线</span></div>`;
     }
     if (!items.length) {
-        return `<div class="empty-state">近 ${d.days} 天还没有已结算的记录<br><span style="color:var(--text-muted);font-size:12px">共 ${all.length} 条待结算（结算滞后 5~10 个交易日）；取消勾选「只看已结算」可查看全部</span></div>`;
+        return `<div class="empty-state">近 ${d.days} 天还没有已结算的记录<br><span style="color:var(--text-muted);font-size:var(--fs-2)">共 ${all.length} 条待结算（结算滞后 5~10 个交易日）；取消勾选「只看已结算」可查看全部</span></div>`;
     }
     const fmt = v => (v != null ? Number(v).toFixed(2) : '--');
     const pct = v => (v != null
         ? `<span class="${v >= 0 ? 'positive' : 'negative'}">${v >= 0 ? '+' : ''}${Number(v).toFixed(2)}%</span>`
         : '--');
     const card = (val, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:22px">${val}</div><div class="lbl">${lbl}</div></div>`;
+        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${val}</div><div class="lbl">${lbl}</div></div>`;
 
     // 已结算 = 有出场原因的行（未结算仍列出但标「持仓中」，不进胜率 —— 与后端一致）
     const settled = (d.exit_breakdown || [])
@@ -1622,7 +1622,7 @@ function renderReversalHistory(d) {
     const rng = d.range && d.range.start
         ? `${d.range.start} ~ ${d.range.end}` : '--';
     const lowSample = settled > 0 && settled < 30
-        ? `<div style="margin-bottom:8px;padding:6px 10px;border-radius:6px;background:rgba(217,119,6,0.10);border:1px solid rgba(217,119,6,0.30);font-size:11.5px;color:var(--text-secondary)">
+        ? `<div style="margin-bottom:8px;padding:6px 10px;border-radius:6px;background:rgba(217,119,6,0.10);border:1px solid rgba(217,119,6,0.30);font-size:var(--fs-1);color:var(--text-secondary)">
              ⚠ 已结算样本不足 30 条（${settled} 条）：单笔就值约 ±${(100 / settled).toFixed(0)}pp 的胜率台阶，<b>胜率不具统计意义</b>，请以盈亏比与逐条明细为准
            </div>` : '';
 
@@ -1632,7 +1632,7 @@ function renderReversalHistory(d) {
         const kd = kk == null ? '--'
             : `<span${kk > 80 ? ' style="color:var(--negative)" title="K>80 高位，本线实测该档胜率最低"' : ''}>${Number(kk).toFixed(0)}</span>`;
         return `<tr>
-            <td style="font-size:11.5px">${it.scan_date || '--'}</td>
+            <td style="font-size:var(--fs-1)">${it.scan_date || '--'}</td>
             <td><span class="code-link" onclick="openKline('${it.code}')">${it.code}</span></td>
             <td>${it.name || ''}</td>
             <td>${it.ext_pct != null ? (it.ext_pct >= 0 ? '+' : '') + Number(it.ext_pct).toFixed(2) + '%' : '--'}</td>
@@ -1650,8 +1650,8 @@ function renderReversalHistory(d) {
 
     return `
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-            <span style="font-weight:600;font-size:12.5px">📜 历史表现 · 近 ${d.days} 天信号真实成绩</span>
-            <span class="text-muted" style="font-size:11px">信号日次日开盘建仓 → 移动止盈/止损/到期 · 豁免回踩确认（本线即首日窗口）</span>
+            <span style="font-weight:600;font-size:var(--fs-2)">📜 历史表现 · 近 ${d.days} 天信号真实成绩</span>
+            <span class="text-muted" style="font-size:var(--fs-1)">信号日次日开盘建仓 → 移动止盈/止损/到期 · 豁免回踩确认（本线即首日窗口）</span>
             ${chips}
         </div>
         ${lowSample}
@@ -1667,12 +1667,12 @@ function renderReversalHistory(d) {
             ${card(s.take_profit_count || 0, '触发止盈', 'positive')}
         </div>
         <div class="table-wrapper" style="max-height:440px;overflow-y:auto">
-            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+            <div style="font-size:var(--fs-2);color:var(--text-muted);margin-bottom:6px">
                 共 ${d.total} 条（信号日 ${rng}，按信号日降序，同日按收益降序）
                 ${_revHist.settledOnly ? `· <b>已过滤：仅已结算 ${items.length} 条</b>` : ''}
                 ${d.truncated ? ' · ⚠ 已达返回上限，更早的记录未列出' : ''}
             </div>
-            <table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-card)"><tr>
+            <table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-panel)"><tr>
                 <th>信号日</th><th>代码</th><th>名称</th>
                 <th title="信号日收盘相对 MA20 的偏离；越低＝入场位越低">首日位置</th>
                 <th title="信号日量比（≥1.5 为放量确认）">量比</th>
@@ -1680,7 +1680,7 @@ function renderReversalHistory(d) {
                 <th title="旧记录的诊断收益基准，不代表模拟成交价">信号参考价</th>
                 <th>T+1</th><th>T+2</th><th>T+3</th><th>T+5</th><th>收益</th><th>出场</th>
             </tr></thead><tbody>${rows}</tbody></table>
-            <div style="font-size:11.5px;color:var(--text-muted);margin-top:8px;line-height:1.7">
+            <div style="font-size:var(--fs-1);color:var(--text-muted);margin-top:8px;line-height:1.7">
                 ⚠ 本线是<b>入场位置观察池，不是买入推荐</b>：实测市场中性超额 +0.174pp(t=+2.80)、
                 分年三年一致，但胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔，
                 且<b>出场纪律对本线为负贡献</b>（止损把胜率换上去、期望反而跑输「随便买一只持有 5 天」）。
@@ -1747,9 +1747,9 @@ function renderReversalCard(it) {
             </div>
             <div class="action-foot">
                 <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin-bottom:5px">
-                    <span style="font-size:11px;color:var(--text-muted)">首日位置（偏离 MA20）</span>
-                    <span style="font-size:16px;font-weight:700;color:var(--text-primary)">${extHtml}</span>
-                    <span style="font-size:11px;color:var(--text-muted)">越低＝越早；越低并不更优，仅为位置标尺</span>
+                    <span style="font-size:var(--fs-1);color:var(--text-muted)">首日位置（偏离 MA20）</span>
+                    <span style="font-size:var(--fs-4);font-weight:700;color:var(--text-primary)">${extHtml}</span>
+                    <span style="font-size:var(--fs-1);color:var(--text-muted)">越低＝越早；越低并不更优，仅为位置标尺</span>
                 </div>
                 <div class="reasons">${triggers}</div>
                 ${hotDay ? `<div class="reasons" style="margin-top:4px"><span class="reason-chip" style="background:rgba(217,119,6,0.12);color:var(--warning, #d97706)">⚠ 普涨日：当日全市场均涨 ${mkt.toFixed(2)}%，本线信号数会天然放大，注意甄别</span></div>` : ''}
@@ -1799,7 +1799,7 @@ async function openSdDeep(code) {
     _sdDeepMode = true;                                 // 先切模式，refreshStockDeep 内的 _sdGetBody 才指向弹窗
     panel.classList.add('open');
     var body = _sdGetBody();
-    if (body) body.innerHTML = '<div class="empty-state" style="padding:60px 14px;font-size:13px">⏳ 正在深度学习该股历史走势、量价关系与涨跌节奏…</div>';
+    if (body) body.innerHTML = '<div class="empty-state" style="padding:60px 14px;font-size:var(--fs-3)">⏳ 正在深度学习该股历史走势、量价关系与涨跌节奏…</div>';
     try {
         await refreshStockDeep(code, { reorder: true });
     } catch (e) {
@@ -1922,7 +1922,7 @@ function _sdRemoveHistory(code) {
     }
     if (!_sd.list.length) {
         var box = document.getElementById('stockDeepContent');
-        if (box) box.innerHTML = '<div class="empty-state">暂无历史股票<br><span style="color:var(--text-muted);font-size:12px">在上方搜索框输入代码或名称，回车查看</span></div>';
+        if (box) box.innerHTML = '<div class="empty-state">暂无历史股票<br><span style="color:var(--text-muted);font-size:var(--fs-2)">在上方搜索框输入代码或名称，回车查看</span></div>';
         var s = document.getElementById('sdSearch'); if (s) s.value = '';
     }
     renderSdChips();
@@ -2019,7 +2019,7 @@ try { _sdMoreExpanded = localStorage.getItem('aiq_sd_more') === '1'; } catch (e)
 async function loadSdMarket() {
     var box = document.getElementById('sdMarketBox');
     if (!box) return;
-    box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">正在读取明日候选…</div>';
+    box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">正在读取明日候选…</div>';
     try {
         var resp = await RequestManager.fetch('sd-market',
             API + '/investor/stock_deep/market?limit=10',
@@ -2033,7 +2033,7 @@ async function loadSdMarket() {
         };
         _renderSdMarket();
     } catch(e) {
-        box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">扫描失败：' + (e.message || e) + '</div>';
+        box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">扫描失败：' + (e.message || e) + '</div>';
     }
 }
 
@@ -2085,7 +2085,7 @@ function _renderSdMarket() {
     if (rest.length) {
         html += '<div class="sd-more-wrap">' +
             `<button class="sd-more-toggle" onclick="toggleSdMore()">${_sdMoreExpanded ? '▾ 收起' : '▸ 展开'}信息储备（${rest.length} 只）</button>` +
-            '<span style="font-size:10px;color:var(--text-muted)">备选观察，资金有限时可不建仓</span>' +
+            '<span style="font-size:var(--fs-1);color:var(--text-muted)">备选观察，资金有限时可不建仓</span>' +
             '</div>';
         if (_sdMoreExpanded) {
             html += '<div class="sd-market-grid" style="margin-top:8px">' +
@@ -2159,7 +2159,7 @@ async function loadSdTrack(opts) {
         _sdTrackLimit = _SD_TRACK_PAGE;
     }
     if (!opts.keepLoading) {
-        box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:12px">正在读取推荐跟踪…</div>';
+        box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:var(--fs-2)">正在读取推荐跟踪…</div>';
     }
     try {
         // 推进/平仓/删除均为 POST，RequestManager 会自动清空只读缓存，刷新必取新值
@@ -2176,7 +2176,7 @@ async function loadSdTrack(opts) {
             if (btn && btn.scrollIntoView) btn.scrollIntoView({ block: 'center' });
         }
     } catch (e) {
-        if (box) box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:12px">跟踪读取失败：' + (e.message || e) + '</div>';
+        if (box) box.innerHTML = '<div class="empty-state" style="padding:10px;font-size:var(--fs-2)">跟踪读取失败：' + (e.message || e) + '</div>';
     }
 }
 
@@ -2202,12 +2202,12 @@ function renderSdTrack(items, st, updatedAt) {
     };
     var head =
         '<div class="sd-track-head">' +
-          '<span style="font-size:13px;font-weight:600;color:var(--text-primary)">📌 推荐跟踪 · 每笔持仓与收益</span>' +
+          '<span style="font-size:var(--fs-3);font-weight:600;color:var(--text-primary)">📌 推荐跟踪 · 每笔持仓与收益</span>' +
           '<button class="btn btn-sm" onclick="refreshSdTrack(0)" title="立即按最新行情推进一次：检查是否触发建仓/出场，并结算收益">🔄 推进</button>' +
           '<input id="sdBackfillDays" type="number" class="bt-mini-input" value="30" min="1" max="90" style="width:54px;text-align:center;padding:3px 6px" title="回补交易日的天数（每个交易日都要全市场扫描一次，约 45 秒）" onkeydown="if(event.key===\'Enter\')refreshSdTrackFromInput()">' +
           '<button class="btn btn-sm" onclick="refreshSdTrackFromInput()" title="先补跑这些交易日的全市场深析扫描（用当天及之前的行情，无未来函数），再建跟踪单并推进出场。后台执行，约 45 秒/天">⏪ 回补</button>' +
-          '<span class="text-muted" style="font-size:11px">每日 19:00 盘后自动跑 · 买点回踩才成交 · 卖点=止损/止盈/到期</span>' +
-          (updatedAt ? '<span class="text-muted" style="font-size:11px;margin-left:auto">更新 ' + updatedAt + '</span>' : '') +
+          '<span class="text-muted" style="font-size:var(--fs-1)">每日 19:00 盘后自动跑 · 买点回踩才成交 · 卖点=止损/止盈/到期</span>' +
+          (updatedAt ? '<span class="text-muted" style="font-size:var(--fs-1);margin-left:auto">更新 ' + updatedAt + '</span>' : '') +
         '</div>';
 
     var totalAll = (st.holding || 0) + (st.closed || 0) + (st.watching || 0) + (st.expired || 0);
@@ -2235,7 +2235,7 @@ function renderSdTrack(items, st, updatedAt) {
             }).join(' / ');
         var waiting = st.watching || 0;
         box.innerHTML = head + stats +
-            '<div class="empty-state" style="padding:14px;font-size:12px">暂无「' + statusText + '」的跟踪记录<br>' +
+            '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">暂无「' + statusText + '」的跟踪记录<br>' +
             '<span style="color:var(--text-muted)">' +
             (waiting > 0 && _SD_TRACK_STATUS.indexOf('holding') >= 0
                 ? '当前 ' + waiting + ' 笔候选还在等回踩买点，成交后自动进入本列表'
@@ -2293,12 +2293,12 @@ function renderSdTrack(items, st, updatedAt) {
     if (_sdTrackTotal > items.length) {
         var nextN = Math.min(_SD_TRACK_PAGE, _sdTrackTotal - items.length);
         moreHtml = '<div style="text-align:center;padding:10px 0">' +
-            '<div class="text-muted" style="font-size:11px;margin-bottom:6px">已显示 ' +
+            '<div class="text-muted" style="font-size:var(--fs-1);margin-bottom:6px">已显示 ' +
             items.length + ' / 共 ' + _sdTrackTotal + ' 笔（按推荐日从新到旧）</div>' +
             '<button id="sdTrackMoreBtn" class="btn btn-sm" onclick="loadMoreSdTrack()">加载更多（+' + nextN + '）</button>' +
             '</div>';
     } else if (items.length > _SD_TRACK_PAGE) {
-        moreHtml = '<div class="text-muted" style="text-align:center;padding:8px 0;font-size:11px">已显示全部 ' +
+        moreHtml = '<div class="text-muted" style="text-align:center;padding:8px 0;font-size:var(--fs-1)">已显示全部 ' +
             items.length + ' 笔</div>';
     }
 
@@ -2326,13 +2326,13 @@ function refreshSdTrackFromInput() {
 var _bfPollKey = 'sd-track-bf-status';
 
 function _bfProgressHtml(pct, msg) {
-    return '<div class="empty-state" style="padding:18px;font-size:12px">' +
-        '<div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px">⏳ 正在回补历史扫描日…</div>' +
+    return '<div class="empty-state" style="padding:18px;font-size:var(--fs-2)">' +
+        '<div style="font-size:var(--fs-3);font-weight:600;color:var(--text-primary);margin-bottom:10px">⏳ 正在回补历史扫描日…</div>' +
         '<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:4px;height:8px;overflow:hidden;max-width:420px;margin:0 auto">' +
           '<div style="width:' + (pct || 0) + '%;height:100%;background:var(--accent);transition:width .3s"></div>' +
         '</div>' +
-        '<div style="font-size:11px;color:var(--text-muted);margin-top:8px">' + (msg || '') + '</div>' +
-        '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">每天扫描只用当天及之前的行情，无未来函数</div>' +
+        '<div style="font-size:var(--fs-1);color:var(--text-muted);margin-top:8px">' + (msg || '') + '</div>' +
+        '<div style="font-size:var(--fs-1);color:var(--text-muted);margin-top:2px">每天扫描只用当天及之前的行情，无未来函数</div>' +
         '</div>';
 }
 
@@ -2394,7 +2394,7 @@ async function refreshSdTrack(backfillDays) {
     var box = document.getElementById('sdTrackBox');
     var label = backfillDays ? ('回补最近 ' + backfillDays + ' 天') : '推进';
     try {
-        if (box) box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">⏳ 正在' + label + '…</div>';
+        if (box) box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">⏳ 正在' + label + '…</div>';
         var resp = await RequestManager.fetch('sd-track-refresh', API + '/investor/deep_track/refresh', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2491,7 +2491,7 @@ function triggerSdScan() {
           }, 3000);
       })
       .catch(function(e) {
-          box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:12px">启动失败：' + (e.message || e) + '</div>';
+          box.innerHTML = '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">启动失败：' + (e.message || e) + '</div>';
       });
 }
 
@@ -2499,7 +2499,7 @@ function renderStockDeep(data) {
     var box = _sdGetBody();
     if (!box) return;
     if (data && data.insufficient) {
-        box.innerHTML = '<div class="empty-state">该股历史数据不足，暂无法深度分析<br><span style="color:var(--text-muted);font-size:12px">' + (data.reason || '请先同步该股行情') + '</span></div>';
+        box.innerHTML = '<div class="empty-state">该股历史数据不足，暂无法深度分析<br><span style="color:var(--text-muted);font-size:var(--fs-2)">' + (data.reason || '请先同步该股行情') + '</span></div>';
         return;
     }
     var sig = data.signal || {};
@@ -2531,7 +2531,7 @@ function renderStockDeep(data) {
         </div>`;
     }).join('');
     var tlBlock = tls ? `<div class="sd-timeline">${tls}</div>` :
-        '<div class="empty-state" style="padding:14px;font-size:12px">暂无近期建议数据</div>';
+        '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">暂无近期建议数据</div>';
 
     // 节奏/量价统计
     var rhythmKv = [
@@ -2620,7 +2620,7 @@ function renderSdPositionStats(data) {
     if (!ps || !ps.summary) {
         return `<div class="sd-card">
             <h4>💼 持仓统计 · 建议回测</h4>
-            <div class="empty-state" style="padding:14px;font-size:12px">近期（近 ${(data.recent_advice||[]).length} 个交易日）暂无 buy/add 建议可回测</div>
+            <div class="empty-state" style="padding:14px;font-size:var(--fs-2)">近期（近 ${(data.recent_advice||[]).length} 个交易日）暂无 buy/add 建议可回测</div>
         </div>`;
     }
     var s = ps.summary || {};
@@ -2631,7 +2631,7 @@ function renderSdPositionStats(data) {
         return `<span class="${pctCls(v)}">${v >= 0 ? '+' : ''}${fmt(v, d == null ? 2 : d)}%</span>`;
     };
     var capNote = (s.max_hold_cap != null) ? ` · 最长持有 ${s.max_hold_cap} 个交易日` : '';
-    var basisNote = s.basis_pct ? `<span style="color:var(--text-muted);font-size:11px">（口径：${s.basis_pct}）</span>` : '';
+    var basisNote = s.basis_pct ? `<span style="color:var(--text-muted);font-size:var(--fs-1)">（口径：${s.basis_pct}）</span>` : '';
 
     // 指标卡
     var metricCells = [
@@ -2677,7 +2677,7 @@ function renderSdPositionStats(data) {
             <span>出场原因：${erHtml}</span>
         </div>
         <h4 style="margin-top:10px">🧾 每笔明细（近期 buy/add 建议 → 模拟持仓）</h4>
-        <div style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px">
+        <div style="max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:8px">
             <table class="sd-trade-table">
                 <thead><tr>
                     <th>信号日</th><th>买入价</th><th>买入日</th><th>出场日</th><th>出场价</th>
@@ -3160,7 +3160,7 @@ function renderExitRows(list, maxHold) {
 // 展开态内容：完整跟踪表（表头数量必须与 renderExitRows 的单元格数量一致 = 10）
 function renderExitGroupBody(list, perf) {
     if (!list.length) {
-        return '<div class="empty-state" style="padding:14px;font-size:12px">该周期暂无跟踪记录</div>';
+        return '<div class="empty-state" style="padding:14px;font-size:var(--fs-2)">该周期暂无跟踪记录</div>';
     }
     const maxHold = (perf || {}).max_hold;
     return `<div class="table-wrapper"><table class="exit-table"><thead><tr>
@@ -3187,8 +3187,8 @@ async function loadRuleSignals() {
         }
         if (!items.length) {
             box.innerHTML = excluded > 0
-                ? '<div class="empty-state">所有启用规则命中都过泛（单条规则命中超 ' + (data.max_hits || 200) + ' 只，无筛选价值），已全部隐藏<br><span style="color:var(--text-muted);font-size:12px">建议到「回测」收紧规则条件后重新保存</span></div>'
-                : '<div class="empty-state">暂无规则命中<br><span style="color:var(--text-muted);font-size:12px">先在「回测」将策略存为常驻规则，同步时自动扫描</span></div>';
+                ? '<div class="empty-state">所有启用规则命中都过泛（单条规则命中超 ' + (data.max_hits || 200) + ' 只，无筛选价值），已全部隐藏<br><span style="color:var(--text-muted);font-size:var(--fs-2)">建议到「回测」收紧规则条件后重新保存</span></div>'
+                : '<div class="empty-state">暂无规则命中<br><span style="color:var(--text-muted);font-size:var(--fs-2)">先在「回测」将策略存为常驻规则，同步时自动扫描</span></div>';
             return;
         }
         box.innerHTML = '<div class="rule-sig-list">' + items.map(it => {
@@ -3431,7 +3431,7 @@ function renderPickCard(it) {
                     ${entryHtml}
                     ${ppHtml}
                     <div class="action-foot">
-                        <div class="reasons">${reasons || '<span class="text-muted" style="font-size:11px">暂无明显信号</span>'}</div>
+                        <div class="reasons">${reasons || '<span class="text-muted" style="font-size:var(--fs-1)">暂无明显信号</span>'}</div>
                         <div class="reasons" style="margin-top:4px">${(it.weaknesses||[]).map(w => '<span class="reason-chip" style="background:rgba(255,100,100,0.08);color:var(--text-muted)">⚠ ' + w + '</span>').join('')}</div>
                         ${rrHtml}
                     </div>
@@ -3516,7 +3516,7 @@ function renderPositionAdvice(advice) {
         const src = det.stop_mode === 'atr' ? 'ATR动态' : '固定';
         stopTxt = ` · 止损 ${Number(det.stop_price).toFixed(2)}（${src}${pct ? ' ' + pct : ''}）`;
     }
-    return `<div style="padding:4px 10px;font-size:12px;color:${m.color};border-left:2px solid ${m.color};background:rgba(255,255,255,0.02);margin-top:2px">${m.icon} 诊断：${m.label}${reason}${stopTxt}</div>`;
+    return `<div style="padding:4px 10px;font-size:var(--fs-2);color:${m.color};border-left:2px solid ${m.color};background:rgba(255,255,255,0.02);margin-top:2px">${m.icon} 诊断：${m.label}${reason}${stopTxt}</div>`;
 }
 
 async function loadMyPositions() {
@@ -3529,12 +3529,12 @@ async function loadMyPositions() {
             const ha = (sr.data || {}).holdings_advice;
             if (ha && ha.count > 0 && ha.items && ha.items.length) {
                 const rows = ha.items.map(i =>
-                    `<div style="font-size:11px;color:var(--text-secondary);line-height:1.7">
+                    `<div style="font-size:var(--fs-1);color:var(--text-secondary);line-height:1.7">
                         ${i.status==='clear'?'🔴':(i.status==='reduce'?'🟠':'🟢')}
                         <b>${i.code}</b> ${i.name||''} — ${i.reason||''}
                      </div>`).join('');
                 adviceBanner = `<div style="margin-bottom:10px;padding:8px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:8px;background:rgba(255,255,255,0.02)">
-                    <div style="font-size:12px;font-weight:600;margin-bottom:4px">📋 同步后持仓建议（${ha.summary||''}）</div>${rows}</div>`;
+                    <div style="font-size:var(--fs-2);font-weight:600;margin-bottom:4px">📋 同步后持仓建议（${ha.summary||''}）</div>${rows}</div>`;
             }
         } catch(e) { /* 横幅获取失败不影响持仓列表 */ }
 
@@ -3545,7 +3545,7 @@ async function loadMyPositions() {
         const summary = d.summary || {};
 
         if (positions.length === 0) {
-            box.innerHTML = '<div class="empty-state">还没有添加持仓<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你已经买/想买的股票；添加后这里会自动给出盈亏和出场诊断</span><br><button class="btn btn-sm" style="margin-top:10px" onclick="showAddPositionDialog()">+ 添加第一笔持仓</button></div>';
+            box.innerHTML = '<div class="empty-state">还没有添加持仓<br><span style="color:var(--text-muted);font-size:var(--fs-2)">点 + 添加你已经买/想买的股票；添加后这里会自动给出盈亏和出场诊断</span><br><button class="btn btn-sm" style="margin-top:10px" onclick="showAddPositionDialog()">+ 添加第一笔持仓</button></div>';
             return;
         }
 
@@ -3638,7 +3638,7 @@ async function loadMyWatchlist() {
             {cacheTtl: RequestManager.CACHE_TTL});
         const items = resp.data || [];
         if (items.length === 0) {
-            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:12px">点 + 添加你想跟踪的股票，或直接从今日推荐开始</span><br><button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="addTopPicksToWatchlist()">⭐ 一键加入今日短线推荐前 3 名</button></div>';
+            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:var(--fs-2)">点 + 添加你想跟踪的股票，或直接从今日推荐开始</span><br><button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="addTopPicksToWatchlist()">⭐ 一键加入今日短线推荐前 3 名</button></div>';
             return;
         }
         box.innerHTML = items.map(w => {
@@ -3663,7 +3663,7 @@ async function loadMyWatchlist() {
                     (w.alert_dir === 'below' && w.latest_close <= w.target_price) ||
                     (w.alert_dir !== 'below' && w.latest_close >= w.target_price));
                 const tColor = hit ? 'var(--warning)' : 'var(--text-muted)';
-                targetHtml = `<div style="font-size:11px;color:${tColor}">${dirTxt} 目标 ${w.target_price}${distTxt}${hit?' · 已触达':''}</div>`;
+                targetHtml = `<div style="font-size:var(--fs-1);color:${tColor}">${dirTxt} 目标 ${w.target_price}${distTxt}${hit?' · 已触达':''}</div>`;
             }
             return `
             <div class="watch-row">
@@ -3743,7 +3743,7 @@ async function loadRecHistory() {
         if (updEl) updEl.textContent = '统计区间：近 ' + (d.days || REC_HISTORY_DAYS) + ' 天';
 
         if (!items || items.length === 0) {
-            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无历史推荐数据<br><span style="color:var(--text-muted);font-size:12px">先到首页点「立即重算打分」生成推荐</span></div>';
+            if (tableEl) tableEl.innerHTML = '<div class="empty-state">暂无历史推荐数据<br><span style="color:var(--text-muted);font-size:var(--fs-2)">先到首页点「立即重算打分」生成推荐</span></div>';
             return;
         }
 
@@ -3751,13 +3751,13 @@ async function loadRecHistory() {
         if (summaryEl && summary.total) {
             const tStat = (k, label) => {
                 const s = summary[k];
-                if (!s || !s.n) return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:26px">--</div><div class="lbl">${label} 胜率</div></div>`;
+                if (!s || !s.n) return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:var(--fs-6)">--</div><div class="lbl">${label} 胜率</div></div>`;
                 const color = s.win_rate >= 50 ? 'var(--green, #10b981)' : 'var(--danger)';
                 const avg = s.avg_return;
                 const avgHtml = avg != null
-                    ? `<div style="font-size:11px;margin-top:3px" class="${avg>=0?'idx-up':'idx-down'}">${label} 平均收益 ${avg>=0?'+':''}${avg}%</div>`
+                    ? `<div style="font-size:var(--fs-1);margin-top:3px" class="${avg>=0?'idx-up':'idx-down'}">${label} 平均收益 ${avg>=0?'+':''}${avg}%</div>`
                     : '';
-                return `<div class="metric-card"><div class="val" style="color:${color};font-size:26px">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span></div>${avgHtml}</div>`;
+                return `<div class="metric-card"><div class="val" style="color:${color};font-size:var(--fs-6)">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span></div>${avgHtml}</div>`;
             };
             const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
             const avgSign = summary.avg_return >= 0 ? '+' : '';
@@ -3786,8 +3786,8 @@ async function loadRecHistory() {
 
         // 明细表格（全量展示，滚动容器限高；连续推荐合并为一段，仅显示首次推荐日）
         if (tableEl) {
-            let html = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">共 ${items.length} 段连续推荐（按首次推荐日降序，连续推荐仅记首次）</div>`;
-            html += '<div class="table-wrapper" style="max-height:520px;overflow-y:auto;"><table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-card)"><tr>';
+            let html = `<div style="font-size:var(--fs-2);color:var(--text-muted);margin-bottom:6px;">共 ${items.length} 段连续推荐（按首次推荐日降序，连续推荐仅记首次）</div>`;
+            html += '<div class="table-wrapper" style="max-height:520px;overflow-y:auto;"><table><thead style="position:sticky;top:0;z-index:1;background:var(--bg-panel)"><tr>';
             html += '<th>代码</th><th>名称</th><th>首次推荐日</th><th>连续推荐</th><th>买入价</th><th>T+1</th><th>T+2</th><th>T+3</th><th>T+5</th><th>收益</th><th>状态</th>';
             html += '</tr></thead><tbody>';
             items.forEach(r => {
@@ -3855,7 +3855,7 @@ async function loadOptimizerPanel() {
         const params = d.params || {};
 
         if (!diag && suggestions.length === 0) {
-            box.innerHTML = '<div class="empty-state">暂无优化数据<br><span style="color:var(--text-muted);font-size:12px">数据同步完成后自动生成每日诊断，每周五盘后寻优</span></div>';
+            box.innerHTML = '<div class="empty-state">暂无优化数据<br><span style="color:var(--text-muted);font-size:var(--fs-2)">数据同步完成后自动生成每日诊断，每周五盘后寻优</span></div>';
             return;
         }
         if (updEl && diag) updEl.textContent = '诊断日期：' + (diag.report_date || '');
@@ -3877,7 +3877,7 @@ async function loadOptimizerPanel() {
         const findings = (diag && diag.findings) || [];
         if (findings.length) {
             html += '<div style="margin-bottom:12px">' + findings.map(f =>
-                `<div style="padding:8px 12px;margin-bottom:6px;background:rgba(255,171,64,0.06);border-left:3px solid var(--warning);border-radius:4px;font-size:13px">${f}</div>`
+                `<div style="padding:8px 12px;margin-bottom:6px;background:rgba(255,171,64,0.06);border-left:3px solid var(--warning);border-radius:4px;font-size:var(--fs-3)">${f}</div>`
             ).join('') + '</div>';
         }
         // ③ 待采纳建议（含回放前后对比）
@@ -3888,7 +3888,7 @@ async function loadOptimizerPanel() {
                 const b = (m.baseline || {}).all || {};
                 const c = (m.candidate || {}).all || {};
                 const cmp = (b.oc_win != null && c.oc_win != null)
-                    ? `<span class="text-muted" style="font-size:12px;margin-left:8px">OC胜率 ${b.oc_win}%→${c.oc_win}% · CC胜率 ${b.cc_win}%→${c.cc_win}%</span>` : '';
+                    ? `<span class="text-muted" style="font-size:var(--fs-2);margin-left:8px">OC胜率 ${b.oc_win}%→${c.oc_win}% · CC胜率 ${b.cc_win}%→${c.cc_win}%</span>` : '';
                 html += `<div style="padding:12px;margin-bottom:8px;background:rgba(var(--accent-rgb),0.05);border:1px solid var(--border);border-radius:6px">
                     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
                         <div><b>${optimizerParamLabel(sg.param_key)}</b>：
@@ -3899,11 +3899,11 @@ async function loadOptimizerPanel() {
                             <button class="btn btn-sm" onclick="dismissOptSuggestion(${sg.id})">忽略</button>
                         </div>
                     </div>
-                    <div class="text-muted" style="font-size:12px;margin-top:6px">${sg.reason || ''}</div>
+                    <div class="text-muted" style="font-size:var(--fs-2);margin-top:6px">${sg.reason || ''}</div>
                 </div>`;
             });
         } else {
-            html += '<div class="text-muted" style="font-size:12px;margin-bottom:8px">暂无待采纳建议（每周五盘后自动寻优，或点右上「立即寻优」）</div>';
+            html += '<div class="text-muted" style="font-size:var(--fs-2);margin-bottom:8px">暂无待采纳建议（每周五盘后自动寻优，或点右上「立即寻优」）</div>';
         }
         // ④ 当前生效的参数覆盖 + 一键回滚
         const overridden = Object.keys(params).filter(k => params[k].overridden);
@@ -3911,7 +3911,7 @@ async function loadOptimizerPanel() {
             html += '<div style="margin:8px 0;font-weight:600">当前生效的参数覆盖</div>';
             overridden.forEach(k => {
                 const p = params[k];
-                html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 12px;margin-bottom:4px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+                html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 12px;margin-bottom:4px;border:1px solid var(--border);border-radius:4px;font-size:var(--fs-3)">
                     <span>${p.label}：<span style="font-family:var(--font-mono);color:var(--accent)">${p.current}</span> <span class="text-muted">(默认 ${p.default})</span></span>
                     <button class="btn btn-sm" onclick="rollbackOptParam('${k}')">回滚</button>
                 </div>`;
@@ -3919,10 +3919,10 @@ async function loadOptimizerPanel() {
         }
         // ⑤ 调参历史（折叠，最近5条）
         if (history.length) {
-            html += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">调参历史（最近 ' + Math.min(history.length, 5) + ' 条）</summary>';
+            html += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:var(--fs-2);color:var(--text-muted)">调参历史（最近 ' + Math.min(history.length, 5) + ' 条）</summary>';
             history.slice(0, 5).forEach(h => {
                 const act = h.action === 'apply' ? '采纳' : '回滚';
-                html += `<div class="text-muted" style="font-size:12px;padding:4px 12px">${h.created_at} · ${optimizerParamLabel(h.param_key)} ${h.old_value != null ? h.old_value : '默认'} → ${h.new_value}（${act}）</div>`;
+                html += `<div class="text-muted" style="font-size:var(--fs-2);padding:4px 12px">${h.created_at} · ${optimizerParamLabel(h.param_key)} ${h.old_value != null ? h.old_value : '默认'} → ${h.new_value}（${act}）</div>`;
             });
             html += '</details>';
         }
@@ -3996,7 +3996,7 @@ async function showExplainDialog(key) {
         const d = resp.data || {};
         const html = `
             <div style="line-height:1.7">
-                <p style="color:var(--text-primary);font-size:15px">${d.title||key}</p>
+                <p style="color:var(--text-primary);font-size:var(--fs-3)">${d.title||key}</p>
                 <p style="color:var(--text-secondary)">${d.desc||''}</p>
                 <div style="margin-top:16px;padding:14px;background:rgba(var(--accent-rgb),0.06);border-left:3px solid var(--accent);border-radius:4px">
                     <b style="color:var(--accent)">说人话：</b><br>${d.for_dummies||''}
@@ -4016,11 +4016,11 @@ function showAddPositionDialog() {
             <div style="margin-bottom:10px"><label>股票代码 <input type="text" id="addPosCode" placeholder="如 002150" style="width:120px"></label></div>
             <div style="margin-bottom:10px"><label>持股数 <input type="number" id="addPosShares" placeholder="1000" style="width:120px"></label></div>
             <div style="margin-bottom:10px"><label>成本价 <input type="number" id="addPosCost" placeholder="29.72" step="0.01" style="width:120px"></label></div>
-            <div style="margin-bottom:10px"><label>止损价 <input type="number" id="addPosStop" placeholder="27.94" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:11px">可留空</span></div>
-            <div style="margin-bottom:10px"><label>止盈价 <input type="number" id="addPosTP" placeholder="35.66" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:11px">可留空</span></div>
+            <div style="margin-bottom:10px"><label>止损价 <input type="number" id="addPosStop" placeholder="27.94" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:var(--fs-1)">可留空</span></div>
+            <div style="margin-bottom:10px"><label>止盈价 <input type="number" id="addPosTP" placeholder="35.66" step="0.01" style="width:120px"></label> <span style="color:var(--text-muted);font-size:var(--fs-1)">可留空</span></div>
             <div style="margin-bottom:10px"><label>持仓周期 <select id="addPosHorizon" style="width:120px">
                 <option value="short">短线</option><option value="mid">中线</option><option value="long">长线</option>
-            </select></label> <span style="color:var(--text-muted);font-size:11px">决定出场诊断参数</span></div>
+            </select></label> <span style="color:var(--text-muted);font-size:var(--fs-1)">决定出场诊断参数</span></div>
             <div style="margin-bottom:10px"><label>备注 <input type="text" id="addPosNote" placeholder="例如：超跌反弹" style="width:240px"></label></div>
             <div style="margin-top:16px"><button class="btn btn-primary" onclick="submitAddPosition()">保存</button></div>
         </div>
@@ -4107,7 +4107,7 @@ async function deletePosition(pid) {
 function showReducePositionDialog(pid, shares, code, name) {
     const html = `
         <div style="line-height:1.7">
-            <div style="margin-bottom:8px;font-size:12px;color:var(--text-secondary)">${name}（${code}）· 当前持仓 <b style="color:var(--text-primary)">${shares}</b> 股</div>
+            <div style="margin-bottom:8px;font-size:var(--fs-2);color:var(--text-secondary)">${name}（${code}）· 当前持仓 <b style="color:var(--text-primary)">${shares}</b> 股</div>
             <div style="margin-bottom:10px"><label>减仓股数 <input type="number" id="sellShares" min="1" max="${shares}" placeholder="卖出股数" style="width:120px"></label></div>
             <div style="margin-bottom:10px"><label>减仓价 <input type="number" id="sellPrice" step="0.01" placeholder="卖出价格" style="width:120px"></label></div>
             <div style="margin-top:16px"><button class="btn btn-primary" onclick="submitSellPosition(${pid}, ${shares}, false)">确认减仓</button></div>
@@ -4118,7 +4118,7 @@ function showReducePositionDialog(pid, shares, code, name) {
 function showClosePositionDialog(pid, shares, code, name) {
     const html = `
         <div style="line-height:1.7">
-            <div style="margin-bottom:8px;font-size:12px;color:var(--text-secondary)">${name}（${code}）· 将全部卖出 <b style="color:var(--text-primary)">${shares}</b> 股</div>
+            <div style="margin-bottom:8px;font-size:var(--fs-2);color:var(--text-secondary)">${name}（${code}）· 将全部卖出 <b style="color:var(--text-primary)">${shares}</b> 股</div>
             <div style="margin-bottom:10px"><label>平仓价 <input type="number" id="sellPrice" step="0.01" placeholder="卖出价格" style="width:120px"></label></div>
             <div style="margin-top:16px"><button class="btn btn-danger" onclick="submitSellPosition(${pid}, ${shares}, true)">确认平仓</button></div>
         </div>`;
@@ -4139,7 +4139,7 @@ async function loadPositionHistory() {
         const s = d.summary || {};
 
         if (trades.length === 0) {
-            box.innerHTML = '<div class="empty-state">还没有卖出记录<br><span style="color:var(--text-muted);font-size:12px">减仓或平仓后，这里会按卖出价与成本价统计你的历史收益率</span></div>';
+            box.innerHTML = '<div class="empty-state">还没有卖出记录<br><span style="color:var(--text-muted);font-size:var(--fs-2)">减仓或平仓后，这里会按卖出价与成本价统计你的历史收益率</span></div>';
             return;
         }
 
@@ -4151,10 +4151,10 @@ async function loadPositionHistory() {
             <div class="ps-cell"><div class="ps-lbl">卖出笔数</div><div class="ps-val">${s.trade_count || 0}</div></div>
             <div class="ps-cell"><div class="ps-lbl">胜率</div><div class="ps-val">${s.win_rate || 0}%</div></div>
             <div class="ps-cell"><div class="ps-lbl">平均收益率</div><div class="ps-val ${(s.avg_pnl_pct || 0) >= 0 ? 'idx-up' : 'idx-down'}">${fmtSignedPct(s.avg_pnl_pct)}</div></div>
-            <div class="ps-cell"><div class="ps-lbl">最好 / 最差</div><div class="ps-val" style="font-size:13px"><span class="idx-up">${fmtSignedPct(s.best_pnl_pct)}</span> / <span class="idx-down">${fmtSignedPct(s.worst_pnl_pct)}</span></div></div>
+            <div class="ps-cell"><div class="ps-lbl">最好 / 最差</div><div class="ps-val" style="font-size:var(--fs-3)"><span class="idx-up">${fmtSignedPct(s.best_pnl_pct)}</span> / <span class="idx-down">${fmtSignedPct(s.worst_pnl_pct)}</span></div></div>
         </div>`;
 
-        html += `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+        html += `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:var(--fs-2)">
             <thead><tr style="color:var(--text-muted);text-align:left;border-bottom:1px solid var(--border)">
                 <th style="padding:6px 8px">时间</th>
                 <th style="padding:6px 8px">股票</th>
@@ -4600,9 +4600,9 @@ function showModal(title, bodyHtml, width) {
     const boxStyle = width
         ? `width:${width};min-width:0;max-width:90vw;max-height:80vh;overflow:auto;`
         : 'max-width:90vw;max-height:80vh;overflow:auto;';
-    modal.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border-glow);box-shadow:var(--shadow-hover);border-radius:8px;padding:24px;${boxStyle}">
+    modal.innerHTML = `<div style="background:var(--bg-elevated);border:1px solid var(--border-glow);box-shadow:var(--shadow-hover);border-radius:8px;padding:24px;${boxStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-            <h3 style="margin:0;color:var(--text);">${title}</h3>
+            <h3 style="margin:0;color:var(--text-primary);">${title}</h3>
             <button class="btn btn-danger btn-sm" onclick="closeModal()">关闭</button>
         </div>${bodyHtml}</div>`;
     modal.style.display = 'flex';
@@ -5148,11 +5148,11 @@ async function openKline(code, entryDate, entryPrice, exitDate, exitPrice, resul
 
     let infoHtml = `<h4 style="font-family:var(--font-mono);margin-bottom:8px;color:var(--text-primary)">${code}</h4>`;
     if (entryDate && entryPrice) {
-        infoHtml += `<p style="font-size:12px;color:var(--text-secondary)">买入: ${entryDate} 价格: ${entryPrice}</p>`;
+        infoHtml += `<p style="font-size:var(--fs-2);color:var(--text-secondary)">买入: ${entryDate} 价格: ${entryPrice}</p>`;
         if (exitDate && exitPrice && entryPrice > 0) {
             const pnl = ((exitPrice/entryPrice - 1)*100).toFixed(2);
             const cls = parseFloat(pnl) >= 0 ? 'positive' : 'negative';
-            infoHtml += `<p style="font-size:12px;color:var(--text-secondary)">卖出: ${exitDate} 价格: ${exitPrice} 收益: <span class="${cls}">${pnl}%</span></p>`;
+            infoHtml += `<p style="font-size:var(--fs-2);color:var(--text-secondary)">卖出: ${exitDate} 价格: ${exitPrice} 收益: <span class="${cls}">${pnl}%</span></p>`;
         }
     }
     document.getElementById('klineTradeInfo').innerHTML = infoHtml;
@@ -5195,49 +5195,49 @@ loadTab('home');
 async function loadMaintenanceTab(c) {
     c.innerHTML = `
     <div class="page" style="padding:20px;">
-        <h2 style="margin:0 0 20px 0; font-size:18px;">系统维护 · 数据修正</h2>
+        <h2 style="margin:0 0 20px 0; font-size:var(--fs-4);">系统维护 · 数据修正</h2>
         
         <!-- 全量历史修正 -->
-        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:20px; margin-bottom:20px;">
-            <h3 style="margin:0 0 16px 0; font-size:16px; color:var(--text-primary);">全量历史数据修正</h3>
-            <p style="color:var(--text-secondary); font-size:13px; margin:0 0 16px 0; line-height:1.6;">
+        <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:20px; margin-bottom:20px;">
+            <h3 style="margin:0 0 16px 0; font-size:var(--fs-4); color:var(--text-primary);">全量历史数据修正</h3>
+            <p style="color:var(--text-secondary); font-size:var(--fs-3); margin:0 0 16px 0; line-height:1.6;">
                 从东方财富和腾讯双数据源重新拉取全量历史K线数据，检测并修正确价格偏差、成交量缺失、OHLC关系错误等问题。<br>
                 <strong>耗时预估：</strong>5000+只股票约需2-3小时（2线程，1秒限速）。
             </p>
             
             <!-- 定时任务设置 -->
             <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:16px; margin-bottom:16px;">
-                <h4 style="margin:0 0 12px 0; font-size:14px; color:var(--text-primary);">定时任务设置</h4>
+                <h4 style="margin:0 0 12px 0; font-size:var(--fs-3); color:var(--text-primary);">定时任务设置</h4>
                 <div style="display:flex; gap:12px; align-items:end; margin-bottom:12px;">
                     <div style="flex:1;">
-                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">执行时间</label>
+                        <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">执行时间</label>
                         <input type="time" id="scheduleTime" value="10:00" 
-                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
                     </div>
                     <div style="flex:1;">
-                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">数据源</label>
-                        <select id="scheduleSource" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                        <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">数据源</label>
+                        <select id="scheduleSource" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
                             <option value="tx">腾讯 (稳定)</option>
                             <option value="em">东方财富 (偶尔反爬)</option>
                             <option value="both">双源交叉验证</option>
                         </select>
                     </div>
                     <div style="flex:1;">
-                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">并发数</label>
+                        <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">并发数</label>
                         <input type="number" id="scheduleThreads" value="2" min="1" max="8"
-                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
                     </div>
                     <div style="flex:1;">
-                        <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">限速 (秒/只)</label>
+                        <label style="display:block; font-size:var(--fs-2); color:var(--text-secondary); margin-bottom:4px;">限速 (秒/只)</label>
                         <input type="number" id="scheduleRateLimit" value="1.0" min="0.1" max="10" step="0.1"
-                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-base); color:var(--text-primary);">
+                               style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--bg-root); color:var(--text-primary);">
                     </div>
                 </div>
                 <div style="display:flex; gap:8px;">
                     <button onclick="scheduleFixHistory()" style="flex:1; padding:10px; background:var(--accent); color:white; border:none; border-radius:4px; cursor:pointer; font-weight:500;">
                         添加定时任务
                     </button>
-                    <button onclick="loadScheduledJobs()" style="padding:10px 16px; background:var(--bg-base); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
+                    <button onclick="loadScheduledJobs()" style="padding:10px 16px; background:var(--bg-root); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
                         刷新列表
                     </button>
                 </div>
@@ -5245,14 +5245,14 @@ async function loadMaintenanceTab(c) {
             
             <!-- 定时任务列表 -->
             <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:16px; margin-bottom:16px;">
-                <h4 style="margin:0 0 12px 0; font-size:14px; color:var(--text-primary);">定时任务列表</h4>
-                <div id="scheduledJobsList" style="color:var(--text-secondary); font-size:13px;">加载中...</div>
+                <h4 style="margin:0 0 12px 0; font-size:var(--fs-3); color:var(--text-primary);">定时任务列表</h4>
+                <div id="scheduledJobsList" style="color:var(--text-secondary); font-size:var(--fs-3);">加载中...</div>
             </div>
             
             <!-- 立即执行 -->
             <div style="background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:16px;">
-                <h4 style="margin:0 0 12px 0; font-size:14px; color:var(--text-primary);">立即执行</h4>
-                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px 0;">
+                <h4 style="margin:0 0 12px 0; font-size:var(--fs-3); color:var(--text-primary);">立即执行</h4>
+                <p style="color:var(--text-secondary); font-size:var(--fs-2); margin:0 0 12px 0;">
                     立即启动全量历史修正（不定时），任务将在后台运行。
                 </p>
                 <div style="display:flex; gap:8px;">
@@ -5267,9 +5267,9 @@ async function loadMaintenanceTab(c) {
         </div>
         
         <!-- 任务进度 -->
-        <div id="fixHistoryProgress" style="background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:20px; display:none;">
-            <h3 style="margin:0 0 12px 0; font-size:16px; color:var(--text-primary);">任务进度</h3>
-            <div id="fixHistoryProgressContent" style="color:var(--text-secondary); font-size:13px;"></div>
+        <div id="fixHistoryProgress" style="background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:20px; display:none;">
+            <h3 style="margin:0 0 12px 0; font-size:var(--fs-4); color:var(--text-primary);">任务进度</h3>
+            <div id="fixHistoryProgressContent" style="color:var(--text-secondary); font-size:var(--fs-3);"></div>
         </div>
     </div>
     `;
@@ -5315,22 +5315,22 @@ async function loadScheduledJobs() {
         }
         
         container.innerHTML = jobs.map(job => `
-            <div style="background:var(--bg-base); border:1px solid var(--border); border-radius:4px; padding:12px; margin-bottom:8px;">
+            <div style="background:var(--bg-root); border:1px solid var(--border); border-radius:4px; padding:12px; margin-bottom:8px;">
                 <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:8px;">
                     <div>
-                        <div style="font-size:14px; font-weight:500; color:var(--text-primary);">每天 ${job.time}</div>
-                        <div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">
+                        <div style="font-size:var(--fs-3); font-weight:500; color:var(--text-primary);">每天 ${job.time}</div>
+                        <div style="font-size:var(--fs-2); color:var(--text-secondary); margin-top:4px;">
                             数据源: ${job.source === 'tx' ? '腾讯' : job.source === 'em' ? '东方财富' : '双源交叉'} · 
                             并发: ${job.threads} · 限速: ${job.rate_limit}s
                         </div>
                     </div>
                     <button onclick="cancelScheduledJob('${job.id}')" 
-                            style="padding:4px 8px; background:var(--danger); color:white; border:none; border-radius:3px; cursor:pointer; font-size:11px;">
+                            style="padding:4px 8px; background:var(--danger); color:white; border:none; border-radius:3px; cursor:pointer; font-size:var(--fs-1);">
                         取消
                     </button>
                 </div>
                 ${job.last_run ? `
-                    <div style="font-size:11px; color:var(--text-muted); border-top:1px solid var(--border); padding-top:8px; margin-top:8px;">
+                    <div style="font-size:var(--fs-1); color:var(--text-muted); border-top:1px solid var(--border); padding-top:8px; margin-top:8px;">
                         上次执行: ${job.last_run} · 
                         状态: <span style="color:${job.last_status === 'success' ? 'var(--success)' : 'var(--danger)'}">${job.last_status === 'success' ? '成功' : '失败'}</span>
                         ${job.last_error ? `<br>错误: ${job.last_error}` : ''}
