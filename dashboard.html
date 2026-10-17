@@ -119,6 +119,8 @@
         .sd-track-stat.active .lbl{color:var(--accent)}
         .sd-track-stat .lbl{font-size:var(--fs-1);color:var(--text-muted);letter-spacing:.03em}
         .sd-track-stat .val{font-size:var(--fs-3);font-weight:600;color:var(--text-primary);font-family:var(--font-mono);margin-top:1px}
+        .sd-track-stat.primary{min-width:112px}
+        .sd-track-stat.primary .val{font-size:var(--fs-5)}
         .sd-track-stat .val.pos{color:var(--positive)}
         .sd-track-stat .val.neg{color:var(--negative)}
         .sd-track-table .num{font-family:var(--font-mono)}
@@ -296,6 +298,11 @@ var Toast = {
 };
 
 function showToast(message, type) { Toast.show(message, type); }
+
+// ─── 面板失败重试态（spec §6）：重试=重调本面板 load 函数，不触发全站同步 ───
+function panelError(fnName) {
+    return '<div class="panel-error">加载失败 <button class="btn btn-sm" onclick="' + fnName + '()">重试</button></div>';
+}
 
 // ─── Skeleton loading ───
 function showSkeleton(container, rowCount) {
@@ -619,7 +626,7 @@ async function loadHomeTab(container) {
                 <h3>市场速览</h3>
                 <span class="text-muted" id="marketUpdatedAt" style="font-size:var(--fs-2)"></span>
             </div>
-            <div id="indexCards" class="index-grid">加载中…</div>
+            <div id="indexCards" class="index-grid"><div class="skeleton-stack"><i></i><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="panelToday">
@@ -629,7 +636,7 @@ async function loadHomeTab(container) {
                 <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:var(--fs-2);padding:2px 6px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
                 <span class="text-muted" style="font-size:var(--fs-2)" title="基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）">默认简略 · 点「详情」展开 ⓘ</span>
             </div>
-            <div id="todayPicks" class="action-plan-grid">加载中…</div>
+            <div id="todayPicks" class="action-plan-grid"><div class="skeleton-stack"><i></i><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="stockDeepPanel">
@@ -648,10 +655,10 @@ async function loadHomeTab(container) {
                 </div>
                 <button class="btn btn-primary btn-sm" onclick="loadSdMarket()" title="在今日推荐+自选+持仓候选池上跑深析信号，筛出明日可推荐买入的股票">明日候选</button>
             </div>
-            <div id="sdChips" class="sd-chips">加载中…</div>
+            <div id="sdChips" class="sd-chips"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
             <div id="sdMarketBox"></div>
             <div id="sdTrackBox"></div>
-            <div id="stockDeepContent">加载中…</div>
+            <div id="stockDeepContent"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="panelReversal">
@@ -659,7 +666,7 @@ async function loadHomeTab(container) {
                 <h3>反转首日观察 · 首次站上 MA20 的低位入场</h3>
                 <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint" title="⚠ 观察池：只标「首破 MA20 那天」的位置，非买入推荐；出场纪律对本线为负贡献，勿机械套用止损/止盈">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池 ⓘ</span>
             </div>
-            <div id="reversalPicks" class="action-plan-grid">加载中…</div>
+            <div id="reversalPicks" class="action-plan-grid"><div class="skeleton-stack"><i></i><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="panelJgTrack">
@@ -688,7 +695,7 @@ async function loadHomeTab(container) {
                 <span class="panel-note" style="margin-left:auto;margin-top:0">成本 = 按机构净买额加权的上榜日收盘价（估算）</span>
             </div>
             <div id="jgTrackMetrics" class="metrics-row" style="margin-bottom:10px"></div>
-            <div id="jgTrackTable">加载中…</div>
+            <div id="jgTrackTable"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="grid-2col" id="panelMyBook">
@@ -697,7 +704,7 @@ async function loadHomeTab(container) {
                     <h3>我的持仓</h3>
                     <button class="btn btn-primary btn-sm" onclick="showAddPositionDialog()">+ 添加</button>
                 </div>
-                <div id="myPositions">加载中…</div>
+                <div id="myPositions"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
             </div>
 
             <div class="panel">
@@ -705,7 +712,7 @@ async function loadHomeTab(container) {
                     <h3>我的自选</h3>
                     <button class="btn btn-sm" onclick="showAddWatchlistDialog()">+ 添加</button>
                 </div>
-                <div id="myWatchlist">加载中…</div>
+                <div id="myWatchlist"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
             </div>
         </div>
 
@@ -714,7 +721,7 @@ async function loadHomeTab(container) {
                 <h3>历史持仓收益 · 已实现盈亏统计</h3>
                 <span class="text-muted" style="font-size:var(--fs-2)">减仓 / 平仓时按卖出价与成本价计算收益率，逐笔留存</span>
             </div>
-            <div id="positionHistory">加载中…</div>
+            <div id="positionHistory"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="panelRecHistory">
@@ -723,7 +730,7 @@ async function loadHomeTab(container) {
                 <span class="text-muted" style="font-size:var(--fs-2)" id="recHistoryUpdatedAt"></span>
             </div>
             <div id="recHistorySummary"></div>
-            <div id="recHistoryTable">加载中…</div>
+            <div id="recHistoryTable"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="panelOptimizer">
@@ -732,7 +739,7 @@ async function loadHomeTab(container) {
                 <button class="btn btn-sm" onclick="runOptimizerNow()">立即寻优</button>
                 <span class="text-muted" style="font-size:var(--fs-2)" id="optimizerUpdatedAt">同步后自动诊断，每周五盘后寻优，建议需人工采纳</span>
             </div>
-            <div id="optimizerPanel">加载中…</div>
+            <div id="optimizerPanel"><div class="skeleton-stack"><i></i><i></i><i></i></div></div>
         </div>
 
         <div class="panel" id="panelExplainer">
@@ -1049,7 +1056,7 @@ async function loadTodayPicks(isFallback) {
             HORIZON_GROUPS.forEach(g => renderPickExitEmbed(g.key, window._exitTrackData));
         } catch (e) { /* 出场跟踪嵌入失败不阻断推荐展示 */ }
     } catch(e) {
-        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+        if (box) box.innerHTML = panelError('loadTodayPicks');
     }
 }
 
@@ -1302,7 +1309,7 @@ async function loadJgTrack() {
     const days = (document.getElementById('jgDays') || {}).value || 20;
     const minCnt = (document.getElementById('jgMinCnt') || {}).value || 2;
     const sort = (document.getElementById('jgSort') || {}).value || 'cum_ratio';
-    box.innerHTML = '<div class="text-muted" style="font-size:var(--fs-3)">加载中…</div>';
+    box.innerHTML = '<div class="skeleton-stack"><i></i><i></i><i></i></div>';
     try {
         const resp = await RequestManager.fetch(
             'jg-track',
@@ -1321,7 +1328,7 @@ async function loadJgTrack() {
         }
         box.innerHTML = renderJgTable(items);
     } catch (e) {
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
+        box.innerHTML = panelError('loadJgTrack');
     }
 }
 
@@ -1336,12 +1343,12 @@ function _jgFmtAmt(v) {
 function renderJgMetrics(d) {
     const el = document.getElementById('jgTrackMetrics');
     if (!el) return;
-    const card = (val, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${val}</div><div class="lbl">${lbl}</div></div>`;
+    const card = (val, lbl, cls, tip, tier) =>
+        `<div class="metric-card ${tier || 'secondary'}"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}">${val}</div><div class="lbl">${lbl}</div></div>`;
     el.innerHTML =
         card(d.count || 0, `命中（机构净买≥${d.min_cnt || 2}次）`) +
         card(d.above_cost || 0, '现价高于机构成本', '', '机构浮盈') +
-        card(d.below_cost || 0, '现价低于机构成本', '', '机构浮亏：已跌破机构建仓成本区 —— 风险提示，不是买点') +
+        card(d.below_cost || 0, '现价低于机构成本', '', '机构浮亏：已跌破机构建仓成本区 —— 风险提示，不是买点', 'primary') +
         card(d.skipped_no_price || 0, '无行情未纳入', '', '科创板(688)/北交所(920)未接入本地行情');
 }
 
@@ -1430,14 +1437,14 @@ async function loadReversalPicks() {
         box.innerHTML = html;
         _hydrateRevHist();   // 面板重绘后把展开态的历史表现列表灌回去
     } catch (e) {
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
+        box.innerHTML = panelError('loadReversalPicks');
     }
 }
 
 // 反转首日 · 诚实统计条 + 免责横幅（成绩单不随当日有无信号消失）
 function renderReversalStats(s, enabled) {
-    const numCard = (val, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${val}</div><div class="lbl">${lbl}</div></div>`;
+    const numCard = (val, lbl, cls, tip, tier) =>
+        `<div class="metric-card ${tier || 'secondary'}"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}">${val}</div><div class="lbl">${lbl}</div></div>`;
     const by = s.excess_by_year || {};
     const bySeq = ['2024', '2025', '2026']
         .map(y => by[y] != null ? (by[y] >= 0 ? '+' : '') + by[y] : null)
@@ -1478,8 +1485,8 @@ function renderReversalStats(s, enabled) {
                 ${numCard(s.per_day != null ? s.per_day : '--', '日均信号', '', '本线是「广撒网」型：日均近 30 只，需自行精选')}
                 ${numCard(s.oc1_mean != null ? exHtml(s.oc1_mean) + '%' : '--', '原始 T+1 收益', nCls, '信号日收盘→次日开盘买→次日收盘卖 的均值')}
                 ${numCard(s.win_rate != null ? s.win_rate + '%' : '--', 'T+1 胜率 ' + wrBadge, '', '未达报告 §6C 的 52% 门槛 ⇒ 只能当观察池')}
-                ${numCard(s.excess_pp != null ? exHtml(s.excess_pp) + 'pp' : '--', '市场中性超额', exCls, '剔除当日全市场同口径后的超额收益（含系统性普涨）')}
-                ${numCard(s.t != null ? exHtml(s.t) : '--', '超额 t 值', exCls, '分年：' + byTxt)}
+                ${numCard(s.excess_pp != null ? exHtml(s.excess_pp) + 'pp' : '--', '市场中性超额', exCls, '剔除当日全市场同口径后的超额收益（含系统性普涨）', 'primary')}
+                ${numCard(s.t != null ? exHtml(s.t) : '--', '超额 t 值', exCls, '分年：' + byTxt, 'primary')}
             </div>
         </div>`;
 }
@@ -1501,8 +1508,8 @@ function renderReversalTracked(t) {
             </div>
         </div>`;
     }
-    const num = (v, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${v}</div><div class="lbl">${lbl}</div></div>`;
+    const num = (v, lbl, cls, tip, tier) =>
+        `<div class="metric-card ${tier || 'secondary'}"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}">${v}</div><div class="lbl">${lbl}</div></div>`;
     const wr = t.win_rate, avg = t.avg_return, pf = t.profit_factor, t1 = t.t1 || {};
     // R2：胜率数字中性，达标与否进徽标；平均收益是涨跌语义保留 R1
     const wrBadge = wr == null ? '' : (wr >= 50
@@ -1518,8 +1525,8 @@ function renderReversalTracked(t) {
             </div>
             <div class="metrics-row">
                 ${num(t.total, '跟踪样本')}
-                ${num(wr != null ? wr + '%' : '--', '结算胜率 ' + wrBadge)}
-                ${num(avg != null ? exHtml(avg) + '%' : '--', '平均收益', avgCls)}
+                ${num(wr != null ? wr + '%' : '--', '结算胜率 ' + wrBadge, '', null, 'primary')}
+                ${num(avg != null ? exHtml(avg) + '%' : '--', '平均收益', avgCls, null, 'primary')}
                 ${num(pf != null ? pf.toFixed(2) : '--', '盈亏比')}
                 ${num(t1.win_rate != null ? t1.win_rate + '%' : '--', 'T+1 胜率')}
                 ${num(t.stop_loss_count || 0, '触发止损 <span class="badge badge-bad">亏损离场</span>')}
@@ -1618,7 +1625,7 @@ async function loadReversalHistory() {
     _syncRevHistBtn();
     // 显形由本函数负责：shell 渲染出的容器恒为 display:none
     box.style.display = _revHist.open ? '' : 'none';
-    box.innerHTML = '<div class="text-muted" style="font-size:var(--fs-2);padding:8px 0">加载中…</div>';
+    box.innerHTML = '<div class="skeleton-stack"><i></i><i></i></div>';
     try {
         // key 按窗口区分：RequestManager 会 cancel 同 key 的在途请求，
         // 用同一个 key 切窗口会互相打断
@@ -1633,7 +1640,7 @@ async function loadReversalHistory() {
     } catch (e) {
         _revHist.loading = false;
         _syncRevHistBtn();
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
+        box.innerHTML = panelError('loadReversalHistory');
     }
 }
 
@@ -1663,8 +1670,8 @@ function renderReversalHistory(d) {
     const pct = v => (v != null
         ? `<span class="${v >= 0 ? 'positive' : 'negative'}">${v >= 0 ? '+' : ''}${Number(v).toFixed(2)}%</span>`
         : '--');
-    const card = (val, lbl, cls, tip) =>
-        `<div class="metric-card"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}" style="font-size:var(--fs-5)">${val}</div><div class="lbl">${lbl}</div></div>`;
+    const card = (val, lbl, cls, tip, tier) =>
+        `<div class="metric-card ${tier || 'secondary'}"${tip ? ` title="${tip}"` : ''}><div class="val ${cls || ''}">${val}</div><div class="lbl">${lbl}</div></div>`;
 
     // 已结算 = 有出场原因的行（未结算仍列出但标「持仓中」，不进胜率 —— 与后端一致）
     const settled = (d.exit_breakdown || [])
@@ -1715,8 +1722,8 @@ function renderReversalHistory(d) {
         <div class="metrics-row" style="margin-bottom:10px">
             ${card(d.total, '跟踪样本', '', '近 ' + d.days + ' 天全部复盘记录（含未结算）')}
             ${card(settled, '已结算', '', '已触发出场的原因行；未结算不计入胜率')}
-            ${card(s.win_rate != null ? s.win_rate + '%' : '--', '结算胜率 ' + wrBadge, '', '仅有效已出场收益，>0 记胜；不以 T+n 补齐未结算交易')}
-            ${card(s.avg_return != null ? (s.avg_return >= 0 ? '+' : '') + s.avg_return + '%' : '--', '平均收益', avgCls)}
+            ${card(s.win_rate != null ? s.win_rate + '%' : '--', '结算胜率 ' + wrBadge, '', '仅有效已出场收益，>0 记胜；不以 T+n 补齐未结算交易', 'primary')}
+            ${card(s.avg_return != null ? (s.avg_return >= 0 ? '+' : '') + s.avg_return + '%' : '--', '平均收益', avgCls, null, 'primary')}
             ${card(s.profit_factor != null ? Number(s.profit_factor).toFixed(2) : '--', 'Profit factor', '', '总盈利 / 总亏损绝对值；无亏损样本时未知')}
             ${card(s.best_return != null ? '+' + s.best_return + '%' : '--', '最佳', 'positive')}
             ${card(s.worst_return != null ? s.worst_return + '%' : '--', '最差', 'negative')}
@@ -2244,14 +2251,14 @@ function renderSdTrack(items, st, updatedAt) {
     var box = document.getElementById('sdTrackBox');
     if (!box) return;
     var p = st.params || {};
-    var stat = function(lbl, val, cls, key) {
+    var stat = function(lbl, val, cls, key, tier) {
         var isActive = key && (
             (key === 'all' && _SD_TRACK_STATUS === _SD_TRACK_STATUS_ALL) ||
             (key !== 'all' && _SD_TRACK_STATUS === key)
         );
         var active = isActive ? ' active' : '';
         var click = key ? ' onclick="setSdTrackFilter(\'' + key + '\')"' : '';
-        return '<div class="sd-track-stat' + (key ? ' clickable' : '') + active + '"' + click + '>' +
+        return '<div class="sd-track-stat' + (tier === 'primary' ? ' primary' : '') + (key ? ' clickable' : '') + active + '"' + click + '>' +
                '<div class="lbl">' + lbl + '</div>' +
                '<div class="val ' + (cls || '') + '">' + val + '</div></div>';
     };
@@ -2277,10 +2284,10 @@ function renderSdTrack(items, st, updatedAt) {
         '<div class="sd-track-stats">' +
           stat('全部', totalAll + ' 笔', '', 'all') +
           stat('已平仓', (st.total_closed || 0) + ' 笔', '', 'closed') +
-          stat('胜率', st.win_rate == null ? '--' : st.win_rate + '%', '') +
+          stat('胜率', st.win_rate == null ? '--' : st.win_rate + '%', '', null, 'primary') +
           stat('平均持仓', st.avg_hold_tdays == null ? '--' : st.avg_hold_tdays + ' 日') +
-          stat('平均收益', _sdPct(st.avg_return), _sdPctCls(st.avg_return)) +
-          stat('盈亏比', st.profit_factor == null ? '--' : st.profit_factor) +
+          stat('平均收益', _sdPct(st.avg_return), _sdPctCls(st.avg_return), null, 'primary') +
+          stat('盈亏比', st.profit_factor == null ? '--' : st.profit_factor, '', null, 'primary') +
           /* 「累计收益 = Σ单笔收益率」2026-09-11 移除：单笔百分比相加无资金含义（610 单会累出巨大数字），
              与左侧「平均收益」表达同一批数据；要看资金曲线请用带复利的等权口径 */
           stat('持仓中', (st.holding || 0) + ' 笔', '', 'holding') +
@@ -3265,7 +3272,7 @@ async function loadRuleSignals() {
             </div>`;
         }).join('') + '</div>';
     } catch(e) {
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
+        box.innerHTML = panelError('loadRuleSignals');
     }
 }
 
@@ -3650,7 +3657,7 @@ async function loadMyPositions() {
         box.innerHTML = html;
         fillSparklines(positions.map(p => p.code), 7, 'spark-p-');
     } catch(e) {
-        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+        if (box) box.innerHTML = panelError('loadMyPositions');
     }
 }
 
@@ -3742,7 +3749,7 @@ async function loadMyWatchlist() {
         }).join('');
         fillSparklines(items.map(w => w.code), 7, 'spark-w-');
     } catch(e) {
-        if (box) box.innerHTML = '<div class="empty-state">加载失败</div>';
+        if (box) box.innerHTML = panelError('loadMyWatchlist');
     }
 }
 
@@ -3805,7 +3812,7 @@ async function loadRecHistory() {
         if (summaryEl && summary.total) {
             const tStat = (k, label) => {
                 const s = summary[k];
-                if (!s || !s.n) return `<div class="metric-card"><div class="val" style="color:var(--text-muted);font-size:var(--fs-6)">--</div><div class="lbl">${label} 胜率</div></div>`;
+                if (!s || !s.n) return `<div class="metric-card secondary"><div class="val" style="color:var(--text-muted)">--</div><div class="lbl">${label} 胜率</div></div>`;
                 // R2：胜率是质量判断，数字保持中性色，好坏只进徽标
                 const badge = s.win_rate >= 50
                     ? '<span class="badge badge-good">达标</span>'
@@ -3814,7 +3821,7 @@ async function loadRecHistory() {
                 const avgHtml = avg != null
                     ? `<div style="font-size:var(--fs-1);margin-top:3px" class="${avg>=0?'idx-up':'idx-down'}">${label} 平均收益 ${avg>=0?'+':''}${avg}%</div>`
                     : '';
-                return `<div class="metric-card"><div class="val" style="color:var(--text-primary);font-size:var(--fs-6)">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span> ${badge}</div>${avgHtml}</div>`;
+                return `<div class="metric-card secondary"><div class="val" style="color:var(--text-primary)">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span> ${badge}</div>${avgHtml}</div>`;
             };
             const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
             const avgSign = summary.avg_return >= 0 ? '+' : '';
@@ -3829,14 +3836,14 @@ async function loadRecHistory() {
                     ${tStat('t5', 'T+5')}
                 </div>
                 <div class="metrics-row" style="margin-bottom:12px">
-                    <div class="metric-card"><div class="val">${summary.total}</div><div class="lbl">连续推荐段数</div></div>
-                    <div class="metric-card"><div class="val" style="color:var(--text-primary)">${summary.win_rate}%</div><div class="lbl">最终胜率 ${summary.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
-                    <div class="metric-card"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
-                    <div class="metric-card"><div class="val">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
-                    <div class="metric-card"><div class="val ${bestCls}">+${summary.best_return}%</div><div class="lbl">最佳</div></div>
-                    <div class="metric-card"><div class="val ${worstCls}">${summary.worst_return}%</div><div class="lbl">最差</div></div>
-                    <div class="metric-card"><div class="val">${summary.stop_loss_count||0}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
-                    <div class="metric-card"><div class="val">${summary.take_profit_count||0}</div><div class="lbl">触发止盈 <span class="badge badge-good">盈利离场</span></div></div>
+                    <div class="metric-card secondary"><div class="val">${summary.total}</div><div class="lbl">连续推荐段数</div></div>
+                    <div class="metric-card primary"><div class="val" style="color:var(--text-primary)">${summary.win_rate}%</div><div class="lbl">最终胜率 ${summary.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
+                    <div class="metric-card primary"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
+                    <div class="metric-card primary"><div class="val">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
+                    <div class="metric-card secondary"><div class="val ${bestCls}">+${summary.best_return}%</div><div class="lbl">最佳</div></div>
+                    <div class="metric-card secondary"><div class="val ${worstCls}">${summary.worst_return}%</div><div class="lbl">最差</div></div>
+                    <div class="metric-card secondary"><div class="val">${summary.stop_loss_count||0}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
+                    <div class="metric-card secondary"><div class="val">${summary.take_profit_count||0}</div><div class="lbl">触发止盈 <span class="badge badge-good">盈利离场</span></div></div>
                 </div>`;
         }
 
@@ -3876,7 +3883,7 @@ async function loadRecHistory() {
             tableEl.innerHTML = html;
         }
     } catch(e) {
-        if (tableEl) tableEl.innerHTML = '<div class="empty-state">加载失败</div>';
+        if (tableEl) tableEl.innerHTML = panelError('loadRecHistory');
     }
 }
 
@@ -3921,11 +3928,11 @@ async function loadOptimizerPanel() {
         const s = diag && diag.summary && diag.summary.short;
         if (s) {
             html += `<div class="metrics-row" style="margin-bottom:12px">
-                <div class="metric-card"><div class="val">${s.total}</div><div class="lbl">近30天短线推荐</div></div>
-                <div class="metric-card"><div class="val" style="color:var(--text-primary)">${s.win_rate}%</div><div class="lbl">胜率 ${s.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
-                <div class="metric-card"><div class="val ${s.avg_return>=0?'idx-up':'idx-down'}">${s.avg_return>=0?'+':''}${s.avg_return}%</div><div class="lbl">平均收益</div></div>
-                <div class="metric-card"><div class="val">${s.profit_factor}</div><div class="lbl">盈亏比</div></div>
-                <div class="metric-card"><div class="val">${s.stop_hit}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
+                <div class="metric-card secondary"><div class="val">${s.total}</div><div class="lbl">近30天短线推荐</div></div>
+                <div class="metric-card primary"><div class="val" style="color:var(--text-primary)">${s.win_rate}%</div><div class="lbl">胜率 ${s.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
+                <div class="metric-card primary"><div class="val ${s.avg_return>=0?'idx-up':'idx-down'}">${s.avg_return>=0?'+':''}${s.avg_return}%</div><div class="lbl">平均收益</div></div>
+                <div class="metric-card secondary"><div class="val">${s.profit_factor}</div><div class="lbl">盈亏比</div></div>
+                <div class="metric-card secondary"><div class="val">${s.stop_hit}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
             </div>`;
         }
         // ② 诊断结论
@@ -3983,7 +3990,7 @@ async function loadOptimizerPanel() {
         }
         box.innerHTML = html || '<div class="empty-state">暂无优化数据</div>';
     } catch(e) {
-        box.innerHTML = '<div class="empty-state">加载失败</div>';
+        box.innerHTML = panelError('loadOptimizerPanel');
     }
 }
 
@@ -4241,7 +4248,7 @@ async function loadPositionHistory() {
         html += '</tbody></table></div>';
         box.innerHTML = html;
     } catch(e) {
-        if (box) box.innerHTML = '<div class="empty-state">历史收益加载失败</div>';
+        if (box) box.innerHTML = '<div class="panel-error">历史收益加载失败 <button class="btn btn-sm" onclick="loadPositionHistory()">重试</button></div>';
     }
 }
 
