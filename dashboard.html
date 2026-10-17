@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017f">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017g">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -592,16 +592,26 @@ function topSearchGo() {
     var v = ((el && el.value) || '').trim();
     if (!v) return;
     var codeMatch = v.match(/\d{6}/);
-    switchTab('research');
+    // B-1 修复①：已在研判且模板就绪时不再走 switchTab（其防抖 cancelAll 会掐死在途 stock_deep）；
+    // 需要切页时等模板就绪（模板只在 cancelAll 落地后才渲染）后再过 250ms 防抖余量才发请求。
+    var alreadyThere = (currentTab === 'research') && document.getElementById('sdSearch');
+    if (!alreadyThere) switchTab('research');
     var tries = 0;
-    (function attempt() {
+    function fire() {
         var sd = document.getElementById('sdSearch');
-        if (!sd) { if (tries++ < 40) setTimeout(attempt, 150); return; }   // 等研判 tab 模板就绪
-        if (codeMatch) { openSdDeep(codeMatch[0]); return; }               // 6 位代码直达
-        sd.value = v;                                                       // 名称：借面板既有检索匹配
+        if (!sd) { if (tries++ < 40) setTimeout(fire, 150); return; }   // 等研判 tab 模板就绪
+        if (alreadyThere) { doSearch(sd); return; }
+        setTimeout(function () { doSearch(document.getElementById('sdSearch')); }, 250);
+    }
+    function doSearch(sd) {
+        if (!sd) return;
+        if (codeMatch) { openSdDeep(codeMatch[0]); return; }            // 6 位代码直达
+        sd.value = v;                                                    // 名称：借面板既有检索匹配
+        // B-1 修复②（N-3）：onSdSearchPick 三条路径（代码/历史名/后端搜索）命中后自行开抽屉，
+        // 不再用残留 _sd.code 兜底重开上一只抽屉
         try { onSdSearchPick(); } catch (e) {}
-        setTimeout(function () { if (_sd.code) openSdDeep(_sd.code); }, 1200);
-    })();
+    }
+    fire();
 }
 document.addEventListener('keydown', function (e) {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
@@ -921,7 +931,7 @@ async function loadResearchTab(container) {
             </div>
             <div class="sd-toolbar">
                 <input class="sd-search" id="sdSearch" list="sdDatalist" placeholder="输入代码或名称（如 600100 / TCL科技），回车分析"
-                       autocomplete="off" onkeydown="if(event.key==='Enter')onSdSearchPick()" onchange="onSdSearchPick()" oninput="onSdSearchInput(this.value)">
+                       autocomplete="off" onkeydown="if(event.key==='Enter')onSdSearchPick()" oninput="onSdSearchInput(this.value)">
                 <datalist id="sdDatalist"></datalist>
                 <div class="sd-nav">
                     <button class="btn btn-sm" onclick="sdCycle(-1)" title="上一只">◀ 上一只</button>
@@ -2363,7 +2373,10 @@ function onSdSearchPick() {
     // ② 名称匹配历史缓存
     var matched = _sd.list.find(function(it) { return it.name && raw.indexOf(it.name) >= 0; });
     if (matched) { selectSdByIndex(_sd.list.indexOf(matched)); return; }
-    // ③ 后端按名称搜索
+    // ③ 后端按名称搜索（B-1 修复②：同值回车不重复发请求——双触发/连按回车时
+    // 同 key 去重会 abort 前一请求，abort 的失败分支会覆盖成功正文）
+    if (raw === _sdLastSearch) return;
+    _sdLastSearch = raw;
     RequestManager.fetch('sd-search-' + raw, API + '/investor/stocks/search?q=' + encodeURIComponent(raw))
       .then(function(resp) {
           var items = (resp && resp.data && resp.data.items) || [];
@@ -2371,6 +2384,7 @@ function onSdSearchPick() {
           else showToast('未找到该股票，请核对代码或名称', 'warning');
       });
 }
+var _sdLastSearch = null;
 
 var _sdSearchTimer = null;
 function onSdSearchInput(v) {
@@ -2423,6 +2437,9 @@ async function refreshStockDeep(code, opts) {
         if (searchEl && data.code) searchEl.value = data.code + ' ' + (data.name || '');
         renderStockDeep(data);
     } catch(e) {
+        // B-1 修复③：切页 cancelAll / 同 key 双请求去重产生的 AbortError 不写失败态正文，
+        // 正文交给仍在途的同 key 请求渲染；其余异常照常给出可读失败态。
+        if (e && (e.name === 'AbortError' || /abort/i.test(String(e.message || e)))) return;
         box.innerHTML = '<div class="empty-state">分析失败：' + (e.message || e) + '</div>';
     }
 }
@@ -3360,7 +3377,7 @@ function _fitKlineNarrowLayout(opt, dom) {
     var cw = dom && dom.getBoundingClientRect ? dom.getBoundingClientRect().width : 0;
     if (!cw || cw >= 560) return;
     var grids = Array.isArray(opt.grid) ? opt.grid : (opt.grid ? [opt.grid] : []);
-    grids.forEach(function (g) { g.left = cw < 430 ? 74 : 64; g.right = 12; });
+    grids.forEach(function (g) { g.left = cw < 430 ? 88 : 64; g.right = 12; });   // N-1：375 下十亿级量轴 13 位标签需 88px
     if (opt.title && opt.title.subtextStyle) {
         opt.title.subtextStyle = Object.assign({}, opt.title.subtextStyle,
             { fontSize: 9, width: Math.max(140, cw - 32), overflow: 'break' });
