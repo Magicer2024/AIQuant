@@ -416,6 +416,7 @@ def evaluate_exit_by_prices(
                 "exit_date": None,
                 "exit_price": None,
                 "exit_reason": None,
+                "exit_code": None,
             },
         }
 
@@ -437,6 +438,7 @@ def evaluate_exit_by_prices(
     exit_date = None
     exit_price = None
     exit_reason = None
+    exit_code = None              # 结构化出场枚举（2026-10-17 任务1c）：exit_reason 保留为展示文本
     for i, (ts, row) in enumerate(after.iterrows(), start=1):
         close = float(row["close"])
         high = float(row["high"]) if "high" in after.columns and pd.notna(row.get("high")) else close
@@ -465,21 +467,22 @@ def evaluate_exit_by_prices(
         # 1. 止损：收盘价跌破止损价 → 卖出（跳空穿线时按条件单口径以止损价成交）
         if stop_loss is not None and close <= stop_loss:
             px = stop_loss if (stop_fill_at_stop and stop_loss <= entry_price) else close
-            exit_date, exit_price, exit_reason = ts, px, f"收盘跌破止损价 {stop_loss:.2f}"
+            exit_date, exit_price, exit_reason, exit_code = ts, px, f"收盘跌破止损价 {stop_loss:.2f}", "stop_loss"
             break
         # 2. 移动止盈：浮盈已过启动线且收盘跌破移动止盈线 → 按收盘价卖出（让利润奔跑后锁利）
         if trailing_enabled and partial_done and trailing_stop is not None and close <= trailing_stop:
             dd = (highest - close) / highest * 100
             exit_date, exit_price, exit_reason = ts, close, (
                 f"移动止盈：自高点 {highest:.2f} 回撤 {dd:.1f}% ≥ {trailing_pct * 100:.0f}%，清仓")
+            exit_code = "trailing_stop"
             break
         # 3. 固定止盈（未开启移动止盈时）：收盘价达到止盈价 → 按收盘价卖出
         if not trailing_enabled and take_profit is not None and close >= take_profit:
-            exit_date, exit_price, exit_reason = ts, close, f"收盘达到止盈价 {take_profit:.2f}"
+            exit_date, exit_price, exit_reason, exit_code = ts, close, f"收盘达到止盈价 {take_profit:.2f}", "fixed_tp"
             break
         # 4. 超期（到期卖出）
         if max_hold_days is not None and i >= max_hold_days:
-            exit_date, exit_price, exit_reason = ts, close, f"持仓满 {i} 个交易日，到期卖出"
+            exit_date, exit_price, exit_reason, exit_code = ts, close, f"持仓满 {i} 个交易日，到期卖出", "max_hold_days"
             break
 
     entry_date_str = str(after.index[0])[:10]
@@ -506,6 +509,7 @@ def evaluate_exit_by_prices(
                 "exit_date": exit_date_str,
                 "exit_price": round(current_price, 2),
                 "exit_reason": exit_reason,
+                "exit_code": exit_code,
             },
         }
 
@@ -535,6 +539,7 @@ def evaluate_exit_by_prices(
             "exit_date": None,
             "exit_price": None,
             "exit_reason": None,
+            "exit_code": None,
         },
     }
 

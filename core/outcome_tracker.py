@@ -22,6 +22,17 @@ from config.personal_config import (
 )
 
 
+def _policy_version(conn) -> str:
+    """归档快照的口径版本号：复用优化器「参数版本」口径（param_tune_log 中
+    apply/rollback 累计数，strategy.optimizer::current_param_version）。
+    读取失败返回 'pv-unknown'——归档永不失败优先于版本精确。"""
+    try:
+        from strategy.optimizer import current_param_version
+        return f"pv{int(current_param_version(conn))}"
+    except Exception:
+        return "pv-unknown"
+
+
 # ─────────────────────────────────────────────
 # 0. 短线 T1 辅助过滤（恐慌日闸门 + MA5 偏离，按大盘冷热自动切换）
 # ─────────────────────────────────────────────
@@ -420,6 +431,29 @@ def insert_new_outcomes(days_back: int = 60):
             "SELECT COUNT(*) FROM recommend_outcome WHERE strategy = '反转首日'"
         ).fetchone()[0]
 
+        # ── 任务1c：窗口先清后重写之前，同事务快照到 append-only 归档表 ──
+        # 主键含 policy_version（参数版本，口径与 strategy.optimizer::current_param_version
+        # 同源）：同一版本内重复重建 → REPLACE 保留最新评估进度快照；跨版本（口径变更）
+        # → 旧版本快照永久保留，复盘可对照「当时口径」。与 DELETE 同处一个
+        # get_conn 事务，要么同成同败，不会出现「删了没归档」。
+        conn.execute("""
+            INSERT OR REPLACE INTO recommend_outcome_archive
+                (policy_version, code, scan_date, horizon, strategy,
+                 entry_price, stop_loss, take_profit, fusion_score,
+                 t1_return, t2_return, t3_return, t5_return, t10_return,
+                 max_return, min_return, hit_stop, hit_tp,
+                 exit_reason, exit_code, exit_date, exit_return,
+                 evaluated_at, source)
+            SELECT ?, code, scan_date, COALESCE(horizon, 'short'), strategy,
+                   entry_price, stop_loss, take_profit, fusion_score,
+                   t1_return, t2_return, t3_return, t5_return, t10_return,
+                   max_return, min_return, hit_stop, hit_tp,
+                   exit_reason, exit_code, exit_date, exit_return,
+                   evaluated_at, COALESCE(source, 'live')
+            FROM recommend_outcome
+            WHERE scan_date >= ?
+        """, (_policy_version(conn), start_date))
+
         # 先清窗口内旧记录（随引擎/过滤链/推荐口径变化而更新，旧记录一并移除）
         conn.execute(
             "DELETE FROM recommend_outcome WHERE scan_date >= ?",
@@ -456,9 +490,9 @@ def insert_new_outcomes(days_back: int = 60):
                 conn.execute(f"""
                     INSERT OR IGNORE INTO recommend_outcome
                         (code, scan_date, horizon, strategy, entry_price,
-                         stop_loss, take_profit, fusion_score)
+                         stop_loss, take_profit, fusion_score, source)
                     SELECT code, scan_date, horizon, strategy, buy_price,
-                           stop_loss, take_profit, fusion_score
+                           stop_loss, take_profit, fusion_score, 'live'
                     FROM (
                         SELECT code, scan_date, horizon, strategy, buy_price,
                                stop_loss, take_profit, fusion_score,
@@ -487,9 +521,9 @@ def insert_new_outcomes(days_back: int = 60):
                 conn.execute(f"""
                     INSERT OR IGNORE INTO recommend_outcome
                         (code, scan_date, horizon, strategy, entry_price,
-                         stop_loss, take_profit, fusion_score)
+                         stop_loss, take_profit, fusion_score, source)
                     SELECT code, scan_date, horizon, strategy, buy_price,
-                           stop_loss, take_profit, fusion_score
+                           stop_loss, take_profit, fusion_score, 'live'
                     FROM (
                         SELECT
                             s.code,
@@ -533,7 +567,7 @@ def insert_new_outcomes(days_back: int = 60):
                     PRIMARY KEY (code, scan_date))""")
             _src = f"""
                 SELECT s.code, s.scan_date, s.buy_price, s.stop_loss, s.take_profit,
-                       s.fusion_score, s.pct_above_ma20
+                       s.fusion_score, s.pct_above_ma20, 'live' AS src
                 FROM stock_signal s
                 WHERE s.scan_date >= ? AND s.strategy = '反转首日'
                   AND s.buy_price IS NOT NULL AND s.buy_price > 0
@@ -541,7 +575,7 @@ def insert_new_outcomes(days_back: int = 60):
                   {board_filter}
                 UNION ALL
                 SELECT h.code, h.scan_date, h.buy_price, h.stop_loss, h.take_profit,
-                       h.fusion_score, NULL
+                       h.fusion_score, NULL, 'backfill' AS src
                 FROM first_reversal_hist h
                 WHERE h.scan_date >= ?
                   AND h.buy_price IS NOT NULL AND h.buy_price > 0
@@ -561,9 +595,9 @@ def insert_new_outcomes(days_back: int = 60):
             conn.execute(f"""
                 INSERT OR IGNORE INTO recommend_outcome
                     (code, scan_date, horizon, strategy, entry_price,
-                     stop_loss, take_profit, fusion_score)
+                     stop_loss, take_profit, fusion_score, source)
                 SELECT code, scan_date, 'short', '反转首日', buy_price,
-                       stop_loss, take_profit, fusion_score
+                       stop_loss, take_profit, fusion_score, src
                 FROM ({_inner})
                 {_tail}
             """, _params)
@@ -885,11 +919,11 @@ def _evaluate_short(conn, row, now_str: str,
         SET t1_return = ?, t2_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
             max_return = ?, min_return = ?,
             hit_stop = ?, hit_tp = ?,
-            exit_reason = ?, exit_date = ?, exit_return = ?,
+            exit_reason = ?, exit_code = ?, exit_date = ?, exit_return = ?,
             evaluated_at = ?
         WHERE id = ?
     """, (t1, t2, t3, t5, t10, max_ret, min_ret,
-          hit_stop, launched, exit_reason, exit_date, exit_return,
+          hit_stop, launched, exit_reason, exit_reason, exit_date, exit_return,
           now_str if final else None, rid))
     return True
 
@@ -966,6 +1000,23 @@ def _short_exit_sim(hold_prices, exec_entry: float, stop, tp,
     return (None, None, None, 0, launched, False)
 
 
+def _exit_code_from_text(reason: str) -> str:
+    """自由文本 exit_reason → 结构化枚举（与 core/db.py ::_TASK1C_OUTCOME_SQL
+    存量归类规则一致，两处改动必须同步）。未匹配归 'other'。"""
+    if reason in ("stop_loss", "trailing_stop", "max_hold_days", "no_fill",
+                  "expired", "holding", "watching", "data_pending", "cancelled"):
+        return reason
+    if reason.startswith("收盘跌破止损价"):
+        return "stop_loss"
+    if reason.startswith("移动止盈"):
+        return "trailing_stop"
+    if reason.startswith("收盘达到止盈价"):
+        return "fixed_tp"
+    if reason.startswith("持仓满"):
+        return "max_hold_days"
+    return "other"
+
+
 def _evaluate_mid_long(conn, row, horizon: str, now_str: str,
                        table: str = "recommend_outcome") -> bool:
     """中/长线评估：用真实出场纪律（移动止盈 + 周期持仓上限）逐日模拟出场。
@@ -988,15 +1039,17 @@ def _evaluate_mid_long(conn, row, horizon: str, now_str: str,
     stop = row["stop_loss"]
     tp = row["take_profit"]
 
-    # 长线 60+ 天持仓 → ~130 交易日窗口；中线 10~60 天 → ~70 交易日窗口
-    limit = 130 if horizon == "long" else 70
+    # 2026-10-17 任务1c：取价窗口由「scan_date 后固定前 N 天」改为**滚动全量**。
+    # 原 LIMIT 130/70 锚死信号日不前滚：长线无持仓上限（get_max_hold('long')=None），
+    # 持仓满 130 交易日后评估窗口永久冻结、exit_return 永远 NULL（2027-01 定时炸弹，
+    # 见 task1b_diagnosis 报告 §1）。未出场行每天重放全持仓史的成本可忽略
+    # （长线样本百级、每股每年 ≤250 行），已结算行不再被 WHERE 选中。
     prices = conn.execute("""
         SELECT trade_date, open, close, high, low
         FROM daily_price
         WHERE code = ? AND trade_date > ?
         ORDER BY trade_date ASC
-        LIMIT ?
-    """, (code, scan_date, limit)).fetchall()
+    """, (code, scan_date)).fetchall()
 
     if not prices:
         return False
@@ -1047,6 +1100,11 @@ def _evaluate_mid_long(conn, row, horizon: str, now_str: str,
     )
     detail = adv.get("detail") or {}
     exit_reason = detail.get("exit_reason")
+    # 结构化出场枚举（任务1c）：新代码由 exit_advisor 直接给出；
+    # 兼容旧版 exit_advisor（如回放脚本未升级）时按前缀规则回退归类
+    exit_code = detail.get("exit_code")
+    if exit_code is None and exit_reason:
+        exit_code = _exit_code_from_text(exit_reason)
     exit_date = detail.get("exit_date")
     exit_return = None
     hit_stop = 0
@@ -1066,11 +1124,11 @@ def _evaluate_mid_long(conn, row, horizon: str, now_str: str,
         SET t1_return = ?, t2_return = ?, t3_return = ?, t5_return = ?, t10_return = ?,
             max_return = ?, min_return = ?,
             hit_stop = ?, hit_tp = ?,
-            exit_reason = ?, exit_date = ?, exit_return = ?,
+            exit_reason = ?, exit_code = ?, exit_date = ?, exit_return = ?,
             evaluated_at = ?
         WHERE id = ?
     """, (t1, t2, t3, t5, t10, max_ret, min_ret,
-          hit_stop, hit_tp, exit_reason, exit_date, exit_return,
+          hit_stop, hit_tp, exit_reason, exit_code, exit_date, exit_return,
           now_str, rid))
     return True
 
