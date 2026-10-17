@@ -191,7 +191,7 @@
     </div>
 </div>
 
-<div class="kline-overlay" id="sdDeepPanel" onclick="if(event.target===this)closeSdDeep()">
+<div class="kline-overlay" id="sdDeepPanel" onclick="_drawerScrimClick(event, 'closeSdDeep')">
     <div class="sd-deep-popup">
         <button class="close-btn" onclick="closeSdDeep()" aria-label="关闭弹窗">&#x2715;</button>
         <div id="sdDeepBody"></div>
@@ -2842,6 +2842,14 @@ function renderStockDeep(data) {
 
         ${renderSdPositionStats(data)}
     `;
+    // 弹窗/抽屉模式：把模板里硬编码的 chart/indicators id 替换为弹窗内的 id（让 _sdGetChart/_sdGetIndicators 能取到）
+    // 【任务14 修复】该写回块自 e28cbbb 起被误挪进 renderSdPositionStats 的 return 之后（死代码），
+    // 导致深析弹窗/抽屉正文永远停在「正在深度学习…」占位；此处恢复原设计：先写正文，再画图表。
+    if (_sdDeepMode) {
+        __html = __html.replace(/id="sdIndicators"/g, 'id="sdDeepIndicators"')
+                       .replace(/id="stockDeepChart"/g, 'id="sdDeepChart"');
+    }
+    box.innerHTML = __html;
     renderStockDeepChart(data);
     sdUpdateIndicatorButtons();
 }
@@ -2919,12 +2927,6 @@ function renderSdPositionStats(data) {
             </table>
         </div>
     </div>`;
-    // 弹窗模式：把模板里硬编码的 chart/indicators id 替换为弹窗内的 id（让 _sdGetChart/_sdGetIndicators 能取到）
-    if (_sdDeepMode) {
-        __html = __html.replace(/id="sdIndicators"/g, 'id="sdDeepIndicators"')
-                       .replace(/id="stockDeepChart"/g, 'id="sdDeepChart"');
-    }
-    box.innerHTML = __html;
 }
 
 // ─── 个股深度 K 线：与「个股 K 线弹窗」完全一致的结构（复用 buildKlineOption）──
