@@ -931,7 +931,7 @@ async function loadResearchTab(container) {
             </div>
             <div class="sd-toolbar">
                 <input class="sd-search" id="sdSearch" list="sdDatalist" placeholder="输入代码或名称（如 600100 / TCL科技），回车分析"
-                       autocomplete="off" onkeydown="if(event.key==='Enter')onSdSearchPick()" oninput="onSdSearchInput(this.value)">
+                       autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();onSdSearchPick()}" oninput="onSdSearchInput(this.value)">
                 <datalist id="sdDatalist"></datalist>
                 <div class="sd-nav">
                     <button class="btn btn-sm" onclick="sdCycle(-1)" title="上一只">◀ 上一只</button>
