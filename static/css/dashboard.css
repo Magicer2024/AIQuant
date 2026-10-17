@@ -644,7 +644,6 @@ tr:hover td {
 .sd-panel-hero .sd-hero-hint { font-size: var(--fs-2); color: var(--text-secondary); }
 .sd-panel-hero .btn { padding: 8px 18px; font-size: var(--fs-3); }
 .sd-panel-empty { padding: 40px 18px; text-align: center; font-size: var(--fs-3); color: var(--text-secondary); }
-.sd-panel-empty .sd-panel-tip { color: var(--text-muted); font-size: var(--fs-2); margin-top: 6px; line-height: 1.7; }
 .kline-overlay .close-btn {
     position: absolute; top: 14px; right: 18px;
     background: none; border: none;
