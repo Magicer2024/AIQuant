@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260911">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017a">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -492,6 +492,7 @@ var timerManager = {
 
 // ── 锚点导航条（spec §4，缓解 P1）：sticky 激活态由 IntersectionObserver 驱动 ──
 var _anchorObserver = null;
+var _anchorScrollBound = false;
 function initAnchorNav() {
     var bar = document.getElementById('anchorBar');
     if (!bar || !('IntersectionObserver' in window)) return;
@@ -505,11 +506,33 @@ function initAnchorNav() {
         }
     }
     if (_anchorObserver) { try { _anchorObserver.disconnect(); } catch (e) {} }
-    _anchorObserver = new IntersectionObserver(function (entries) {
-        var visible = entries.filter(function (en) { return en.isIntersecting; })
-            .sort(function (a, b) { return a.boundingClientRect.top - b.boundingClientRect.top; });
-        if (visible.length) setActive(visible[0].target.id);
-    }, { rootMargin: '-64px 0px -70% 0px', threshold: 0 });
+    // 每次 IO 触发时全量计算：取「已越过顶线（top<=72）的最靠下面板」；
+    // 页首尚未越过任何面板时，点亮第一个即将到来的面板，避免激活态残留。
+    function _anchorRefresh() {
+        var passed = null, passedTop = -Infinity;
+        var upcoming = null, upcomingTop = Infinity;
+        for (var j = 0; j < links.length; j++) {
+            var el = document.getElementById(links[j].getAttribute('href').slice(1));
+            if (!el) continue;
+            var t = el.getBoundingClientRect().top;
+            if (t <= 72) { if (t > passedTop) { passed = el.id; passedTop = t; } }
+            else if (t < upcomingTop) { upcoming = el.id; upcomingTop = t; }
+        }
+        var pick = passed || upcoming;
+        if (pick) setActive(pick);
+    }
+    _anchorObserver = new IntersectionObserver(_anchorRefresh, { rootMargin: '-64px 0px -70% 0px', threshold: 0 });
+    // IO 只在面板「进出检测带」时触发；带内滚动不产生事件，需 scroll(rAF 节流) 持续重算激活态
+    if (!_anchorScrollBound) {
+        _anchorScrollBound = true;
+        var tick = false;
+        window.addEventListener('scroll', function () {
+            if (tick) return;
+            tick = true;
+            requestAnimationFrame(function () { tick = false; _anchorRefresh(); });
+        }, { passive: true });
+    }
+    _anchorRefresh();
     for (var i = 0; i < links.length; i++) {
         (function (a) {
             var el = document.getElementById(a.getAttribute('href').slice(1));
