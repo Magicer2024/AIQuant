@@ -655,6 +655,11 @@ tr:hover td {
 .gap-s { gap: 8px; }
 .mt-s { margin-top: 12px; }
 .mb-s { margin-bottom: 12px; }
+/* 面板底部口径说明（方案A spec §3f）：统一小字组件，文案不动只归一样式 */
+.panel-note {
+    font-size: var(--fs-1); color: var(--text-muted);
+    line-height: 1.5; margin-top: 8px;
+}
 
 /* ── Rule trades sub-panel ── */
 .sub-panel {

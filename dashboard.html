@@ -70,7 +70,11 @@
         .sd-signal{display:grid;grid-template-columns:150px 1fr;gap:14px;align-items:stretch;margin-bottom:14px}
         @media(max-width:700px){.sd-signal{grid-template-columns:1fr}}
         .sd-signal-side{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center}
-        .sd-signal-emoji{font-size:44px;line-height:1}
+        .sd-signal-dot{width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex:none}
+        .sd-signal-dot.lv-buy{background:var(--status-good)}
+        .sd-signal-dot.lv-add{background:var(--status-warn)}
+        .sd-signal-dot.lv-hold{background:var(--accent)}
+        .sd-signal-dot.lv-sell{background:var(--status-bad)}
         .sd-signal-level{font-size:var(--fs-4);font-weight:700}
         .sd-signal-note{font-size:var(--fs-1);color:var(--text-secondary)}
         .sd-plan{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
@@ -151,7 +155,8 @@
     </div>
     <div class="header-status">
         <label class="theme-switcher" title="切换界面主题">
-            <select id="themeSelect" onchange="setTheme(this.value)"></select>
+            <span class="theme-label">主题</span>
+            <select id="themeSelect" aria-label="切换主题" onchange="setTheme(this.value)"></select>
         </label>
         <div class="status-dot" id="sysStatus"></div>
         <span id="last-update">就绪</span>
@@ -539,7 +544,7 @@ async function loadHomeTab(container) {
 
         <div class="panel" id="dataStatusPanel">
             <div class="panel-header">
-                <h3>📊 数据状态</h3>
+                <h3>数据状态</h3>
                 <span class="text-muted" id="dataStatusHint" style="font-size:var(--fs-2)"></span>
             </div>
             <div class="data-status-grid">
@@ -579,20 +584,20 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
-                <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">📋 一键复制</button>
+                <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">复制</button>
                 <input type="date" id="pickDate" value="" autocomplete="off" onchange="loadTodayPicks()" style="font-size:var(--fs-2);padding:2px 6px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:4px">
-                <span class="text-muted" style="font-size:var(--fs-2)">基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）</span>
+                <span class="text-muted" style="font-size:var(--fs-2)" title="基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）">默认简略 · 点「详情」展开 ⓘ</span>
             </div>
             <div id="todayPicks" class="action-plan-grid">加载中…</div>
         </div>
 
         <div class="panel" id="stockDeepPanel">
             <div class="panel-header">
-                <h3>🎯 个股深度 · 买卖建议</h3>
+                <h3>个股深度 · 买卖建议</h3>
                 <span class="text-muted" id="sdHint" style="font-size:var(--fs-2)">切换个股后自动学习其历史走势、量价关系与涨跌节奏，给出近期可执行建议</span>
             </div>
             <div class="sd-toolbar">
-                <input class="sd-search" id="sdSearch" list="sdDatalist" placeholder="🔍 输入代码或名称（如 600100 / TCL科技），回车分析"
+                <input class="sd-search" id="sdSearch" list="sdDatalist" placeholder="输入代码或名称（如 600100 / TCL科技），回车分析"
                        autocomplete="off" onkeydown="if(event.key==='Enter')onSdSearchPick()" onchange="onSdSearchPick()" oninput="onSdSearchInput(this.value)">
                 <datalist id="sdDatalist"></datalist>
                 <div class="sd-nav">
@@ -600,7 +605,7 @@ async function loadHomeTab(container) {
                     <span class="sd-count" id="sdCount"></span>
                     <button class="btn btn-sm" onclick="sdCycle(1)" title="下一只">下一只 ▶</button>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="loadSdMarket()" title="在今日推荐+自选+持仓候选池上跑深析信号，筛出明日可推荐买入的股票">⭐ 明日候选</button>
+                <button class="btn btn-primary btn-sm" onclick="loadSdMarket()" title="在今日推荐+自选+持仓候选池上跑深析信号，筛出明日可推荐买入的股票">明日候选</button>
             </div>
             <div id="sdChips" class="sd-chips">加载中…</div>
             <div id="sdMarketBox"></div>
@@ -611,7 +616,7 @@ async function loadHomeTab(container) {
         <div class="panel">
             <div class="panel-header">
                 <h3>反转首日观察 · 首次站上 MA20 的低位入场</h3>
-                <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池</span>
+                <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint" title="⚠ 观察池：只标「首破 MA20 那天」的位置，非买入推荐；出场纪律对本线为负贡献，勿机械套用止损/止盈">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池 ⓘ</span>
             </div>
             <div id="reversalPicks" class="action-plan-grid">加载中…</div>
         </div>
@@ -639,7 +644,7 @@ async function loadHomeTab(container) {
                     <option value="cum_ratio">建仓力度（净买额/流通市值）</option>
                     <option value="vs_cost">现价低于成本优先</option>
                 </select>
-                <span class="text-muted" style="font-size:var(--fs-1);margin-left:auto">成本 = 按机构净买额加权的上榜日收盘价（估算）</span>
+                <span class="panel-note" style="margin-left:auto;margin-top:0">成本 = 按机构净买额加权的上榜日收盘价（估算）</span>
             </div>
             <div id="jgTrackMetrics" class="metrics-row" style="margin-bottom:10px"></div>
             <div id="jgTrackTable">加载中…</div>
@@ -835,7 +840,7 @@ async function loadMarketOverview() {
                 ` · 阈值${Number(aw.sig_threshold).toFixed(0)}${aw.adaptive_enabled ? '(自适应)' : ''}` : '';
             const weightEl = document.createElement('div');
             weightEl.style.cssText = 'margin-top:8px;padding:6px 12px;background:rgba(var(--accent-rgb),0.06);border-radius:6px;font-size:var(--fs-1);color:var(--text-secondary)';
-            weightEl.innerHTML = `🎯 短线打分: ${engineHint}${thrHint} · ${regimeEmoji} ${aw.regime_label}`;
+            weightEl.innerHTML = `短线打分: ${engineHint}${thrHint} · ${regimeEmoji} ${aw.regime_label}`;
             if (grid) grid.parentElement.appendChild(weightEl);
         }
 
@@ -1029,14 +1034,14 @@ function renderPickExitMini(hz, list, perf, startDate) {
     var watching = list.filter(function (it) { return it.status === 'watching'; }).length;
     var expired = list.filter(function (it) { return it.status === 'expired'; }).length;
     var expanded = !!EXIT_EXPANDED[hz];
-    var meta = EXIT_HORIZON_META[hz] || { icon: '📊', label: hz };
+    var meta = EXIT_HORIZON_META[hz] || { label: hz };
     var fromTxt = startDate ? ('自 ' + startDate + ' 累计') : '累计';
     var tip = meta.label + '出场跟踪：' + fromTxt
         + '；口径含持仓中的浮动盈亏，待回踩/未成交不建仓、不计入收益与胜率'
         + '；' + (meta.hint || '');
     return '<div class="pick-exit-mini">' +
         '<div class="pick-exit-head">' +
-            '<span class="pick-exit-title" title="' + tip + '">📊 出场跟踪 · ' + meta.label
+            '<span class="pick-exit-title" title="' + tip + '">出场跟踪 · ' + meta.label
                 + '（' + fromTxt + '）</span>' +
             '<span class="hz-spacer"></span>' +
             '<span class="pick-exit-chips">' + exitStatChip(hz, perf) +
@@ -1155,7 +1160,7 @@ function renderPickGroup(g, list) {
             <span class="hz-spacer"></span>
             <button class="pick-detail-btn" ${has ? '' : 'disabled'}
                     onclick="copyPickGroup('${g.key}', this)"
-                    title="只复制本板块${g.label}推荐的股票与买卖价位">📋 复制</button>
+                    title="只复制本板块${g.label}推荐的股票与买卖价位">复制</button>
             <button class="pick-detail-btn pick-detail-toggle${expanded ? ' active' : ''}" ${has ? '' : 'disabled'}
                     onclick="togglePickDetail('${g.key}')"
                     title="${expanded ? '收起详细推荐' : '展开该周期的完整推荐信息'}">${expanded ? '收起' : '详情'}<span class="caret">▾</span></button>
@@ -1322,7 +1327,7 @@ function renderJgTable(items) {
         <th>股票</th><th>机构净买</th><th>累计净买额</th><th>占流通市值</th>
         <th>成本估算 / 价格带</th><th>现价</th><th>现价 vs 成本</th><th>机构 买/卖</th><th>最后上榜</th>
         </tr></thead><tbody>${rows}</tbody></table>
-        <div style="font-size:var(--fs-1);color:var(--text-muted);margin-top:8px;line-height:1.6">
+        <div class="panel-note">
         ⚠ 本栏目是<b>资金动向与成本位参考，不是收益信号</b>。实测机构买卖方向对次日收益<b>无区分度</b>：
         机构净买 +0.72% vs 机构净卖 +0.66%（Δ 不显著）；同样「近20日上榜≥4次」时净卖方反而略高（+1.19% vs +0.94%）。
         有用的只是「价位」——<b>现价低于机构成本＝机构被套</b>，属风险提示。<br>
@@ -1406,19 +1411,24 @@ function renderReversalStats(s, enabled) {
         : '';
     return `
         <div style="grid-column:1 / -1">
-            <div style="margin-bottom:8px;padding:7px 11px;border-radius:6px;background:rgba(60,180,255,0.07);border:1px solid rgba(60,180,255,0.28);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.7">
+            <div style="margin-bottom:6px;padding:6px 11px;border-radius:6px;background:rgba(60,180,255,0.07);border:1px solid rgba(60,180,255,0.28);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.6">
+                ⚠ 观察池，非买入推荐 · 只标「首破 MA20 当日」的低位入场
+                <details style="display:inline-block;margin-left:6px;vertical-align:baseline"><summary style="display:inline;cursor:pointer;color:var(--accent)">详情</summary><div style="margin-top:6px;line-height:1.7">
                 <b>⚠ 观察池，不是买入推荐</b>：本线唯一确定的价值＝<b>入场位低</b>——首次站上 MA20 那天，信号日中位偏离 MA20 仅 ${s.median_ext != null ? s.median_ext : '--'}%，且只响一次。
                 实测市场中性超额 <b>${exHtml(s.excess_pp)}pp（t=${exHtml(s.t)}）</b>、分年 ${byTxt} 三年一致，
                 但<b>胜率 ${s.win_rate != null ? s.win_rate : '--'}% 未达 52% 门槛</b>，扣交易成本后不足 0.1%/笔 ⇒ 不构成独立可交易 alpha。
                 本线<b>不占今日推荐名额</b>；自 2026-09-24 起<b>纳入推荐复盘</b>
                 （strategy='反转首日' 独立成组，不改变短线推荐线成绩）。${offnote}
+                </div></details>
             </div>
-            <div style="margin-bottom:8px;padding:7px 11px;border-radius:6px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.30);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.7">
-                <b style="color:var(--warning, #d97706)">⚠ 收益高度集中于创业板（当前账户未开通该权限，不可交易）</b>：
+            <div style="margin-bottom:6px;padding:6px 11px;border-radius:6px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.30);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.6">
+                <b style="color:var(--status-warn)">⚠ 收益集中于创业板（未开通不可交易）</b> · 可交易子集明显更弱
+                <details style="display:inline-block;margin-left:6px;vertical-align:baseline"><summary style="display:inline;cursor:pointer;color:var(--status-warn)">详情</summary><div style="margin-top:6px;line-height:1.7">
                 实盘跟踪 951→<b>485</b> 条按主板口径重算后，
                 创业板子样本 n=466 胜率 <b>58.9%</b>／均 +2.38%（PF 1.99），
                 主板子样本 n=485 胜率 <b>47.1%</b>／均 +0.79% ⇒
                 <b>可交易子集明显更弱</b>，本线对当前账户的实用价值需打折看待。
+                </div></details>
             </div>
             <div class="metrics-row">
                 ${numCard(s.n != null ? s.n : '--', '全样本信号数', '', '2024-07~2026-09 / 544 交易日 / 4500 只（OC 现实口径）')}
@@ -1440,7 +1450,7 @@ function renderReversalTracked(t) {
     const head = `style="grid-column:1 / -1;margin-top:4px;border-top:1px dashed var(--border, rgba(128,128,128,0.25));padding-top:8px"`;
     if (!t.total) {
         return `<div ${head}>
-            <span style="font-weight:600;font-size:var(--fs-2)">📈 实盘跟踪（已纳入推荐复盘 · 独立成组）</span>
+            <span style="font-weight:600;font-size:var(--fs-2)">实盘跟踪（已纳入推荐复盘 · 独立成组）</span>
             <div style="margin-top:6px;padding:6px 10px;border-radius:6px;background:rgba(60,180,255,0.05);border:1px dashed rgba(60,180,255,0.30);font-size:var(--fs-1);color:var(--text-muted);line-height:1.7">
                 等待首批信号结算：本线自 2026-09-24 起写入推荐复盘（strategy='反转首日'），
                 后续交易日按「次日开盘建仓 → 移动止盈/止损/到期」自动评估。
@@ -1459,7 +1469,7 @@ function renderReversalTracked(t) {
     return `
         <div ${head}>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-                <span style="font-weight:600;font-size:var(--fs-2)">📈 实盘跟踪（纳入推荐复盘 · 独立成组）</span>
+                <span style="font-weight:600;font-size:var(--fs-2)">实盘跟踪（纳入推荐复盘 · 独立成组）</span>
                 <span class="text-muted" style="font-size:var(--fs-1)">次日开盘建仓 → 移动止盈/止损/到期 · 与短线推荐线分开统计</span>
                 <span class="reason-chip" style="background:rgba(128,128,128,0.10);color:var(--text-muted)" title="跟踪组与卡片同口径，只统计可交易的主板（未开通创业板/科创板权限）；上方全样本统计仍是全线口径（含创业板），故两者数值不可直接对比">主板口径</span>
             </div>
@@ -1486,7 +1496,7 @@ function renderReversalHistoryShell() {
     return `
         <div style="margin-top:10px;border-top:1px dashed var(--border, rgba(128,128,128,0.25));padding-top:8px">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                <span style="font-weight:600;font-size:var(--fs-2)">📜 历史表现</span>
+                <span style="font-weight:600;font-size:var(--fs-2)">历史表现</span>
                 <select id="revHistDays" class="btn btn-sm" style="padding:3px 8px"
                         title="统计窗口（改窗口后已展开的列表会自动重取）"
                         onchange="onReversalHistDaysChange()">${opts}</select>
@@ -1654,7 +1664,7 @@ function renderReversalHistory(d) {
 
     return `
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-            <span style="font-weight:600;font-size:var(--fs-2)">📜 历史表现 · 近 ${d.days} 天信号真实成绩</span>
+            <span style="font-weight:600;font-size:var(--fs-2)">历史表现 · 近 ${d.days} 天信号真实成绩</span>
             <span class="text-muted" style="font-size:var(--fs-1)">信号日次日开盘建仓 → 移动止盈/止损/到期 · 豁免回踩确认（本线即首日窗口）</span>
             ${chips}
         </div>
@@ -1684,7 +1694,7 @@ function renderReversalHistory(d) {
                 <th title="旧记录的诊断收益基准，不代表模拟成交价">信号参考价</th>
                 <th>T+1</th><th>T+2</th><th>T+3</th><th>T+5</th><th>收益</th><th>出场</th>
             </tr></thead><tbody>${rows}</tbody></table>
-            <div style="font-size:var(--fs-1);color:var(--text-muted);margin-top:8px;line-height:1.7">
+            <div class="panel-note">
                 ⚠ 本线是<b>入场位置观察池，不是买入推荐</b>：实测市场中性超额 +0.174pp(t=+2.80)、
                 分年三年一致，但胜率 49.5% 未达 52% 门槛、扣成本后不足 0.1%/笔，
                 且<b>出场纪律对本线为负贡献</b>（止损把胜率换上去、期望反而跑输「随便买一只持有 5 天」）。
@@ -1712,15 +1722,15 @@ function renderReversalCard(it) {
     }).join('');
     let statusHtml = '';
     if (it.missed) {
-        statusHtml = '<div class="price-sub" style="color:var(--text-muted)">⏰ 已越过止盈，首日窗口已过</div>';
+        statusHtml = '<div class="price-sub" style="color:var(--text-muted)">已越过止盈，首日窗口已过</div>';
     } else if (!it.started) {
-        statusHtml = '<div class="price-sub" style="color:var(--gold, #e0b34d)">🔔 次日开盘＝首日窗口</div>';
+        statusHtml = '<div class="price-sub" style="color:var(--gold, #e0b34d)">⚠ 次日开盘＝首日窗口</div>';
     }
     return `
         <div class="action-card" style="border-color:rgba(60,180,255,0.35)${it.missed ? ';opacity:.6' : ''}" onclick="openKline('${it.code}')">
             <div class="action-head">
                 <div>
-                    <div class="action-name">${it.name || it.code} <span class="strategy-badge" style="background:rgba(60,180,255,0.15);color:#2b8fd6">🔄 反转首日</span></div>
+                    <div class="action-name">${it.name || it.code} <span class="strategy-badge" style="background:rgba(60,180,255,0.15);color:#2b8fd6">反转首日</span></div>
                     <div class="action-code">${it.code}${it.industry ? ` · ${it.industry}` : ''}</div>
                 </div>
                 <div class="action-score" title="首日分：量比与涨幅强度合成（30~50），非收益预测">
@@ -1742,7 +1752,7 @@ function renderReversalCard(it) {
                     <div class="price-val">${fmt(it.take_profit)}</div>
                     <div class="price-sub">${it.reward_pct != null ? `+${it.reward_pct}%` : '--'}</div>
                 </div>
-                <div class="price-arrow">⛔</div>
+                <div class="price-arrow">·</div>
                 <div class="price-cell stop">
                     <div class="price-lbl">止损参考</div>
                     <div class="price-val">${fmt(it.stop_loss)}</div>
@@ -1757,7 +1767,6 @@ function renderReversalCard(it) {
                 </div>
                 <div class="reasons">${triggers}</div>
                 ${hotDay ? `<div class="reasons" style="margin-top:4px"><span class="reason-chip" style="background:rgba(217,119,6,0.12);color:var(--warning, #d97706)">⚠ 普涨日：当日全市场均涨 ${mkt.toFixed(2)}%，本线信号数会天然放大，注意甄别</span></div>` : ''}
-                <div class="reasons" style="margin-top:4px"><span class="reason-chip" style="background:rgba(60,180,255,0.08);color:var(--text-muted)">⚠ 观察池：只标「首破 MA20 那天」的位置，非买入推荐；出场纪律对本线为负贡献，勿机械套用止损/止盈</span></div>
             </div>
         </div>`;
 }
@@ -1839,16 +1848,15 @@ function renderSdPanelPlaceholder() {
     if (!box) return;
     var cur = (_sd.idx >= 0 && _sd.list[_sd.idx]) || null;
     if (!cur) {
-        box.innerHTML = '<div class="sd-panel-empty">' +
-            '👇 点 chip 选中并打开弹窗 · 再点同一 chip 可取消' +
-            '<div class="sd-panel-tip">也支持：在「明日候选」或「推荐跟踪」中点击股票名直接打开</div></div>';
+        box.innerHTML = '<div class="sd-panel-empty" title="点 chip 选中并打开弹窗 · 再点同一 chip 可取消；也支持：在「明日候选」或「推荐跟踪」中点击股票名直接打开">' +
+            '点上方 chip 或搜索选股，打开弹窗看深度分析 ⓘ</div>';
         return;
     }
     box.innerHTML = '<div class="sd-panel-hero">' +
         '<div><span class="sd-hero-name">' + (cur.name || cur.code) +
         '</span><span class="sd-hero-code">' + cur.code + '</span></div>' +
         '<div class="sd-hero-hint">已选中 · 在弹窗中查看深度分析（量价 + 节奏 + 信号 + K 线 + 近期建议时间线）</div>' +
-        '<button class="btn btn-primary" onclick="openSdDeep(\'' + cur.code + '\')">🔍 查看深度分析</button>' +
+        '<button class="btn btn-primary" onclick="openSdDeep(\'' + cur.code + '\')">查看深度分析</button>' +
         '</div>';
 }
 
@@ -2067,22 +2075,22 @@ function _renderSdMarket() {
     if (!box || !_sdMarketData) return;
     var items = _sdMarketData.items, mainN = _sdMarketData.mainN;
     var src = _sdMarketData.src, scanDate = _sdMarketData.scanDate;
-    var headBtn = `<button class="btn btn-sm" style="margin-left:auto" onclick="triggerSdScan()" title="每日盘后自动运行；也可手动触发一次全市场深析扫描">🔄 全市场深析</button>`;
+    var headBtn = `<button class="btn btn-sm" style="margin-left:auto" onclick="triggerSdScan()" title="每日盘后自动运行；也可手动触发一次全市场深析扫描">全市场深析</button>`;
     var srcNote = '<span class="sd-chip-src" style="margin-left:8px">' +
         (src === 'full'
             ? (scanDate ? '全市场深析 · ' + scanDate : '全市场深析')
             : '已关注池（今日推荐+自选+持仓）') +
         ' · 仅主板（创业/科创无权限）</span>';
     if (!items.length) {
-        box.innerHTML = `<div class="sd-market-title">⭐ 明日买入候选${srcNote}</div>` +
-            '<div class="sd-market-grid"><div class="sd-market-empty-col">暂无明日候选<br><span style="color:var(--text-muted)">可点右上「🔄 全市场深析」运行一次，或候选池为空</span></div></div>';
+        box.innerHTML = `<div class="sd-market-title">明日买入候选${srcNote}</div>` +
+            '<div class="sd-market-grid"><div class="sd-market-empty-col">暂无明日候选<br><span style="color:var(--text-muted)">可点右上「全市场深析」运行一次，或候选池为空</span></div></div>';
         return;
     }
     var main = items.slice(0, mainN);
     var rest = items.slice(mainN);
-    var html = `<div class="sd-market-title">⭐ 明日买入候选（深析信号=买入/加仓，且不追高；点击查看详情）${srcNote}${headBtn}</div>`;
+    var html = `<div class="sd-market-title">明日买入候选（深析信号=买入/加仓，且不追高；点击查看详情）${srcNote}${headBtn}</div>`;
     if (main.length) {
-        html += `<div class="sd-sec-label">🎯 <b>今日主推 ${main.length} 只</b> · 资金有限建议只做这批（会自动建跟踪单）</div>` +
+        html += `<div class="sd-sec-label"><b>今日主推 ${main.length} 只</b> · 资金有限建议只做这批（会自动建跟踪单）</div>` +
             '<div class="sd-market-grid">' +
             main.map(function(it) { return _sdCardHtml(it, true); }).join('') + '</div>';
     }
@@ -2204,12 +2212,19 @@ function renderSdTrack(items, st, updatedAt) {
                '<div class="lbl">' + lbl + '</div>' +
                '<div class="val ' + (cls || '') + '">' + val + '</div></div>';
     };
+    // 口径长说明收进板块头 ⓘ tooltip（spec §3c：信息不删除、只移位）
+    var noteTip = '口径：买点=推荐日收盘，其后 ' + (p.entry_window_days || 5) +
+        ' 个交易日内回踩才成交（涨上去不追，未回踩判失效且不计胜率）；' +
+        '同一股票在持有期内再次推荐并入原单不重复建仓（推荐日后标 +N）；' +
+        '出场用推荐自带止损/止盈（止盈=本股平均上涨波幅×' +
+        Math.round((p.tp_amp_ratio || 0.33) * 100) + '% 标定的可达位，收盘达价即卖），持满 ' +
+        (p.max_hold_days || 10) + ' 个交易日按收盘了结。持仓时间按交易日计。';
     var head =
         '<div class="sd-track-head">' +
-          '<span style="font-size:var(--fs-3);font-weight:600;color:var(--text-primary)">📌 推荐跟踪 · 每笔持仓与收益</span>' +
-          '<button class="btn btn-sm" onclick="refreshSdTrack(0)" title="立即按最新行情推进一次：检查是否触发建仓/出场，并结算收益">🔄 推进</button>' +
+          '<span style="font-size:var(--fs-3);font-weight:600;color:var(--text-primary)" title="' + noteTip + '">推荐跟踪 · 每笔持仓与收益 ⓘ</span>' +
+          '<button class="btn btn-sm" onclick="refreshSdTrack(0)" title="立即按最新行情推进一次：检查是否触发建仓/出场，并结算收益">推进</button>' +
           '<input id="sdBackfillDays" type="number" class="bt-mini-input" value="30" min="1" max="90" style="width:54px;text-align:center;padding:3px 6px" title="回补交易日的天数（每个交易日都要全市场扫描一次，约 45 秒）" onkeydown="if(event.key===\'Enter\')refreshSdTrackFromInput()">' +
-          '<button class="btn btn-sm" onclick="refreshSdTrackFromInput()" title="先补跑这些交易日的全市场深析扫描（用当天及之前的行情，无未来函数），再建跟踪单并推进出场。后台执行，约 45 秒/天">⏪ 回补</button>' +
+          '<button class="btn btn-sm" onclick="refreshSdTrackFromInput()" title="先补跑这些交易日的全市场深析扫描（用当天及之前的行情，无未来函数），再建跟踪单并推进出场。后台执行，约 45 秒/天">回补</button>' +
           '<span class="text-muted" style="font-size:var(--fs-1)">每日 19:00 盘后自动跑 · 买点回踩才成交 · 卖点=止损/止盈/到期</span>' +
           (updatedAt ? '<span class="text-muted" style="font-size:var(--fs-1);margin-left:auto">更新 ' + updatedAt + '</span>' : '') +
         '</div>';
@@ -2242,7 +2257,7 @@ function renderSdTrack(items, st, updatedAt) {
             '<span style="color:var(--text-muted)">' +
             (waiting > 0 && _SD_TRACK_STATUS.indexOf('holding') >= 0
                 ? '当前 ' + waiting + ' 笔候选还在等回踩买点，成交后自动进入本列表'
-                : '每日盘后同步后自动建单；也可输入天数后点「⏪ 回补」补建历史样本') +
+                : '每日盘后同步后自动建单；也可输入天数后点「回补」补建历史样本') +
             '</span></div>';
         return;
     }
@@ -2283,14 +2298,6 @@ function renderSdTrack(items, st, updatedAt) {
         '</tr>';
     }).join('');
 
-    var note = '<div class="sd-track-note">口径：买点=推荐日收盘，其后 ' + (p.entry_window_days || 5) +
-        ' 个交易日内<b>回踩</b>才成交（涨上去不追，未回踩判失效且不计胜率）；' +
-        '同一股票在持有期内再次推荐<b>并入原单不重复建仓</b>（推荐日后标 +N）；' +
-        '出场用推荐自带止损/止盈（止盈=本股平均上涨波幅×' +
-        Math.round((p.tp_amp_ratio || 0.33) * 100) + '% 标定的可达位，收盘达价即卖），持满 ' +
-        (p.max_hold_days || 10) +
-        ' 个交易日按收盘了结。持仓时间按<b>交易日</b>计。</div>';
-
     // 回补后会有几百笔，一次全渲染既卡又难找，这里分批 + 「加载更多」
     var moreHtml = '';
     if (_sdTrackTotal > items.length) {
@@ -2310,7 +2317,7 @@ function renderSdTrack(items, st, updatedAt) {
         '<table class="sd-trade-table sd-track-table"><thead><tr>' +
         '<th>股票</th><th>推荐日</th><th>买点</th><th>建仓</th><th>卖出</th>' +
         '<th>持仓</th><th>收益</th><th>状态</th><th></th>' +
-        '</tr></thead><tbody>' + rows + '</tbody></table></div>' + note + moreHtml;
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>' + moreHtml;
 }
 
 function refreshSdTrackFromInput() {
@@ -2564,14 +2571,14 @@ function renderStockDeep(data) {
 
         <div class="sd-signal">
             <div class="sd-signal-side">
-                <div class="sd-signal-emoji">${sig.emoji || '·'}</div>
+                <div class="sd-signal-dot lv-${sig.level || 'hold'}"></div>
                 <div class="sd-signal-level" style="color:${sigColor}">${sig.label || '--'}</div>
                 <div class="sd-signal-note">节奏：${sig.rhythm_note || '--'} · 盈亏比 ${fmt(plan.risk_reward_ratio)}</div>
             </div>
             <div class="sd-card">
-                <h4>💡 当前决策依据</h4>
+                <h4>当前决策依据</h4>
                 <ul class="sd-reason-list">${reasonsHtml}</ul>
-                <h4 style="margin-top:8px">⚠️ 风险提示</h4>
+                <h4 style="margin-top:8px">⚠ 风险提示</h4>
                 <ul class="sd-reason-list">${risksHtml}</ul>
                 <div class="sd-plan">
                     <div class="sd-plan-cell"><div class="lbl">参考入场价</div><div class="val" style="color:var(--accent)">${fmt(plan.entry_price)}</div></div>
@@ -2595,19 +2602,19 @@ function renderStockDeep(data) {
 
         <div class="sd-grid-2col">
             <div class="sd-card">
-                <h4>📐 涨跌节奏 · ${rhythm.pattern || ''}</h4>
+                <h4>涨跌节奏 · ${rhythm.pattern || ''}</h4>
                 <div class="sd-card-desc">${rhythm.desc || '数据不足，暂无法识别节奏'}</div>
                 <div class="sd-kv">${rhythmKv}</div>
             </div>
             <div class="sd-card">
-                <h4>📊 量价关系 · ${vp.health || ''}</h4>
+                <h4>量价关系 · ${vp.health || ''}</h4>
                 <div class="sd-card-desc">${vp.note || '数据不足'}</div>
                 <div class="sd-kv">${vpKv}</div>
             </div>
         </div>
 
         <div class="sd-card">
-            <h4>🕒 近期建议时间线（近 ${(data.recent_advice || []).length} 个交易日）</h4>
+            <h4>近期建议时间线（近 ${(data.recent_advice || []).length} 个交易日）</h4>
             ${tlBlock}
         </div>
 
@@ -2622,7 +2629,7 @@ function renderSdPositionStats(data) {
     var ps = data.position_stats;
     if (!ps || !ps.summary) {
         return `<div class="sd-card">
-            <h4>💼 持仓统计 · 建议回测</h4>
+            <h4>持仓统计 · 建议回测</h4>
             <div class="empty-state" style="padding:14px;font-size:var(--fs-2)">近期（近 ${(data.recent_advice||[]).length} 个交易日）暂无 buy/add 建议可回测</div>
         </div>`;
     }
@@ -2673,13 +2680,13 @@ function renderSdPositionStats(data) {
     }).join('');
 
     return `<div class="sd-card">
-        <h4>💼 持仓统计 · 建议回测${capNote}${basisNote}</h4>
+        <h4>持仓统计 · 建议回测${capNote}${basisNote}</h4>
         <div class="sd-summary" style="grid-template-columns:repeat(3,1fr)">${metricCells}</div>
         <div class="sd-kv" style="margin-top:10px">
             <span>回测口径：信号日次日开盘买入、T+1，按收盘价判定止损/止盈/到期出场</span>
             <span>出场原因：${erHtml}</span>
         </div>
-        <h4 style="margin-top:10px">🧾 每笔明细（近期 buy/add 建议 → 模拟持仓）</h4>
+        <h4 style="margin-top:10px">每笔明细（近期 buy/add 建议 → 模拟持仓）</h4>
         <div style="max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:8px">
             <table class="sd-trade-table">
                 <thead><tr>
@@ -2956,9 +2963,9 @@ function saveExitExpandState(st) {
 }
 let EXIT_EXPANDED = loadExitExpandState();
 const EXIT_HORIZON_META = {
-    short: { label: '短线', icon: '⚡', hint: '持仓上限 10 个交易日' },
-    mid:   { label: '中线', icon: '📈', hint: '持仓上限 60 个交易日' },
-    long:  { label: '长线', icon: '🏔️', hint: '不限持仓期 · 趋势跟踪' },
+    short: { label: '短线', hint: '持仓上限 10 个交易日' },
+    mid:   { label: '中线', hint: '持仓上限 60 个交易日' },
+    long:  { label: '长线', hint: '不限持仓期 · 趋势跟踪' },
 };
 
 // 各周期统计 chips
@@ -3304,17 +3311,17 @@ function renderPickCard(it) {
             let exitHtml = '';
             if (ea && ea.status) {
                 const EA_MAP = {
-                    clear:    ['exit-clear', '🔴', '清仓'],
-                    reduce:   ['exit-reduce', '🟠', '减仓'],
-                    hold:     ['exit-hold', '🟢', '持有'],
-                    watching: ['exit-hold', '🕐', '待回踩'],
-                    expired:  ['exit-hold', '⚪', '未成交'],
+                    clear:    ['exit-clear', '清仓'],
+                    reduce:   ['exit-reduce', '减仓'],
+                    hold:     ['exit-hold', '持有'],
+                    watching: ['exit-hold', '待回踩'],
+                    expired:  ['exit-hold', '未成交'],
                 };
                 const _ea = EA_MAP[ea.status] || EA_MAP.hold;
-                const eaCls = _ea[0], eaIcon = _ea[1], eaLabel = _ea[2];
+                const eaCls = _ea[0], eaLabel = _ea[1];
                 exitHtml = `
                     <div class="exit-advice-badge ${eaCls}" title="${ea.reason||''}">
-                        <span>${eaIcon} ${eaLabel}</span>
+                        <span>${eaLabel}</span>
                         <span class="exit-reason">${ea.reason||''}</span>
                     </div>`;
             }
@@ -3425,7 +3432,7 @@ function renderPickCard(it) {
                             <div class="price-val">${tp}</div>
                             <div class="price-sub">${ap.reward_pct!=null?`+${ap.reward_pct}%`:'--'}</div>
                         </div>
-                        <div class="price-arrow">⛔</div>
+                        <div class="price-arrow">·</div>
                         <div class="price-cell stop">
                             <div class="price-lbl">止损</div>
                             <div class="price-val">${stop}</div>
@@ -3469,7 +3476,7 @@ function copyTodayPicks() {
     const text = '📋 今日推荐' + dateStr + '\n' + lines.join('\n').replace(/\n+$/, '');
     copyTextToClipboard(text, function(ok) {
         if (ok) {
-            if (btn) { btn.textContent = '✓ 已复制'; setTimeout(function() { btn.textContent = '📋 一键复制'; }, 2000); }
+            if (btn) { btn.textContent = '✓ 已复制'; setTimeout(function() { btn.textContent = '复制'; }, 2000); }
             showToast('已复制 ' + count + ' 只推荐（' + HORIZON_GROUPS.filter(g => (store.groups[g.key] || []).length).map(g => g.label).join('+') + '）', 'success');
         } else {
             showToast('复制失败，请手动复制', 'error');
@@ -3505,9 +3512,9 @@ function copyTextToClipboard(text, cb) {
 function renderPositionAdvice(advice) {
     if (!advice || !advice.status) return '';
     const map = {
-        clear:  { color: 'var(--danger)',  icon: '⛔', label: '建议清仓' },
-        reduce: { color: 'var(--warning)', icon: '⚠', label: '建议减仓' },
-        hold:   { color: 'var(--text-muted)', icon: '✓', label: '持有' },
+        clear:  { badge: 'badge-bad',  label: '建议清仓' },
+        reduce: { badge: 'badge-warn', label: '建议减仓' },
+        hold:   { badge: 'badge-good', label: '持有' },
     };
     const m = map[advice.status] || map.hold;
     const reason = advice.reason ? ' · ' + advice.reason : '';
@@ -3520,7 +3527,7 @@ function renderPositionAdvice(advice) {
         const src = det.stop_mode === 'atr' ? 'ATR动态' : '固定';
         stopTxt = ` · 止损 ${Number(det.stop_price).toFixed(2)}（${src}${pct ? ' ' + pct : ''}）`;
     }
-    return `<div style="padding:4px 10px;font-size:var(--fs-2);color:${m.color};border-left:2px solid ${m.color};background:rgba(255,255,255,0.02);margin-top:2px">${m.icon} 诊断：${m.label}${reason}${stopTxt}</div>`;
+    return `<div style="padding:4px 10px;font-size:var(--fs-2);color:var(--text-secondary);border-left:2px solid var(--border);background:rgba(255,255,255,0.02);margin-top:2px">诊断：<span class="badge ${m.badge}">${m.label}</span>${reason}${stopTxt}</div>`;
 }
 
 async function loadMyPositions() {
@@ -3534,11 +3541,11 @@ async function loadMyPositions() {
             if (ha && ha.count > 0 && ha.items && ha.items.length) {
                 const rows = ha.items.map(i =>
                     `<div style="font-size:var(--fs-1);color:var(--text-secondary);line-height:1.7">
-                        ${i.status==='clear'?'🔴':(i.status==='reduce'?'🟠':'🟢')}
+                        ${i.status==='clear'?'<span class="badge badge-bad">清仓</span>':(i.status==='reduce'?'<span class="badge badge-warn">减仓</span>':'<span class="badge badge-good">持有</span>')}
                         <b>${i.code}</b> ${i.name||''} — ${i.reason||''}
                      </div>`).join('');
                 adviceBanner = `<div style="margin-bottom:10px;padding:8px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:8px;background:rgba(255,255,255,0.02)">
-                    <div style="font-size:var(--fs-2);font-weight:600;margin-bottom:4px">📋 同步后持仓建议（${ha.summary||''}）</div>${rows}</div>`;
+                    <div style="font-size:var(--fs-2);font-weight:600;margin-bottom:4px">同步后持仓建议（${ha.summary||''}）</div>${rows}</div>`;
             }
         } catch(e) { /* 横幅获取失败不影响持仓列表 */ }
 
@@ -3642,7 +3649,7 @@ async function loadMyWatchlist() {
             {cacheTtl: RequestManager.CACHE_TTL});
         const items = resp.data || [];
         if (items.length === 0) {
-            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:var(--fs-2)">点 + 添加你想跟踪的股票，或直接从今日推荐开始</span><br><button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="addTopPicksToWatchlist()">⭐ 一键加入今日短线推荐前 3 名</button></div>';
+            box.innerHTML = '<div class="empty-state">还没有自选股<br><span style="color:var(--text-muted);font-size:var(--fs-2)">点 + 添加你想跟踪的股票，或直接从今日推荐开始</span><br><button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="addTopPicksToWatchlist()">一键加入今日短线推荐前 3 名</button></div>';
             return;
         }
         box.innerHTML = items.map(w => {
