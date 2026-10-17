@@ -614,6 +614,62 @@ CREATE TRIGGER tq_bundle_delete BEFORE DELETE ON idea_run_bundle
 BEGIN SELECT RAISE(ABORT, 'idea_run_bundle 不可删除'); END;
 """
 
+# L06 运行态（T3，量化策略工程师）：006 已给分诊留痕与 bundle 终稿两张不可变表，
+# 但缺「在途」载体——bundle 的 death_step/conclusion_text 一经写入不可改（正确），
+# 所以 bundle 行只能在三跑全部就绪后一次性插入。本迁移补两张表：
+#   l06_triage_session：每个 attempt 的计时起点（§2.1：attempt=2 有全新 1800s，
+#     起点不能取 idea.created_at，也不能信客户端传来，必须由服务端首次记录）
+#   l06_run：一题三跑的在途任务清单（combos 一经写入不可改，只允许推进 status/finished_at）
+# 只新增表与新迁移，不改 005/006 既有表与触发器，历史数字零触碰。
+_007_L06_RUN_STATE_SQL = """
+CREATE TABLE l06_triage_session (
+  idea_id INTEGER NOT NULL REFERENCES idea(id),
+  attempt INTEGER NOT NULL CHECK(attempt IN (1,2)),
+  started_at TEXT NOT NULL,
+  deadline_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  PRIMARY KEY (idea_id, attempt)
+);
+CREATE INDEX idx_l06_session_deadline ON l06_triage_session(deadline_at);
+CREATE TRIGGER tq_l06_session_update BEFORE UPDATE ON l06_triage_session
+BEGIN SELECT RAISE(ABORT, 'l06 分诊计时起点一经写入不可改'); END;
+CREATE TRIGGER tq_l06_session_delete BEFORE DELETE ON l06_triage_session
+BEGIN SELECT RAISE(ABORT, 'l06 分诊计时留痕不可删除'); END;
+CREATE TABLE l06_run (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL REFERENCES idea(id),
+  triage_id INTEGER REFERENCES triage_log(id),
+  combos_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK(status IN ('running','ready','partial_failed')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  finished_at TEXT
+);
+CREATE INDEX idx_l06_run_idea ON l06_run(idea_id,id);
+CREATE TRIGGER tq_l06_run_content BEFORE UPDATE ON l06_run
+WHEN NEW.idea_id IS NOT OLD.idea_id OR NEW.triage_id IS NOT OLD.triage_id
+  OR NEW.combos_json IS NOT OLD.combos_json OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'l06_run 任务清单不可变，仅可推进 status/finished_at'); END;
+CREATE TRIGGER tq_l06_run_delete BEFORE DELETE ON l06_run
+BEGIN SELECT RAISE(ABORT, 'l06_run 不可删除'); END;
+-- timeout / auto_defer 是「系统替我推进的状态」，不是我的分诊结论：
+-- 记在事件流里，不占 triage_log 的 attempt 名额（否则超时未收口会吃掉第二次预算机会）。
+CREATE TABLE l06_idea_event (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL REFERENCES idea(id),
+  attempt INTEGER NOT NULL,
+  event TEXT NOT NULL CHECK(event IN ('timeout','auto_defer')),
+  occurred_at TEXT NOT NULL,
+  reason TEXT
+);
+CREATE UNIQUE INDEX uq_l06_event ON l06_idea_event(idea_id, attempt, event);
+CREATE INDEX idx_l06_event_occurred ON l06_idea_event(occurred_at);
+CREATE TRIGGER tq_l06_event_update BEFORE UPDATE ON l06_idea_event
+BEGIN SELECT RAISE(ABORT, 'l06 事件流不可修改'); END;
+CREATE TRIGGER tq_l06_event_delete BEFORE DELETE ON l06_idea_event
+BEGIN SELECT RAISE(ABORT, 'l06 事件流不可删除'); END;
+"""
+
 # 任务1c（2026-10-17，Yu Fang 批准的数据层修复包）：
 #   source 列=推荐来源标记（live=当日链路 / backfill=事后回填观察池），
 #     仅 recommend_outcome；默认 'live' 保证旧进程写入自动落默认值。
@@ -1471,6 +1527,7 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
         _apply_versioned_migration(conn, "004_task1c_outcome_columns", _TASK1C_OUTCOME_SQL)
         _apply_versioned_migration(conn, "005_jh4_discipline", _005_JH4_SQL)
         _apply_versioned_migration(conn, "006_l06_triage", _006_L06_SQL)
+        _apply_versioned_migration(conn, "007_l06_run_state", _007_L06_RUN_STATE_SQL)
 
     print(f"[DB] 数据库初始化完成: {DB_PATH}")
 

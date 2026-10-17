@@ -331,8 +331,8 @@ def test_start_scheduler_disabled_does_nothing(monkeypatch):
 
 
 def test_start_scheduler_registers_daily_job_and_thread(monkeypatch):
-    """开启：注册 19:00 同步、21:30 夜检、21:45 纪律夜检、周一 08:30 校准 + 5 分钟 sweep，
-    标记 enabled 并起调度线程"""
+    """开启：注册 19:00 同步、21:30 夜检、21:45 纪律夜检、周一 08:30 校准、
+    偏离单 5 分钟 sweep + L06 分诊计时 1 分钟 sweep（共 6 项），标记 enabled 并起调度线程"""
     monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
     monkeypatch.setattr(runner, "_recover_and_persist", lambda: ["t-zombie"])
 
@@ -341,9 +341,11 @@ def test_start_scheduler_registers_daily_job_and_thread(monkeypatch):
 
     try:
         jobs = runner._SCHEDULER.get_jobs()
-        assert len(jobs) == 5
+        assert len(jobs) == 6
         assert (jobs[0].at_time.hour, jobs[0].at_time.minute) == (19, 0)
         assert (jobs[1].at_time.hour, jobs[1].at_time.minute) == (21, 30)
+        registered = {getattr(j.job_func.func, "__name__", "") for j in jobs}
+        assert {"_job_discipline_sweep", "_job_l06_triage_sweep"} <= registered
         assert SCHEDULER_RUNNING["enabled"] is True
         t = SCHEDULER_THREAD["t"]
         assert t is not None and t.is_alive() and t.daemon is True

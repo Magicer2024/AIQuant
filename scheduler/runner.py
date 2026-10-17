@@ -344,10 +344,12 @@ def start_scheduler():
     _SCHEDULER.every().day.at(_NIGHT_CHECK_TIME).do(_job_night_check)
     print(f"[Scheduler] 每日 {_NIGHT_CHECK_TIME} 双源夜检（持仓+信号池，只读差异清单）")
     _SCHEDULER.every(5).minutes.do(_job_discipline_sweep)
+    _SCHEDULER.every(1).minutes.do(_job_l06_triage_sweep)
     _SCHEDULER.every().day.at(_DISCIPLINE_NIGHT_TIME).do(_job_discipline_night)
     _SCHEDULER.every().monday.at(_CALIBRATION_TIME).do(_job_calibration_weekly)
     print(f"[Scheduler] 纪律装置：偏离单每 5 分钟 sweep · {_DISCIPLINE_NIGHT_TIME} 锚核对/"
           f"链导出 · 周一 {_CALIBRATION_TIME} 割肉点校准")
+    print("[Scheduler] L06 分诊闸计时：每 1 分钟 sweep（超预算记 timeout，24h 未收口自动 defer）")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)
@@ -403,6 +405,25 @@ def _job_discipline_sweep():
         with get_conn() as c:
             disc.sweep_ticket_states(c)
             disc.sweep_sealed(c)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def _job_l06_triage_sweep():
+    """L06 分诊闸计时判定（每分钟）：预算耗尽记 timeout，timeout 后 24h 未收口自动 defer。
+
+    判定只在服务端（spec §2/R4：前端倒计时是显示层，不是依据）。
+    """
+    try:
+        from core.db import get_conn
+        from backtest import l06
+        with get_conn() as c:
+            res = l06.sweep_timeouts(c)
+            c.commit()
+        if any(res.values()):
+            print(f"[Scheduler] L06 分诊计时：timeout {res['timeout_recorded']} · "
+                  f"自动 defer {res['auto_deferred']} · 终局 fail {res['final_fail']}")
     except Exception:
         import traceback
         traceback.print_exc()
