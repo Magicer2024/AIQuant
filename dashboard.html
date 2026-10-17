@@ -3348,18 +3348,23 @@ function renderStockDeepChart(data) {
     // P4 任务16 批次1（管理A 授权：仅 ECharts 布局参数）：460px 深析抽屉窄版下
     // 撑开 grid 左右边距防成交量轴长标签裁切；副标题 hint 按图宽换行不再溢出。
     // 数据字段 / 计算 / 接口零触碰。
-    var _cw = dom.getBoundingClientRect().width;
-    if (_cw && _cw < 560) {
-        var _grids = Array.isArray(opt.grid) ? opt.grid : (opt.grid ? [opt.grid] : []);
-        _grids.forEach(function (g) { g.left = 64; g.right = 12; });
-        if (opt.title && opt.title.subtextStyle) {
-            opt.title.subtextStyle = Object.assign({}, opt.title.subtextStyle,
-                { fontSize: 9, width: Math.max(140, _cw - 32), overflow: 'break' });
-        }
-    }
+    _fitKlineNarrowLayout(opt, dom);
     chart.clear();
     chart.setOption(opt);
     chart.resize();
+}
+
+// P4#8/#7 批次共用：窄容器（深析抽屉 460 / K线抽屉 375 bottom sheet）下撑开 grid 边距、
+// 副标题按宽换行。只动布局参数（grid 边距 / subtextStyle），数据字段零触碰。
+function _fitKlineNarrowLayout(opt, dom) {
+    var cw = dom && dom.getBoundingClientRect ? dom.getBoundingClientRect().width : 0;
+    if (!cw || cw >= 560) return;
+    var grids = Array.isArray(opt.grid) ? opt.grid : (opt.grid ? [opt.grid] : []);
+    grids.forEach(function (g) { g.left = cw < 430 ? 74 : 64; g.right = 12; });
+    if (opt.title && opt.title.subtextStyle) {
+        opt.title.subtextStyle = Object.assign({}, opt.title.subtextStyle,
+            { fontSize: 9, width: Math.max(140, cw - 32), overflow: 'break' });
+    }
 }
 
 // 切换 tab 后恢复缓存时，重新渲染个股深度图表（ECharts 实例绑定到新 DOM 失效）
@@ -5490,6 +5495,7 @@ function renderKlineWithIndicators(cache) {
 
     var opt = buildKlineOption(cache.kdata, dates, ohlc, volData, cache.marks);
     opt.title.text = cache.code + ' K线图';
+    _fitKlineNarrowLayout(opt, document.getElementById('klineChart'));   // P4#8：375 bottom sheet 下成交量轴标防裁切
     klineChartInst.setOption(opt);
     klineChartInst.resize();
 }
