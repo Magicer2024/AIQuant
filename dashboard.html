@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017a">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017b">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -128,26 +128,16 @@
         .sd-track-table .neg{color:var(--negative)}
         .sd-track-table td.name-td{font-family:inherit;white-space:normal}
         .sd-st{display:inline-block;padding:1px 7px;border-radius:9px;font-size:var(--fs-1);white-space:nowrap}
-        .sd-st-holding{background:rgba(var(--accent-rgb),.16);color:var(--accent)}
-        .sd-st-watching{background:rgba(var(--warning-rgb),.14);color:var(--warning)}
-        .sd-st-closed{background:rgba(var(--success-rgb),.12);color:var(--success)}
-        .sd-st-expired{background:rgba(var(--text-muted),.12);color:var(--text-muted)}
+        .sd-st-holding{background:var(--tint-accent);color:var(--accent)}
+        .sd-st-watching{background:var(--tint-warn);color:#8a5a00}
+        .sd-st-closed{background:var(--tint-good);color:var(--status-good)}
+        .sd-st-expired{background:rgba(16,24,40,.06);color:var(--text-secondary)}
         .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:var(--fs-1);padding:1px 6px;cursor:pointer;margin-right:4px}
         .sd-op:hover{border-color:var(--accent);color:var(--text-primary)}
         .sd-op.danger:hover{border-color:var(--danger);color:var(--danger)}
     </style>
-    <script>
-        // 尽早应用已保存主题，避免首屏闪烁（FOUC）
-        (function () {
-            try {
-                var t = localStorage.getItem('aiq_theme') || 'gold';
-                document.documentElement.setAttribute('data-theme', t);
-            } catch (e) {}
-        })();
-    </script>
 </head>
 <body>
-<div class="scanline"></div>
 
 <header class="header">
     <div class="header-brand">
@@ -155,10 +145,6 @@
         <h1>AI<span>Quant</span> · 个人投研台</h1>
     </div>
     <div class="header-status">
-        <label class="theme-switcher" title="切换界面主题">
-            <span class="theme-label">主题</span>
-            <select id="themeSelect" aria-label="切换主题" onchange="setTheme(this.value)"></select>
-        </label>
         <div class="status-dot" id="sysStatus"></div>
         <span id="last-update">就绪</span>
     </div>
@@ -225,47 +211,14 @@
 const API = '/api';
 let currentTab = 'home';
 
-// ─── 主题系统（Theme System） ───
-const THEMES = [
-    { id: 'gold',    label: '暖金 · 同花顺' },
-    { id: 'cyan',    label: '科技青 · 原主题' },
-    { id: 'emerald', label: '翡翠绿 · 护眼' },
-    { id: 'violet',  label: '紫罗兰 · 极光' },
-    { id: 'blue',    label: '深蓝 · 专业' },
-    { id: 'light',   label: '浅色 · 亮白' }
-];
+// ─── 主题定版（任务12 P1）：浅色唯一主题，THEMES/setTheme/localStorage/切换器链路已退役 ───
+// TX-1（深析弹窗随主题重建图表）随主题切换器一并退役记档：token 静态化后图表配色不再变化。
 
 // 读取 CSS 变量（ECharts canvas 无法解析 var()，需在 JS 侧取值）
 function cssVar(name, fallback) {
     var v = '';
     try { v = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); } catch (e) {}
     return v || fallback;
-}
-
-function setTheme(id) {
-    if (!THEMES.some(function(t) { return t.id === id; })) id = 'gold';
-    document.documentElement.setAttribute('data-theme', id);
-    try { localStorage.setItem('aiq_theme', id); } catch (e) {}
-    var sel = document.getElementById('themeSelect');
-    if (sel) sel.value = id;
-    resolveKlinePalette();
-    if (window._klineCache) renderKlineWithIndicators(window._klineCache);
-    // TX-1：深析弹窗打开时用缓存数据随新主题即时重建图表（不重新请求）
-    if (_sdDeepMode && _sd.data) { try { renderStockDeepChart(_sd.data); } catch (e) {} }
-}
-
-function initThemeSwitcher() {
-    var sel = document.getElementById('themeSelect');
-    if (sel) {
-        sel.innerHTML = THEMES.map(function(t) {
-            return '<option value="' + t.id + '">' + t.label + '</option>';
-        }).join('');
-    }
-    var cur = 'gold';
-    try { cur = localStorage.getItem('aiq_theme') || 'gold'; } catch (e) {}
-    if (!THEMES.some(function(t) { return t.id === cur; })) cur = 'gold';
-    document.documentElement.setAttribute('data-theme', cur);
-    if (sel) sel.value = cur;
 }
 
 // ─── Toast notification system ───
@@ -5279,7 +5232,7 @@ function openQuotePage() {
 }
 
 // ─── Init ───
-initThemeSwitcher();
+resolveKlinePalette();  // 图表配色一次性初始化（浅色定版后 token 静态，无主题切换重建链路）
 loadTab('home');
 </script>
 
