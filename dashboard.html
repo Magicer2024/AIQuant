@@ -166,6 +166,16 @@
 <nav class="nav-bar">
     <button class="nav-item active" onclick="switchTab('home')">首页</button>
     <button class="nav-item" onclick="switchTab('maintenance')">系统维护</button>
+    <div class="anchor-bar" id="anchorBar" role="navigation" aria-label="面板导航">
+        <span class="anchor-group">今日决策</span>
+        <a href="#panelMarket">市场速览</a><a href="#panelToday">今日推荐</a><a href="#panelReversal">反转观察</a><a href="#panelJgTrack">机构跟踪</a>
+        <span class="anchor-group">跟踪复盘</span>
+        <a href="#panelMyBook">持仓自选</a><a href="#panelRecHistory">推荐复盘</a>
+        <span class="anchor-group">研判</span>
+        <a href="#stockDeepPanel">个股深度</a><a href="#panelExplainer">新手入门</a>
+        <span class="anchor-group">系统</span>
+        <a href="#dataStatusPanel">数据状态</a><a href="#panelOptimizer">策略优化</a>
+    </div>
 </nav>
 
 <main class="content" id="content"></main>
@@ -473,6 +483,35 @@ var timerManager = {
     }
 };
 
+// ── 锚点导航条（spec §4，缓解 P1）：sticky 激活态由 IntersectionObserver 驱动 ──
+var _anchorObserver = null;
+function initAnchorNav() {
+    var bar = document.getElementById('anchorBar');
+    if (!bar || !('IntersectionObserver' in window)) return;
+    var links = bar.querySelectorAll('a[href^="#"]');
+    var current = null;
+    function setActive(id) {
+        if (current === id) return;
+        current = id;
+        for (var i = 0; i < links.length; i++) {
+            links[i].classList.toggle('active', links[i].getAttribute('href') === '#' + id);
+        }
+    }
+    if (_anchorObserver) { try { _anchorObserver.disconnect(); } catch (e) {} }
+    _anchorObserver = new IntersectionObserver(function (entries) {
+        var visible = entries.filter(function (en) { return en.isIntersecting; })
+            .sort(function (a, b) { return a.boundingClientRect.top - b.boundingClientRect.top; });
+        if (visible.length) setActive(visible[0].target.id);
+    }, { rootMargin: '-64px 0px -70% 0px', threshold: 0 });
+    for (var i = 0; i < links.length; i++) {
+        (function (a) {
+            var el = document.getElementById(a.getAttribute('href').slice(1));
+            if (el) _anchorObserver.observe(el);
+            a.addEventListener('click', function () { setActive(a.getAttribute('href').slice(1)); });
+        })(links[i]);
+    }
+}
+
 // 切页防抖：120ms 内连续点击导航只执行最后一次内容加载。
 // 旧实现每次点击都立刻 cancelAll+骨架屏+loadTab，快速点两页时第一页的加载全部白做。
 // 导航高亮点击即更新（即时视觉反馈，且不依赖延迟后的内容加载）。
@@ -481,6 +520,8 @@ function switchTab(tab) {
     for (var i = 0; i < navItems.length; i++) { navItems[i].classList.remove('active'); }
     var btn = document.querySelector('.nav-item[onclick*="' + tab + '"]');
     if (btn) btn.classList.add('active');
+    var ab = document.getElementById('anchorBar');
+    if (ab) ab.style.display = (tab === 'home') ? 'flex' : 'none';
 
     timerManager.clear('switchTabDebounce');
     timerManager.setTimeout('switchTabDebounce', function() { _doSwitchTab(tab); }, 120);
@@ -503,7 +544,7 @@ function _doSwitchTab(tab) {
         document.getElementById('content').innerHTML = cached.html;
         var scrollEl = document.querySelector('.content');
         if (scrollEl) scrollEl.scrollTop = cached.scrollTop;
-        if (tab === 'home') restoreStockDeep();   // cache 恢复时重绘个股深度图表
+        if (tab === 'home') { restoreStockDeep(); initAnchorNav(); }   // cache 恢复时重绘个股深度图表 + 锚点观察
         return;
     }
 
@@ -573,7 +614,7 @@ async function loadHomeTab(container) {
 
         <div id="alertsBanner"></div>
 
-        <div class="panel">
+        <div class="panel" id="panelMarket">
             <div class="panel-header">
                 <h3>市场速览</h3>
                 <span class="text-muted" id="marketUpdatedAt" style="font-size:var(--fs-2)"></span>
@@ -581,7 +622,7 @@ async function loadHomeTab(container) {
             <div id="indexCards" class="index-grid">加载中…</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="panelToday">
             <div class="panel-header">
                 <h3>今日推荐 · 已经有明确的买卖价位</h3>
                 <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">复制</button>
@@ -613,7 +654,7 @@ async function loadHomeTab(container) {
             <div id="stockDeepContent">加载中…</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="panelReversal">
             <div class="panel-header">
                 <h3>反转首日观察 · 首次站上 MA20 的低位入场</h3>
                 <span class="text-muted" style="font-size:var(--fs-2)" id="reversalPicksHint" title="⚠ 观察池：只标「首破 MA20 那天」的位置，非买入推荐；出场纪律对本线为负贡献，勿机械套用止损/止盈">首日大阳 × 放量 × 首破 MA20 · 只标位置不推荐买入 · 观察池 ⓘ</span>
@@ -621,7 +662,7 @@ async function loadHomeTab(container) {
             <div id="reversalPicks" class="action-plan-grid">加载中…</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="panelJgTrack">
             <div class="panel-header">
                 <h3>机构席位建仓跟踪 · 龙虎榜机构专用席位</h3>
                 <span class="text-muted" style="font-size:var(--fs-2)" id="jgTrackHint">加载中…</span>
@@ -650,7 +691,7 @@ async function loadHomeTab(container) {
             <div id="jgTrackTable">加载中…</div>
         </div>
 
-        <div class="grid-2col">
+        <div class="grid-2col" id="panelMyBook">
             <div class="panel">
                 <div class="panel-header">
                     <h3>我的持仓</h3>
@@ -676,7 +717,7 @@ async function loadHomeTab(container) {
             <div id="positionHistory">加载中…</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="panelRecHistory">
             <div class="panel-header">
                 <h3>推荐复盘 · 过去60天推荐的真实表现与出场结果</h3>
                 <span class="text-muted" style="font-size:var(--fs-2)" id="recHistoryUpdatedAt"></span>
@@ -685,7 +726,7 @@ async function loadHomeTab(container) {
             <div id="recHistoryTable">加载中…</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="panelOptimizer">
             <div class="panel-header">
                 <h3>策略优化 · 每日诊断与参数建议</h3>
                 <button class="btn btn-sm" onclick="runOptimizerNow()">立即寻优</button>
@@ -694,7 +735,7 @@ async function loadHomeTab(container) {
             <div id="optimizerPanel">加载中…</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="panelExplainer">
             <div class="panel-header">
                 <h3>新手入门 · 量化指标速查</h3>
                 <span class="text-muted" style="font-size:var(--fs-2)">点指标看白话解释</span>
@@ -702,6 +743,8 @@ async function loadHomeTab(container) {
             <div id="explainerGrid" class="explainer-grid"></div>
         </div>
     `;
+
+    initAnchorNav();
 
     // 并行加载所有数据
     await Promise.all([

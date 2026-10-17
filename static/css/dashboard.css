@@ -175,10 +175,10 @@ body::after {
 
 /* ── Navigation ── */
 .nav-bar {
-    position: relative; z-index: 1;
-    display: flex; gap: 0;
+    position: sticky; top: 0; z-index: 50;
+    display: flex; gap: 0; align-items: stretch;
     padding: 0 32px;
-    background: rgba(var(--bg-deep-rgb),0.7);
+    background: rgba(var(--bg-deep-rgb),0.92);
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
 }
@@ -205,6 +205,34 @@ body::after {
     font-size: var(--fs-1); line-height: 18px;
     background: rgba(var(--accent-rgb),0.12); border-radius: 9px;
     color: var(--accent); vertical-align: middle;
+}
+
+/* ── 锚点导航条（方案A spec §4，缓解 P1；勿复用 .nav-item 类名，避免冒烟断言冲突） ── */
+html { scroll-behavior: smooth; }
+.anchor-bar {
+    display: flex; align-items: center; gap: 2px;
+    flex: 1; min-width: 0; height: 40px; margin: 4px 0 4px 24px;
+    padding-left: 20px;
+    border-left: 1px solid var(--border);
+    overflow-x: auto; overflow-y: hidden; white-space: nowrap;
+    scrollbar-width: none;
+}
+.anchor-bar::-webkit-scrollbar { display: none; }
+.anchor-group {
+    flex: none; font-size: var(--fs-1); color: var(--text-muted);
+    letter-spacing: 0.06em; margin: 0 10px 0 2px;
+}
+.anchor-bar a {
+    flex: none; display: inline-block; padding: 4px 10px;
+    font-size: var(--fs-2); color: var(--text-secondary);
+    text-decoration: none; border-bottom: 2px solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+}
+.anchor-bar a:hover { color: var(--text-primary); }
+.anchor-bar a.active { color: var(--accent); border-bottom-color: var(--accent); }
+.panel, .grid-2col[id] { scroll-margin-top: 56px; }
+@media (max-width: 900px) {
+    .anchor-bar { margin-left: 12px; padding-left: 12px; }
 }
 
 /* ── Main content ── */
