@@ -32,6 +32,9 @@ _DAILY_SYNC_TIME = "19:00"
 _DAILY_SYNC_JOB_ID = "daily_sync_1900"
 # L05 双源夜检：21:30 在 19:00 主同步+重算链（含退避重试最晚 ~21:00）完成后跑
 _NIGHT_CHECK_TIME = "21:30"
+# JH4 纪律装置包：21:45 锚核对/反事实回填/链导出（夜检之后）；每周一 08:30 校准
+_DISCIPLINE_NIGHT_TIME = "21:45"
+_CALIBRATION_TIME = "08:30"
 
 
 def _evaluate_holdings():
@@ -340,6 +343,11 @@ def start_scheduler():
     print(f"[Scheduler] 每日 {_DAILY_SYNC_TIME} 盘后自动数据同步（含龙虎榜）")
     _SCHEDULER.every().day.at(_NIGHT_CHECK_TIME).do(_job_night_check)
     print(f"[Scheduler] 每日 {_NIGHT_CHECK_TIME} 双源夜检（持仓+信号池，只读差异清单）")
+    _SCHEDULER.every(5).minutes.do(_job_discipline_sweep)
+    _SCHEDULER.every().day.at(_DISCIPLINE_NIGHT_TIME).do(_job_discipline_night)
+    _SCHEDULER.every().monday.at(_CALIBRATION_TIME).do(_job_calibration_weekly)
+    print(f"[Scheduler] 纪律装置：偏离单每 5 分钟 sweep · {_DISCIPLINE_NIGHT_TIME} 锚核对/"
+          f"链导出 · 周一 {_CALIBRATION_TIME} 割肉点校准")
 
     if SCHEDULER_THREAD["t"] is None or not SCHEDULER_THREAD["t"].is_alive():
         SCHEDULER_THREAD["t"] = threading.Thread(target=_sched_loop, daemon=True)
@@ -382,6 +390,51 @@ def _job_night_check():
         from tools.night_check import run_and_report
         res = run_and_report()
         print(f"[Scheduler] 双源夜检 {res['summary']} → {res['report_path']}")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def _job_discipline_sweep():
+    """JH4 偏离单状态推进（逾期失效/放弃/漂移守卫）——5 分钟粒度，不做分钟级承诺。"""
+    try:
+        from core.db import get_conn
+        from core import discipline as disc
+        with get_conn() as c:
+            disc.sweep_ticket_states(c)
+            disc.sweep_sealed(c)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def _job_discipline_night():
+    """理由卡锚每日核对 + 判例反事实回填 + 哈希链外部副本导出（篡改可检出）。"""
+    try:
+        import os
+        from core.db import get_conn
+        from core import discipline as disc
+        reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "..", "reports")
+        with get_conn() as c:
+            r1 = disc.check_all_anchors(c)
+            r2 = disc.backfill_case_files(c)
+            path = disc.export_seal_chain(
+                c, reports_dir, copy_to=os.environ.get("AIQUANT_SEAL_EXPORT_DIR"))
+        print(f"[Scheduler] 纪律夜检: 锚核对 {r1} · 回填 {r2['filled_cells']} 格 → {path}")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def _job_calibration_weekly():
+    """割肉点校准每周一重算（spec §5.5）：只写新行，绝不回写任何 config 常量。"""
+    try:
+        from core.db import get_conn
+        from core.discipline_calibration import run_calibration
+        with get_conn() as c:
+            res = run_calibration(c)
+        print(f"[Scheduler] 割肉点校准: status={res['status']} n={res['n']} → {res['report_path']}")
     except Exception:
         import traceback
         traceback.print_exc()

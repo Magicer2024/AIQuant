@@ -30,7 +30,9 @@ def create_app(config=None):
     from routes.backtest import backtest_bp
     from routes.optimizer import optimizer_bp
     from routes.investor import investor_bp
-    for bp in (system_bp, sync_bp, scoring_bp, screen_bp, backtest_bp, optimizer_bp, investor_bp):
+    from routes.discipline import discipline_bp
+    for bp in (system_bp, sync_bp, scoring_bp, screen_bp, backtest_bp, optimizer_bp,
+               investor_bp, discipline_bp):
         app.register_blueprint(bp)
     init_timing(app)
 

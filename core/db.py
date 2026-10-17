@@ -316,6 +316,304 @@ CREATE TRIGGER protect_stage_delete BEFORE DELETE ON task_stage
 BEGIN SELECT RAISE(ABORT,'阶段记录不可删除'); END;
 """
 
+# 005 —— JH4 纪律装置包 + L09' 封存盲核（T2/T4，spec: shared/specs/JH4_spec.md §7）。
+#   不可逆设计：payload 字段一经写入不可改（触发器逐列 IS NOT 白名单），
+#   仅状态机推进字段可更新；修订 = 新行 + parent_id。哈希链见 core/discipline.py。
+_005_JH4_SQL = """
+CREATE TABLE trade_plan (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id INTEGER, revision INTEGER NOT NULL DEFAULT 1,
+  code TEXT NOT NULL, name TEXT,
+  status TEXT NOT NULL CHECK(status IN ('draft','alive','invalidated','stale','closed_won','closed_dead')),
+  thesis TEXT NOT NULL CHECK(length(thesis) BETWEEN 15 AND 500),
+  delta_note TEXT,
+  entry_trigger_json TEXT NOT NULL,
+  expected_return_pct REAL NOT NULL,
+  expected_horizon_days INTEGER NOT NULL CHECK(expected_horizon_days BETWEEN 1 AND 60),
+  confidence REAL NOT NULL CHECK(confidence BETWEEN 0.05 AND 0.95),
+  position_pct REAL NOT NULL CHECK(position_pct > 0 AND position_pct <= 1),
+  risk_params_json TEXT NOT NULL,
+  params_source TEXT CHECK(params_source IN ('calibrated','default','manual')),
+  calibration_id INTEGER,
+  regime_at_plan TEXT, atr_stop_at_plan REAL,
+  content_hash TEXT NOT NULL, prev_hash TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at TEXT
+);
+CREATE INDEX idx_plan_code_status ON trade_plan(code, status);
+CREATE TABLE plan_anchor (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id INTEGER NOT NULL REFERENCES trade_plan(id),
+  anchor_kind TEXT NOT NULL CHECK(anchor_kind IN
+    ('price_below','drawdown_from_entry','giveback_from_peak','deadline','indicator_below','unlock_event')),
+  indicator TEXT, comparator TEXT,
+  threshold_num REAL NOT NULL,
+  unit TEXT,
+  state TEXT NOT NULL DEFAULT 'alive' CHECK(state IN ('alive','dead','pending_data')),
+  died_at TEXT, last_checked_at TEXT,
+  check_expr_json TEXT NOT NULL
+);
+CREATE INDEX idx_anchor_plan_state ON plan_anchor(plan_id, state);
+CREATE TABLE deviation_ticket (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER,
+  code TEXT NOT NULL, action TEXT NOT NULL, qty INTEGER NOT NULL,
+  price_ref REAL NOT NULL, amount_ref REAL NOT NULL,
+  deviation_rules_json TEXT NOT NULL,
+  tier TEXT NOT NULL DEFAULT '24h' CHECK(tier IN ('24h','soft_hold')),
+  intent_reason TEXT,
+  submitted_at TEXT NOT NULL, release_at TEXT NOT NULL, expire_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN
+    ('pending','released','expired','voided_drift','withdrawn','executed','abandoned')),
+  retry_of INTEGER, drift_pct REAL, void_reason TEXT, executed_trade_id INTEGER,
+  content_hash TEXT NOT NULL, prev_hash TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX idx_ticket_status_submitted ON deviation_ticket(status, submitted_at);
+CREATE INDEX idx_ticket_code ON deviation_ticket(code, submitted_at);
+CREATE TABLE case_file (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL REFERENCES deviation_ticket(id),
+  code TEXT NOT NULL, outcome TEXT NOT NULL,
+  intent_reason TEXT, ref_price REAL, ref_amount REAL, qty INTEGER,
+  exec_ret_5 REAL, exec_ret_10 REAL, exec_ret_20 REAL,
+  counterfactual_ret_5 REAL, counterfactual_ret_10 REAL, counterfactual_ret_20 REAL,
+  worst_adverse_ret REAL, regime_at_submit TEXT,
+  archived_at TEXT NOT NULL, content_hash TEXT NOT NULL, prev_hash TEXT
+);
+CREATE INDEX idx_case_ticket ON case_file(ticket_id);
+CREATE TABLE discipline_violation (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER, ticket_id INTEGER,
+  kind TEXT NOT NULL, detected_at TEXT NOT NULL, note TEXT
+);
+CREATE TABLE risk_param_calibration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, as_of TEXT NOT NULL,
+  regime_stratum TEXT NOT NULL, n_samples INTEGER NOT NULL,
+  m_p25 REAL, m_p50 REAL, m_p75 REAL, a_p50 REAL,
+  stop_loss_pct REAL, max_single_position_pct REAL, median_cut_loss_yuan REAL,
+  sample_ids_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('calibrated','pooled','low_sample','uncalibrated')),
+  params_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE sealed_decision (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER, ticket_id INTEGER,
+  code TEXT NOT NULL, action TEXT NOT NULL, qty INTEGER NOT NULL, ref_price REAL NOT NULL,
+  triggers_json TEXT NOT NULL,
+  thesis_snapshot TEXT NOT NULL,
+  expected_return_pct REAL NOT NULL, expected_horizon_days INTEGER NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence BETWEEN 0.05 AND 0.95),
+  worst_case_pct REAL NOT NULL,
+  falsifier TEXT NOT NULL CHECK(length(falsifier) >= 15),
+  seal_note TEXT,
+  status TEXT NOT NULL DEFAULT 'sealed' CHECK(status IN ('sealed','due','blinding','reconciled')),
+  due_on TEXT NOT NULL,
+  sealed_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  content_hash TEXT NOT NULL, prev_hash TEXT
+);
+CREATE INDEX idx_seal_status_due ON sealed_decision(status, due_on);
+CREATE TABLE sealed_blind_check (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sealed_id INTEGER NOT NULL REFERENCES sealed_decision(id),
+  result_metrics_json TEXT NOT NULL,
+  recall_verdict TEXT NOT NULL CHECK(recall_verdict IN ('yes','no','partial')),
+  recall_expected_return_pct REAL NOT NULL, recall_reason TEXT NOT NULL,
+  answered_at TEXT NOT NULL,
+  gap_expected REAL, confidence_hit INTEGER, worst_case_hit INTEGER,
+  explanation_diverged REAL, revealed_at TEXT,
+  UNIQUE(sealed_id, answered_at)
+);
+CREATE TRIGGER tq_trade_plan_update BEFORE UPDATE ON trade_plan
+WHEN NEW.parent_id IS NOT OLD.parent_id OR NEW.revision IS NOT OLD.revision
+  OR NEW.code IS NOT OLD.code OR NEW.name IS NOT OLD.name
+  OR NEW.thesis IS NOT OLD.thesis OR NEW.delta_note IS NOT OLD.delta_note
+  OR NEW.entry_trigger_json IS NOT OLD.entry_trigger_json
+  OR NEW.expected_return_pct IS NOT OLD.expected_return_pct
+  OR NEW.expected_horizon_days IS NOT OLD.expected_horizon_days
+  OR NEW.confidence IS NOT OLD.confidence OR NEW.position_pct IS NOT OLD.position_pct
+  OR NEW.risk_params_json IS NOT OLD.risk_params_json
+  OR NEW.params_source IS NOT OLD.params_source
+  OR NEW.calibration_id IS NOT OLD.calibration_id
+  OR NEW.regime_at_plan IS NOT OLD.regime_at_plan
+  OR NEW.atr_stop_at_plan IS NOT OLD.atr_stop_at_plan
+  OR NEW.content_hash IS NOT OLD.content_hash OR NEW.prev_hash IS NOT OLD.prev_hash
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NOT (
+      OLD.status = NEW.status
+      OR (OLD.status='draft' AND NEW.status='alive')
+      OR (OLD.status='alive' AND NEW.status IN ('invalidated','stale','closed_won','closed_dead'))
+      OR (OLD.status='stale' AND NEW.status IN ('alive','invalidated','closed_won','closed_dead'))
+      OR (OLD.status='invalidated' AND NEW.status='closed_dead')
+  )
+BEGIN SELECT RAISE(ABORT, 'trade_plan 业务字段不可变，修订请插入新 revision 行'); END;
+CREATE TRIGGER tq_trade_plan_delete BEFORE DELETE ON trade_plan
+BEGIN SELECT RAISE(ABORT, 'trade_plan 不可删除（append-only）'); END;
+CREATE TRIGGER tq_plan_anchor_update BEFORE UPDATE ON plan_anchor
+WHEN NEW.plan_id IS NOT OLD.plan_id OR NEW.anchor_kind IS NOT OLD.anchor_kind
+  OR NEW.indicator IS NOT OLD.indicator OR NEW.comparator IS NOT OLD.comparator
+  OR NEW.threshold_num IS NOT OLD.threshold_num OR NEW.unit IS NOT OLD.unit
+  OR NEW.check_expr_json IS NOT OLD.check_expr_json
+  OR NOT (
+      OLD.state = NEW.state
+      OR (OLD.state='alive' AND NEW.state IN ('dead','pending_data'))
+      OR (OLD.state='pending_data' AND NEW.state IN ('alive','dead'))
+  )
+BEGIN SELECT RAISE(ABORT, 'plan_anchor 定义不可变，仅存活状态可推进'); END;
+CREATE TRIGGER tq_plan_anchor_delete BEFORE DELETE ON plan_anchor
+BEGIN SELECT RAISE(ABORT, 'plan_anchor 不可删除'); END;
+CREATE TRIGGER tq_ticket_update BEFORE UPDATE ON deviation_ticket
+WHEN NEW.plan_id IS NOT OLD.plan_id OR NEW.code IS NOT OLD.code
+  OR NEW.action IS NOT OLD.action OR NEW.qty IS NOT OLD.qty
+  OR NEW.price_ref IS NOT OLD.price_ref OR NEW.amount_ref IS NOT OLD.amount_ref
+  OR NEW.deviation_rules_json IS NOT OLD.deviation_rules_json
+  OR NEW.tier IS NOT OLD.tier OR NEW.intent_reason IS NOT OLD.intent_reason
+  OR NEW.submitted_at IS NOT OLD.submitted_at OR NEW.release_at IS NOT OLD.release_at
+  OR NEW.expire_at IS NOT OLD.expire_at OR NEW.retry_of IS NOT OLD.retry_of
+  OR (NEW.drift_pct IS NOT OLD.drift_pct AND OLD.drift_pct IS NOT NULL)
+  OR (NEW.void_reason IS NOT OLD.void_reason AND OLD.void_reason IS NOT NULL)
+  OR NEW.content_hash IS NOT OLD.content_hash OR NEW.prev_hash IS NOT OLD.prev_hash
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NOT (
+      OLD.status = NEW.status
+      OR (OLD.status='pending' AND NEW.status IN ('released','expired','voided_drift','withdrawn'))
+      OR (OLD.status='released' AND NEW.status IN ('executed','abandoned','voided_drift'))
+  )
+  OR (NEW.executed_trade_id IS NOT OLD.executed_trade_id
+      AND NOT (OLD.executed_trade_id IS NULL AND NEW.status='executed'))
+BEGIN SELECT RAISE(ABORT, 'deviation_ticket 内容不可变，仅状态机推进与 drift/void 一次性回填'); END;
+CREATE TRIGGER tq_ticket_delete BEFORE DELETE ON deviation_ticket
+BEGIN SELECT RAISE(ABORT, 'deviation_ticket 不可删除'); END;
+CREATE TRIGGER tq_case_update BEFORE UPDATE ON case_file
+WHEN NEW.ticket_id IS NOT OLD.ticket_id OR NEW.code IS NOT OLD.code
+  OR NEW.outcome IS NOT OLD.outcome OR NEW.intent_reason IS NOT OLD.intent_reason
+  OR NEW.ref_price IS NOT OLD.ref_price OR NEW.ref_amount IS NOT OLD.ref_amount
+  OR NEW.qty IS NOT OLD.qty OR NEW.regime_at_submit IS NOT OLD.regime_at_submit
+  OR NEW.archived_at IS NOT OLD.archived_at
+  OR NEW.content_hash IS NOT OLD.content_hash OR NEW.prev_hash IS NOT OLD.prev_hash
+  OR NOT (
+      (NEW.exec_ret_5 IS NOT OLD.exec_ret_5 AND OLD.exec_ret_5 IS NULL)
+      OR (NEW.exec_ret_10 IS NOT OLD.exec_ret_10 AND OLD.exec_ret_10 IS NULL)
+      OR (NEW.exec_ret_20 IS NOT OLD.exec_ret_20 AND OLD.exec_ret_20 IS NULL)
+      OR (NEW.counterfactual_ret_5 IS NOT OLD.counterfactual_ret_5 AND OLD.counterfactual_ret_5 IS NULL)
+      OR (NEW.counterfactual_ret_10 IS NOT OLD.counterfactual_ret_10 AND OLD.counterfactual_ret_10 IS NULL)
+      OR (NEW.counterfactual_ret_20 IS NOT OLD.counterfactual_ret_20 AND OLD.counterfactual_ret_20 IS NULL)
+      OR (NEW.worst_adverse_ret IS NOT OLD.worst_adverse_ret AND OLD.worst_adverse_ret IS NULL)
+      OR (NEW.exec_ret_5 IS OLD.exec_ret_5 AND NEW.exec_ret_10 IS OLD.exec_ret_10
+          AND NEW.exec_ret_20 IS OLD.exec_ret_20 AND NEW.counterfactual_ret_5 IS OLD.counterfactual_ret_5
+          AND NEW.counterfactual_ret_10 IS OLD.counterfactual_ret_10 AND NEW.counterfactual_ret_20 IS OLD.counterfactual_ret_20
+          AND NEW.worst_adverse_ret IS OLD.worst_adverse_ret)
+  )
+BEGIN SELECT RAISE(ABORT, 'case_file 仅反事实/盈亏列可从 NULL 回填，其余不可变'); END;
+CREATE TRIGGER tq_case_delete BEFORE DELETE ON case_file
+BEGIN SELECT RAISE(ABORT, 'case_file 不可删除（判例档案）'); END;
+CREATE TRIGGER tq_violation_update BEFORE UPDATE ON discipline_violation
+BEGIN SELECT RAISE(ABORT, 'discipline_violation 只增不改'); END;
+CREATE TRIGGER tq_violation_delete BEFORE DELETE ON discipline_violation
+BEGIN SELECT RAISE(ABORT, 'discipline_violation 只增不删'); END;
+CREATE TRIGGER tq_calibration_update BEFORE UPDATE ON risk_param_calibration
+BEGIN SELECT RAISE(ABORT, '校准行不可修改，重算请写新行'); END;
+CREATE TRIGGER tq_calibration_delete BEFORE DELETE ON risk_param_calibration
+BEGIN SELECT RAISE(ABORT, '校准历史不可删除'); END;
+CREATE TRIGGER tq_sealed_update BEFORE UPDATE ON sealed_decision
+WHEN NEW.plan_id IS NOT OLD.plan_id OR NEW.ticket_id IS NOT OLD.ticket_id
+  OR NEW.code IS NOT OLD.code OR NEW.action IS NOT OLD.action
+  OR NEW.qty IS NOT OLD.qty OR NEW.ref_price IS NOT OLD.ref_price
+  OR NEW.triggers_json IS NOT OLD.triggers_json
+  OR NEW.thesis_snapshot IS NOT OLD.thesis_snapshot
+  OR NEW.expected_return_pct IS NOT OLD.expected_return_pct
+  OR NEW.expected_horizon_days IS NOT OLD.expected_horizon_days
+  OR NEW.confidence IS NOT OLD.confidence OR NEW.worst_case_pct IS NOT OLD.worst_case_pct
+  OR NEW.falsifier IS NOT OLD.falsifier OR NEW.seal_note IS NOT OLD.seal_note
+  OR NEW.due_on IS NOT OLD.due_on OR NEW.sealed_at IS NOT OLD.sealed_at
+  OR NEW.content_hash IS NOT OLD.content_hash OR NEW.prev_hash IS NOT OLD.prev_hash
+  OR NOT (
+      OLD.status = NEW.status
+      OR (OLD.status='sealed' AND NEW.status='due')
+      OR (OLD.status='due' AND NEW.status='blinding')
+      OR (OLD.status='blinding' AND NEW.status='reconciled')
+  )
+BEGIN SELECT RAISE(ABORT, 'sealed_decision 封存内容不可变，仅状态可推进'); END;
+CREATE TRIGGER tq_sealed_delete BEFORE DELETE ON sealed_decision
+BEGIN SELECT RAISE(ABORT, 'sealed_decision 不可删除'); END;
+CREATE TRIGGER tq_blind_update BEFORE UPDATE ON sealed_blind_check
+WHEN NEW.sealed_id IS NOT OLD.sealed_id OR NEW.result_metrics_json IS NOT OLD.result_metrics_json
+  OR NEW.recall_verdict IS NOT OLD.recall_verdict
+  OR NEW.recall_expected_return_pct IS NOT OLD.recall_expected_return_pct
+  OR NEW.recall_reason IS NOT OLD.recall_reason OR NEW.answered_at IS NOT OLD.answered_at
+  OR NOT (
+      (NEW.gap_expected IS NOT OLD.gap_expected AND OLD.gap_expected IS NULL)
+      OR (NEW.confidence_hit IS NOT OLD.confidence_hit AND OLD.confidence_hit IS NULL)
+      OR (NEW.worst_case_hit IS NOT OLD.worst_case_hit AND OLD.worst_case_hit IS NULL)
+      OR (NEW.explanation_diverged IS NOT OLD.explanation_diverged AND OLD.explanation_diverged IS NULL)
+      OR (NEW.revealed_at IS NOT OLD.revealed_at AND OLD.revealed_at IS NULL)
+      OR (NEW.gap_expected IS OLD.gap_expected AND NEW.confidence_hit IS OLD.confidence_hit
+          AND NEW.worst_case_hit IS OLD.worst_case_hit AND NEW.explanation_diverged IS OLD.explanation_diverged
+          AND NEW.revealed_at IS OLD.revealed_at)
+  )
+BEGIN SELECT RAISE(ABORT, '盲核作答不可改，仅对照列可一次写入'); END;
+CREATE TRIGGER tq_blind_delete BEFORE DELETE ON sealed_blind_check
+BEGIN SELECT RAISE(ABORT, '盲核记录不可删除'); END;
+"""
+
+# 006 —— L06 30 分钟验证闭环存储（T3，spec: shared/specs/L06_spec.md §8）。
+#   分表分域：纪律装置管下单决策，L06 管想法验证，统计口径互不污染。
+#   triage_log 计时留痕一次写入不可改（elapsed 服务端算，R4 防客户端伪报）。
+_006_L06_SQL = """
+CREATE TABLE idea (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL CHECK(length(title) BETWEEN 4 AND 120),
+  hypothesis TEXT NOT NULL,
+  conditions_json TEXT NOT NULL,
+  indicators_json TEXT NOT NULL,
+  implied_hold_days INTEGER,
+  status TEXT NOT NULL DEFAULT 'new'
+    CHECK(status IN ('new','triaging','passed','failed','deferred','timeout','run_complete')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX idx_idea_status_created ON idea(status, created_at);
+CREATE TABLE triage_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL REFERENCES idea(id),
+  triage_attempt INTEGER NOT NULL DEFAULT 1 CHECK(triage_attempt BETWEEN 1 AND 2),
+  started_at TEXT NOT NULL, decided_at TEXT NOT NULL,
+  elapsed_seconds INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail','defer','timeout')),
+  death_step TEXT, checks_json TEXT NOT NULL,
+  defer_reason TEXT, overlap_rule_id INTEGER,
+  UNIQUE(idea_id, triage_attempt)
+);
+CREATE TABLE idea_run_bundle (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idea_id INTEGER NOT NULL REFERENCES idea(id),
+  triage_id INTEGER REFERENCES triage_log(id),
+  combos_json TEXT NOT NULL,
+  death_step TEXT NOT NULL, conclusion_text TEXT NOT NULL,
+  metrics_json TEXT NOT NULL,
+  report_md_path TEXT, report_json_path TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX idx_bundle_idea ON idea_run_bundle(idea_id);
+CREATE TRIGGER tq_triage_update BEFORE UPDATE ON triage_log
+BEGIN SELECT RAISE(ABORT, 'triage_log 计时留痕不可修改'); END;
+CREATE TRIGGER tq_triage_delete BEFORE DELETE ON triage_log
+BEGIN SELECT RAISE(ABORT, 'triage_log 不可删除'); END;
+CREATE TRIGGER tq_idea_content BEFORE UPDATE ON idea
+WHEN NEW.title IS NOT OLD.title OR NEW.hypothesis IS NOT OLD.hypothesis
+  OR NEW.conditions_json IS NOT OLD.conditions_json
+  OR NEW.indicators_json IS NOT OLD.indicators_json
+  OR NEW.implied_hold_days IS NOT OLD.implied_hold_days
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'idea 内容不可变，仅 status 可推进'); END;
+CREATE TRIGGER tq_idea_delete BEFORE DELETE ON idea
+BEGIN SELECT RAISE(ABORT, 'idea 不可删除'); END;
+CREATE TRIGGER tq_bundle_update BEFORE UPDATE ON idea_run_bundle
+WHEN NEW.idea_id IS NOT OLD.idea_id OR NEW.triage_id IS NOT OLD.triage_id
+  OR NEW.death_step IS NOT OLD.death_step OR NEW.conclusion_text IS NOT OLD.conclusion_text
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'bundle 死因结论一经落定不可改'); END;
+CREATE TRIGGER tq_bundle_delete BEFORE DELETE ON idea_run_bundle
+BEGIN SELECT RAISE(ABORT, 'idea_run_bundle 不可删除'); END;
+"""
+
 # 任务1c（2026-10-17，Yu Fang 批准的数据层修复包）：
 #   source 列=推荐来源标记（live=当日链路 / backfill=事后回填观察池），
 #     仅 recommend_outcome；默认 'live' 保证旧进程写入自动落默认值。
@@ -1171,6 +1469,8 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_status ON param_suggestion(status, cre
         _apply_versioned_migration(conn, "002_unified_signal_model", _UNIFIED_MODEL_SQL)
         _apply_versioned_migration(conn, "003_task_orchestration", _TASK_ORCHESTRATION_SQL)
         _apply_versioned_migration(conn, "004_task1c_outcome_columns", _TASK1C_OUTCOME_SQL)
+        _apply_versioned_migration(conn, "005_jh4_discipline", _005_JH4_SQL)
+        _apply_versioned_migration(conn, "006_l06_triage", _006_L06_SQL)
 
     print(f"[DB] 数据库初始化完成: {DB_PATH}")
 
