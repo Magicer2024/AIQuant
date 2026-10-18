@@ -96,8 +96,11 @@
         .sd-tl-item .date{font-family:var(--font-mono);color:var(--text-secondary);width:84px;flex:none}
         .sd-tl-item .close{width:64px;text-align:right;font-family:var(--font-mono);color:var(--text-primary);flex:none}
         .sd-tl-item .pct{width:56px;text-align:right;font-family:var(--font-mono);flex:none}
-        .sd-tl-item .lvl{width:88px;flex:none}
+        .sd-tl-item .lvl{min-width:88px;flex:none}
         .sd-tl-item .brief{flex:1;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .sd-tl-item.tl-recompute{opacity:.55}
+        .sd-tl-item.tl-recompute:hover{opacity:.9}
+        .sd-est-tag{display:inline-block;margin-left:5px;padding:0 5px;border:1px solid var(--border);border-radius:8px;font-size:var(--fs-1);color:var(--text-muted);vertical-align:1px;font-family:inherit}
         .sd-lvl-chip{display:inline-block;padding:2px 8px;border-radius:10px;font-size:var(--fs-1);font-weight:600}
         .sd-lvl-buy{background:var(--tint-good);color:var(--status-good)}
         .sd-lvl-add{background:rgba(255,170,60,.16);color:#ffaa3c}
@@ -2967,11 +2970,12 @@ function renderStockDeep(data) {
     var reasonsHtml = (sig.reasons || []).map(function(r){ return '<li>' + r + '</li>'; }).join('');
     var risksHtml = (sig.risks || []).map(function(r){ return '<li class="sd-risk">' + r + '</li>'; }).join('');
 
-    // 近期建议时间线
+    // 近期建议时间线（source=recompute 的日级弱化：无当日落库快照，标签由最新数据重算）
     var tls = (data.recent_advice || []).map(function(a) {
         var pctCls2 = a.pct_change != null ? (a.pct_change >= 0 ? 'idx-up' : 'idx-down') : '';
         var pctTxt = a.pct_change != null ? (a.pct_change >= 0 ? '+' : '') + fmt(a.pct_change) + '%' : '--';
-        return `<div class="sd-tl-item">
+        var dim = a.source === 'recompute' ? ' tl-recompute' : '';
+        return `<div class="sd-tl-item${dim}">
             <span class="date">${a.date}</span>
             <span class="close">${fmt(a.close)}</span>
             <span class="pct ${pctCls2}">${pctTxt}</span>
@@ -3054,6 +3058,7 @@ function renderStockDeep(data) {
 
         <div class="sd-card">
             <h4>近期建议时间线（近 ${(data.recent_advice || []).length} 个交易日）</h4>
+            ${data.recent_advice_note ? `<div class="sd-card-desc" style="margin:2px 0 8px">${data.recent_advice_note}</div>` : ''}
             ${tlBlock}
         </div>
 
@@ -3114,13 +3119,15 @@ function renderSdPositionStats(data) {
     var trHtml = trades.map(function(t) {
         var status = t.status === 'clear' ? '已了结' : '持仓中';
         var stColor = t.status === 'clear' ? 'var(--accent)' : '#ffaa3c';
+        // 当日快照判 buy/add 但被候选筛选剔除的行：三点价为回退重算估计，轻量角标提示（口径同时间线弱化）
+        var estTag = t.plan_source === 'recompute_fallback' ? '<span class="sd-est-tag">三点价为重算估计</span>' : '';
         return `<tr>
             <td>${t.signal_date || '--'}</td>
             <td>${fmt(t.entry_price)}</td>
             <td>${t.entry_date || '--'}</td>
             <td>${t.exit_date || '--'}</td>
             <td>${t.exit_price != null ? fmt(t.exit_price) : '--'}</td>
-            <td>${pct(t.return_pct)}</td>
+            <td>${pct(t.return_pct)}${estTag}</td>
             <td>${t.hold_days != null ? t.hold_days + '天' : '--'}</td>
             <td style="color:${stColor}">${t.exit_reason || status}</td>
         </tr>`;
@@ -3174,11 +3181,14 @@ function _sdBuildKlineInputs(data) {
     });
     // 买卖点标记（仅在信号切换当天标注）
     // 买点锚定在当日最低价（买在支撑/回调低点），卖点锚定在当日最高价，让标记贴住蜡烛而非悬空
+    // 方案A：只挂 source=scan_snapshot 的档位切换日——重算日档位可能被 zigzag 事后改写，
+    // 且三点价恒为 null，严禁由其他字段补画标记
     var dateK = {};
     kdata.forEach(function(d) { dateK[d.date] = d; });
     var marks = [];
     for (var j = 0; j < ra.length; j++) {
         var a = ra[j], pA = j > 0 ? ra[j - 1] : null;
+        if (a.source !== 'scan_snapshot') continue;
         var inBuy = a.level === 'buy' || a.level === 'add';
         var prevInBuy = pA && (pA.level === 'buy' || pA.level === 'add');
         var inSell = a.level === 'sell';
