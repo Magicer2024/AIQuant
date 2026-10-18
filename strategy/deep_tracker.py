@@ -39,6 +39,9 @@
         expired 但新推荐日仍在旧回踩窗口内：复活为 watching 并刷新计划（仅历史回放会命中，
                   实时模式下窗口内不可能已标 expired）；
         出场之后（exit_date < 新推荐日）或窗口已过的 expired：视为新机会，正常建新单。
+· ⚠ created_at 语义：合并刷新（_refresh_plan）**有意不改 created_at**——created_at=该单身份
+        首次建单时间，scan_date=当前生效推荐日；同股多次合并后 created_at 早于 scan_date
+        是设计使然，不是脏数据（旧推荐日全部留痕于 rerec_dates，2026-10-18 排查结论）。
 
 ⚠ 与 recommend_outcome（出场跟踪面板）的区别：那边跟踪的是**每日推荐**（fusion 打分），
   本表跟踪的是**个股深度深析信号**，两者信号源不同、互不覆盖；出场口径保持一致便于横向对比。
@@ -103,7 +106,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         last_date     TEXT,
         reasons       TEXT,            -- JSON 数组，推荐理由
         rerec_dates   TEXT,            -- JSON 数组，持有期内被再次推荐的其他推荐日（合并进本单）
-        created_at    TEXT,
+        created_at    TEXT,            -- 首次建单时间；同股合并刷新不改它，可早于 scan_date（设计使然）
         updated_at    TEXT,
         UNIQUE (scan_date, code)
     );
