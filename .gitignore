@@ -52,3 +52,5 @@ config/llm_config.yaml
 .mimosa/
 .v2c/
 .video_agent/
+.qoder-collab-runtime/
+.qoder-sop-runtime/
