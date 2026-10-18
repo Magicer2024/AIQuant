@@ -3094,11 +3094,19 @@ function renderSdPositionStats(data) {
     };
     var capNote = (s.max_hold_cap != null) ? ` · 最长持有 ${s.max_hold_cap} 个交易日` : '';
     var basisNote = s.basis_pct ? `<span style="color:var(--text-muted);font-size:var(--fs-1)">（口径：${s.basis_pct}）</span>` : '';
+    // 小样本降级：已了结 <5 笔时胜率是噪声不是信号——数字保留但灰色弱化 + 提示笔数有限（纯展示，不动任何计算）
+    var closedN = s.n_closed == null ? 0 : s.n_closed;
+    var smallSample = closedN < 5;
+    var winVal = smallSample
+        ? `<span style="color:var(--text-muted)">${fmt(s.win_rate, 1)}%</span>`
+        : fmt(s.win_rate, 1) + '%';
+    var winSub = `最佳 ${pct(s.best_return_pct)} · 最差 ${pct(s.worst_return_pct)}`
+        + (smallSample ? ` · 仅 ${closedN} 笔了结，参考性有限` : '');
 
     // 指标卡
     var metricCells = [
         ['建议笔数', s.n_trades, `${s.n_closed} 了结 · ${s.n_open} 持仓中`],
-        ['胜率', fmt(s.win_rate, 1) + '%', `最佳 ${pct(s.best_return_pct)} · 最差 ${pct(s.worst_return_pct)}`],
+        ['胜率', winVal, winSub],
         ['平均单笔', pct(s.avg_return_pct), `中位 ${pct(s.median_return_pct)}`],
         ['盈亏比', fmt(s.profit_factor, 2), `期望 ${pct(s.expectancy_pct)}`],
         ['均持仓天数', s.avg_hold_days != null ? fmt(s.avg_hold_days, 1) : '--', `最长 ${s.max_hold_days != null ? s.max_hold_days : '--'} 天`],
@@ -3138,6 +3146,7 @@ function renderSdPositionStats(data) {
         <div class="sd-summary" style="grid-template-columns:repeat(3,1fr)">${metricCells}</div>
         <div class="sd-kv" style="margin-top:10px">
             <span>回测口径：信号日次日开盘买入、T+1，按收盘价判定止损/止盈/到期出场</span>
+            <span>样本范围：仅计入 buy/add 信号日，不含观望/减仓段</span>
             <span>出场原因：${erHtml}</span>
         </div>
         <h4 style="margin-top:10px">每笔明细（近期 buy/add 建议 → 模拟持仓）</h4>
