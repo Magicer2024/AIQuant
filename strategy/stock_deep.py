@@ -712,10 +712,14 @@ def _signal_plan_at(df: pd.DataFrame, rhythm: dict, i: int,
 
 def recent_advice(df: pd.DataFrame, rhythm: dict, days: int = 30,
                   stop_mult: float = 2.5, rr_target: float = 2.5) -> list:
-    """逐日规则信号（含节奏修正），返回最近 days 个交易日的建议时间线。
+    """逐日规则信号（含节奏修正），返回最近 days 个交易日的建议时间线（纯重算口径）。
 
     对 buy/add 日额外给出当日的参考建仓计划（入场价=当日收盘 / 止损=收盘-2.5×ATR /
     止盈=本股可达位，见 _reachable_take），供前端在 K 线上标注买点并复盘"推荐是否正确"。
+
+    ⚠ 本函数只用**最新行情**重算历史，zigzag 摆动点滞后确认会把历史日期事后改写
+      （与当日实时推荐不一致，即"时间线 vs 推荐跟踪打脸"的根源）。详情页展示必须
+      经 _overlay_advice_with_snapshots 用当日落库快照校正，不要直接把它当"当时的建议"。
     """
     if len(df) < 2:
         return []
@@ -724,6 +728,103 @@ def recent_advice(df: pd.DataFrame, rhythm: dict, days: int = 30,
     out = []
     for i in range(start, len(df)):
         out.append(_signal_plan_at(df, rhythm, i, stop_mult, rr_target))
+    return out
+
+
+# ─────────────────────────────────────────────
+# 当日快照覆盖（方案A）：时间线优先读每日落库信号，杜绝 zigzag 回溯改写
+# ─────────────────────────────────────────────
+_RECOMPUTE_SUFFIX = "（重算·参考）"
+_RECENT_ADVICE_NOTE = ("无当日快照的日期为最新数据重算，zigzag 摆动点滞后确认，"
+                       "历史标签可能与当日实际推荐不一致。")
+
+
+def _load_scan_snapshots(conn, code: str, dates: list) -> dict:
+    """读该股在 dates 各日的落库快照行：{scan_date: {"signal": row|None, "level": row|None}}。
+
+    只读兜底：表不存在/查询失败按"无快照"处理（全部走重算标注），
+    展示口径修复绝不把详情页主流程拖进报错。
+    """
+    snaps: dict = {}
+    if not dates or conn is None:
+        return snaps
+    ph = ",".join("?" * len(dates))
+    try:
+        for r in conn.execute(
+            f"SELECT * FROM stock_deep_signal WHERE code = ? AND scan_date IN ({ph})",
+            [code, *dates]).fetchall():
+            snaps.setdefault(r["scan_date"], {})["signal"] = dict(r)
+    except Exception:
+        pass
+    try:
+        for r in conn.execute(
+            f"SELECT scan_date, code, level, score, base_score, rhythm_hint "
+            f"FROM stock_deep_daily_level WHERE code = ? AND scan_date IN ({ph})",
+            [code, *dates]).fetchall():
+            snaps.setdefault(r["scan_date"], {})["level"] = dict(r)
+    except Exception:
+        pass
+    return snaps
+
+
+def _overlay_advice_with_snapshots(conn, code: str, advice: list) -> list:
+    """用每日落库快照校正重算时间线（方案A核心）。
+
+    - level 以当日快照为准：优先 stock_deep_signal 的实推荐档位（buy/add），
+      其余档位取 stock_deep_daily_level 全档位行；
+    - buy/add 日三点价优先用 stock_deep_signal 落库值（与 deep_tracker 建单同源）；
+      库中无候选行（当日判为 buy/add 但被候选筛选剔除：ext>15%/ST）→ 回退重算值，
+      以 plan_source=recompute_fallback 标记；
+    - 两表都无行的日期 → source=recompute：不给三点计划（事后数据不产假计划）、
+      不挂买点标记由前端按 source 落实、label 后缀"（重算·参考）"、
+      不进任何统计样本（见 compute_position_stats）。
+    """
+    if not advice:
+        return advice
+    snaps = _load_scan_snapshots(conn, code, [a["date"] for a in advice])
+    out = []
+    for a in advice:
+        row = dict(a)
+        s = snaps.get(a["date"]) or {}
+        sig, lvl_row = s.get("signal"), s.get("level")
+        if not sig and not lvl_row:
+            row["source"] = "recompute"
+            row["label"] = f"{a.get('label')}{_RECOMPUTE_SUFFIX}"
+            row["entry_price"] = None
+            row["stop_loss"] = None
+            row["take_profit"] = None
+            out.append(row)
+            continue
+        row["source"] = "scan_snapshot"
+        level = (sig.get("level") if sig else None) or (lvl_row.get("level") if lvl_row else None)
+        if level in _LEVEL_META:
+            row["level"] = level
+            row["label"], row["emoji"] = _LEVEL_META[level]
+        src_row = sig or lvl_row
+        row["score"] = src_row.get("score")
+        row["base_score"] = src_row.get("base_score")
+        if src_row.get("rhythm_hint"):
+            row["rhythm_hint"] = src_row["rhythm_hint"]
+        if row["level"] in ("buy", "add"):
+            if sig and sig.get("entry_price") is not None:
+                row["entry_price"] = sig.get("entry_price")
+                row["stop_loss"] = sig.get("stop_loss")
+                row["take_profit"] = sig.get("take_profit")
+                row["plan_source"] = "scan_signal"
+                try:
+                    reasons = json.loads(sig.get("reasons") or "[]")
+                except Exception:
+                    reasons = []
+                if reasons:
+                    row["brief"] = reasons[0]
+            else:
+                # 快照里没有三点价（新表设计上就不存 / 当日被候选筛选剔除）→ 回退重算值
+                row["plan_source"] = "recompute_fallback"
+        else:
+            row["entry_price"] = None
+            row["stop_loss"] = None
+            row["take_profit"] = None
+        out.append(row)
     return out
 
 
@@ -758,6 +859,10 @@ def compute_position_stats(df: pd.DataFrame, advice: list, *,
     trades = []
     for a in advice:
         if a.get("level") not in ("buy", "add"):
+            continue
+        if a.get("source") == "recompute":
+            # 方案A硬规则（量化工程师裁定2）：重算日不进任何统计样本，
+            # 防"库里没有但重算声称买入"的伪造推荐污染胜率卡。
             continue
         sig_date = a["date"]
         i = date_idx.get(sig_date)
@@ -1038,8 +1143,14 @@ def analyze_stock(conn, code: str, lookback: int = DEEP_LOOKBACK, recent_days: i
         return base
 
     advice = recent_advice(df, rhythm, days=recent_days)
+    # 方案A：时间线优先读当日落库快照。仅 live 视角（as_of 未指定）做覆盖；
+    # 历史因果回放（as_of 指定）不查当前库——回放本身就是逐日快照口径的推演。
+    if as_of is None:
+        advice = _overlay_advice_with_snapshots(conn, code, advice)
     base["recent_advice"] = advice
+    base["recent_advice_note"] = _RECENT_ADVICE_NOTE
     # 持仓统计：把最近 recent_days 天内的 buy/add 建议逐笔模拟并聚合收益
+    # （重算日样本已被 compute_position_stats 按 source 排除，见方案A裁定2硬规则）
     ps = compute_position_stats(df, advice, stop_mult=2.5, rr_target=2.5)
     base["position_stats"] = ps
 
@@ -1064,12 +1175,25 @@ def analyze_stock(conn, code: str, lookback: int = DEEP_LOOKBACK, recent_days: i
     # 逐根蜡烛的计划价：与 chart.dates 同长同序的并行数组，供前端点任意一根取当天虚线。
     # 档位判定与 recent_advice 完全一致 —— 观望/减仓日的 stop/take 就是 None，
     # 前端只标出「你选中的是哪一天」，不会画出不存在的止损/止盈位。
+    # 方案A：时间线窗口内的蜡烛逐根对齐**最终 advice 行**（快照优先）：
+    #   快照日用当日落库三点价；重算日三点价为 None → 不画"事后史"的三点线与买点。
     plan_rows = [_signal_plan_at(df, rhythm, i) for i in range(len(df) - n_chart, len(df))]
+    _advice_by_date = {a["date"]: a for a in advice}
+    for pr in plan_rows:
+        a = _advice_by_date.get(pr["date"])
+        pr["source"] = a.get("source") if a else None
+        if a is not None:
+            pr["level"] = a["level"]
+            pr["entry_price"] = a["entry_price"]
+            pr["stop_loss"] = a["stop_loss"]
+            pr["take_profit"] = a["take_profit"]
     chart["plan"] = {
         "entry": [r["entry_price"] for r in plan_rows],
         "stop": [r["stop_loss"] for r in plan_rows],
         "take": [r["take_profit"] for r in plan_rows],
         "level": [r["level"] for r in plan_rows],
+        # scan_snapshot / recompute / None（窗口外老蜡烛，维持旧重算口径）
+        "source": [r.get("source") for r in plan_rows],
     }
     return base
 
@@ -1253,6 +1377,46 @@ def _migrate_signal_table(conn) -> None:
         pass
 
 
+# ─────────────────────────────────────────────
+# stock_deep_daily_level —— 全档位当日快照（方案A：详情页时间线的数据源）
+# ─────────────────────────────────────────────
+# 与 stock_deep_signal 严格分表（2026-10-18 量化策略工程师裁定1）：
+#   get_market_signal_latest / deep_tracker.sync_from_scan 都是
+#   SELECT * WHERE scan_date=? 不带 level 过滤，靠"stock_deep_signal 里只有
+#   buy/add 候选"的隐含不变量工作。全档位行混入那张表，会在当日 buy 不足
+#   top_n 时把 hold/sell 漏进「明日候选」与建单列表——动了真实推荐链。
+#   本表只回答"当日怎么看"（level/分数），无三点价，不参与推荐、建单、统计链路。
+# 写入侧口径：全市场扫描对**每只扫到的票**落最终 level，不施加候选筛选
+#   （ext>15%/ST 也照写）——"当日真实判断"与"当日可交易候选"是两个概念，
+#   后者永远只属于 stock_deep_signal。
+# ⚠ 若 SIGNAL_MODEL_MODE 切换到 shadow/unified，本表的全 level 写入钩子需要
+#   同步到 core/signal_runtime 的聚合点；当前生产为 legacy，只改 legacy 分支。
+def _ensure_daily_level_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stock_deep_daily_level (
+            scan_date   TEXT NOT NULL,
+            code        TEXT NOT NULL,
+            level       TEXT,
+            score       INTEGER,
+            base_score  INTEGER,
+            rhythm_hint TEXT,
+            created_at  TEXT,
+            PRIMARY KEY (scan_date, code)
+        )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sddl_scan "
+                 "ON stock_deep_daily_level(scan_date)")
+
+
+def _insert_daily_levels(conn, scan_date: str, rows: list):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.executemany(
+        "INSERT OR REPLACE INTO stock_deep_daily_level "
+        "(scan_date, code, level, score, base_score, rhythm_hint, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        [(scan_date, r["code"], r.get("level"), r.get("score"),
+          r.get("base_score"), r.get("rhythm_hint"), now) for r in rows])
+
+
 def candidate_board_filter() -> str:
     """stock_deep_signal 候选的板块过滤条件（WHERE 片段，与 candidate_order_by 并列）。
 
@@ -1426,29 +1590,40 @@ def _scan_conn():
     return c
 
 
-def _scan_one(code: str, lookback: int, as_of: Optional[str], *, conn=None, strict=False) -> Optional[dict]:
-    """单股深析；冻结运行显式传只读连接，strict 模式保留失败身份。"""
+def _scan_one_full(code: str, lookback: int, as_of: Optional[str], *, conn=None,
+                   strict=False) -> tuple:
+    """单股深析一次，返回 (候选行 or None, 全档位 level 行 or None)。
+
+    候选行口径与原 _scan_one 完全一致（level ∈ {buy,add} + 非ST + ext≤15），
+    保证 stock_deep_signal 写入链路逐字节不变；
+    level 行不分档位、不分候选筛选，只要有计算结果就产出（stock_deep_daily_level 数据源）。
+    """
     try:
         res = analyze_stock(conn if conn is not None else _scan_conn(), code, lookback=lookback, recent_days=0,
                             light=True, as_of=as_of)
         if res.get("insufficient"):
-            return None
+            return None, None
         sig = res.get("signal") or {}
         lvl = sig.get("level")
+        rhythm = res.get("rhythm") or {}
+        level_row = None
+        if lvl:
+            level_row = {"code": code, "level": lvl, "score": sig.get("score"),
+                         "base_score": sig.get("base_score"),
+                         "rhythm_hint": rhythm.get("position_hint") or ""}
         if lvl not in ("buy", "add"):
-            return None
+            return None, level_row
         name = res.get("name") or code
         if "ST" in name or "退" in name:
-            return None
+            return None, level_row
         tr = res.get("trend") or {}
         # ⚠ volume_price 在行情不足 20 日时返回 {"insufficient": True}，这里 or {} + .get()
         #   兜底，缺字段的候选在排序里按中性值处理（见 candidate_order_by 的 COALESCE）。
         vp = res.get("volume_price") or {}
-        rhythm = res.get("rhythm") or {}
         ext = tr.get("pct_above_ma20")
         if ext is not None and ext > 15:
-            return None
-        return {
+            return None, level_row
+        cand = {
             "code": code,
             "name": name,
             "industry": res.get("industry"),
@@ -1472,10 +1647,19 @@ def _scan_one(code: str, lookback: int, as_of: Optional[str], *, conn=None, stri
             "action_plan": sig.get("action_plan"),
             "reasons": (sig.get("reasons") or [])[:2],
         }
+        return cand, level_row
     except Exception:
         if strict:
             raise
-        return None
+        return None, None
+
+
+def _scan_one(code: str, lookback: int, as_of: Optional[str], *, conn=None, strict=False) -> Optional[dict]:
+    """单股深析；冻结运行显式传只读连接，strict 模式保留失败身份。
+
+    只取候选行（stock_deep_signal 链路）；全档位行请用 _scan_one_full。
+    """
+    return _scan_one_full(code, lookback, as_of, conn=conn, strict=strict)[0]
 
 
 # ⚠ 并行度说明（实测结论，勿凭直觉改）：
@@ -1498,8 +1682,10 @@ def run_full_market_scan(conn, max_stocks: Optional[int] = None,
     """全市场深析扫描：对全部活跃股票跑深析信号，把「买入/加仓且不追高」的候选落库。
 
     用途：每日数据同步 + 打分重算完成后调用（可后台任务），供「明日候选」读取。
-    筛选：level ∈ {buy, add}、价相对 MA20 ≤ 15%、非 ST/退市。
-    返回 { scan_date, as_of, scanned, candidates, elapsed_s, workers }。
+    筛选：level ∈ {buy, add}、价相对 MA20 ≤ 15%、非 ST/退市（只作用于 stock_deep_signal）。
+    方案A（2026-10-18）：legacy 分支同时把**全部扫到的票**的最终 level 落
+      stock_deep_daily_level（不施加候选筛选），供详情页时间线读当日快照。
+    返回 { scan_date, as_of, scanned, candidates, levels, elapsed_s, workers }。
 
     ⚠ as_of 语义：不传时默认取 scan_date，即「站在该日收盘后、只用当时可见的行情」
       来分析。这是历史回补正确性的关键 —— 若用最新行情贴历史日期的标签，
@@ -1530,6 +1716,8 @@ def run_full_market_scan(conn, max_stocks: Optional[int] = None,
         codes = codes[:max_stocks]
     from config.settings import SIGNAL_MODEL_MODE
     if SIGNAL_MODEL_MODE != "legacy":
+        # ⚠ 非 legacy 模式不写 stock_deep_daily_level：全 level 写入钩子需同步到
+        #   signal_runtime 聚合点后再启用（方案A裁定1提醒，2026-10-18）。
         if as_of != scan_date:
             raise ValueError("冻结扫描的信号日期必须等于输入截至日")
         from core.signal_runtime import prepare_signal_run, execute_signal_run
@@ -1543,10 +1731,13 @@ def run_full_market_scan(conn, max_stocks: Optional[int] = None,
         return result
     # 清掉当日旧结果（重扫覆盖）
     conn.execute("DELETE FROM stock_deep_signal WHERE scan_date = ?", (scan_date,))
+    _ensure_daily_level_table(conn)
+    conn.execute("DELETE FROM stock_deep_daily_level WHERE scan_date = ?", (scan_date,))
     conn.commit()
 
     total = len(codes)
     cands = []
+    levels: list = []
     t0 = time.time()
     n_workers = _DEFAULT_SCAN_WORKERS if workers is None else int(workers or 0)
 
@@ -1560,46 +1751,67 @@ def run_full_market_scan(conn, max_stocks: Optional[int] = None,
 
     if n_workers and n_workers > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        buf, done = [], 0
+        buf, lvl_buf, done = [], [], 0
         with ThreadPoolExecutor(max_workers=n_workers) as ex:
-            futs = [ex.submit(_scan_one, code, lookback, as_of) for code in codes]
+            futs = [ex.submit(_scan_one_full, code, lookback, as_of) for code in codes]
             for fu in as_completed(futs):
                 done += 1
                 try:
-                    r = fu.result()
+                    r, lv = fu.result()
                 except Exception:
-                    r = None
+                    r, lv = None, None
                 if r:
                     cands.append(r)
                     buf.append(r)
+                if lv:
+                    levels.append(lv)
+                    lvl_buf.append(lv)
                 if len(buf) >= batch:
                     _insert_market_signals(conn, scan_date, buf)
                     conn.commit()
                     buf = []
+                if len(lvl_buf) >= batch:
+                    _insert_daily_levels(conn, scan_date, lvl_buf)
+                    conn.commit()
+                    lvl_buf = []
                 if done % 200 == 0 or done == total:
                     _progress(done)
         if buf:
             _insert_market_signals(conn, scan_date, buf)
             conn.commit()
+        if lvl_buf:
+            _insert_daily_levels(conn, scan_date, lvl_buf)
+            conn.commit()
     else:
-        buf = []
+        buf, lvl_buf = [], []
         for idx, code in enumerate(codes):
-            r = _scan_one(code, lookback, as_of)
+            r, lv = _scan_one_full(code, lookback, as_of)
             if r:
                 cands.append(r)
                 buf.append(r)
+            if lv:
+                levels.append(lv)
+                lvl_buf.append(lv)
             if len(buf) >= batch:
                 _insert_market_signals(conn, scan_date, buf)
                 conn.commit()
                 buf = []
+            if len(lvl_buf) >= batch:
+                _insert_daily_levels(conn, scan_date, lvl_buf)
+                conn.commit()
+                lvl_buf = []
             if progress_callback and (idx % 200 == 0 or idx == total - 1):
                 _progress(idx + 1)
         if buf:
             _insert_market_signals(conn, scan_date, buf)
             conn.commit()
+        if lvl_buf:
+            _insert_daily_levels(conn, scan_date, lvl_buf)
+            conn.commit()
 
     return {"scan_date": scan_date, "as_of": as_of, "scanned": total,
-            "candidates": len(cands), "elapsed_s": round(time.time() - t0, 1),
+            "candidates": len(cands), "levels": len(levels),
+            "elapsed_s": round(time.time() - t0, 1),
             "workers": n_workers}
 
 

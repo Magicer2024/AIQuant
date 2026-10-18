@@ -20,6 +20,9 @@ spawn 模式会重新导入主模块，在 Flask 进程内起 ProcessPoolExecuto
   python tools/backfill_deep_scan.py --start 2026-06-01 --end 2026-08-28 --procs 8
   python tools/backfill_deep_scan.py --days 60 --progress-file data_cache/xxx.json
   python tools/backfill_deep_scan.py --days 30 --dry-run     # 只报计划不执行
+  python tools/backfill_deep_scan.py --days 45 --levels-only # 方案A：只回补全档位快照
+                                                             # （写 stock_deep_daily_level，
+                                                             #  不碰 stock_deep_signal/跟踪单）
 """
 from __future__ import annotations
 
@@ -34,7 +37,10 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.db import DB_PATH  # noqa: E402
-from strategy.stock_deep import _scan_one, _ensure_market_signal_table, _insert_market_signals  # noqa: E402
+from strategy.stock_deep import (  # noqa: E402
+    _scan_one, _scan_one_full, _ensure_market_signal_table, _insert_market_signals,
+    _ensure_daily_level_table, _insert_daily_levels,
+)
 from config.strategy_params import DEEP_LOOKBACK  # noqa: E402
 
 # 回看窗口必须与每日盘后扫描 / 个股深度面板同一来源，否则回补出来的历史档位
@@ -59,6 +65,21 @@ def _scan_chunk(args):
         r = _scan_one(code, LOOKBACK, as_of)
         if r:
             out.append(r)
+    return out
+
+
+def _scan_chunk_levels(args):
+    """一个进程处理一批股票，返回**全档位 level 行**（方案A：stock_deep_daily_level）。
+
+    不做候选筛选、只产出 level/score/base_score/rhythm_hint —— 绝不写
+    stock_deep_signal，推荐链数据零触碰。
+    """
+    as_of, codes = args
+    out = []
+    for code in codes:
+        lv = _scan_one_full(code, LOOKBACK, as_of)[1]
+        if lv:
+            out.append(lv)
     return out
 
 
@@ -182,6 +203,123 @@ def scan_one_day(conn, scan_date: str, codes: list, ex, procs: int,
             "elapsed_s": round(time.time() - t0, 1)}
 
 
+def scan_one_day_levels(conn, scan_date: str, codes: list, ex, procs: int,
+                        on_batch=None) -> dict:
+    """扫描单个交易日，只把全档位 level 落 stock_deep_daily_level（方案A历史回补）。
+
+    与 scan_one_day 的区别是刻意的：
+      - 不 DELETE / 不写 stock_deep_signal —— "表里只有 buy/add"的隐含不变量零触碰；
+      - 不建跟踪单、不推进出场 —— 推荐链行为逐字节不变的回归前提。
+    """
+    _ensure_daily_level_table(conn)
+    conn.execute("DELETE FROM stock_deep_daily_level WHERE scan_date = ?", (scan_date,))
+    conn.commit()
+
+    t0 = time.time()
+    n_chunks = 1 if ex is None else max(1, CHUNKS_PER_PROC * procs)
+    parts = _chunks(codes, n_chunks)
+    rows, written = [], 0
+    flush_n = 1000
+
+    if ex is None:
+        for i, p in enumerate(parts):
+            try:
+                rows.extend(_scan_chunk_levels((scan_date, p)) or [])
+            except Exception:
+                pass
+            if len(rows) >= flush_n:
+                _insert_daily_levels(conn, scan_date, rows)
+                conn.commit()
+                written += len(rows)
+                rows = []
+            if on_batch:
+                on_batch(i + 1, len(parts))
+    else:
+        from concurrent.futures import as_completed
+        futs = [ex.submit(_scan_chunk_levels, (scan_date, p)) for p in parts]
+        done = 0
+        for fu in as_completed(futs):
+            try:
+                rows.extend(fu.result() or [])
+            except Exception:
+                pass
+            done += 1
+            if len(rows) >= flush_n:
+                _insert_daily_levels(conn, scan_date, rows)
+                conn.commit()
+                written += len(rows)
+                rows = []
+            if on_batch:
+                on_batch(done, len(futs))
+    if rows:
+        _insert_daily_levels(conn, scan_date, rows)
+        conn.commit()
+        written += len(rows)
+    return {"scan_date": scan_date, "levels": written,
+            "elapsed_s": round(time.time() - t0, 1)}
+
+
+def _run_levels_only(conn, dates, args, prog, t_start) -> int:
+    """--levels-only：只补 stock_deep_daily_level 全档位快照，缺哪天补哪天。
+
+    红线：只写新表。不写 stock_deep_signal（保住"表里只有 buy/add"隐含不变量）、
+    不建跟踪单、不推进出场 —— 推荐链行为逐字节不变是本次方案的回归前提。
+    """
+    _ensure_daily_level_table(conn)
+    conn.commit()
+    have = {r[0] for r in conn.execute(
+        "SELECT DISTINCT scan_date FROM stock_deep_daily_level").fetchall()}
+    todo = [d for d in dates if d not in have]
+    codes = [r["code"] for r in conn.execute(
+        """
+        SELECT DISTINCT d.code FROM daily_price d
+        JOIN stock_info i ON i.code = d.code
+        WHERE i.is_active = 1 ORDER BY d.code
+        """).fetchall()]
+    _log(f"levels-only：目标 {len(dates)} 个交易日，已有快照 "
+         f"{len([d for d in dates if d in have])} 天，待补 {len(todo)} 天，"
+         f"股票池 {len(codes)} 只，进程数 {args.procs}")
+    if args.dry_run:
+        est = len(todo) * len(codes) * 0.020 / max(1, args.procs)
+        _log(f"[dry-run] 预估耗时 {est/60:.1f} 分钟（按 20ms/只、{args.procs} 进程）")
+        prog.done({"dry_run": True, "mode": "levels_only", "todo": len(todo),
+                   "est_minutes": round(est / 60, 1)})
+        return 0
+    if not todo:
+        _log("所有日期已有全档位快照")
+        prog.done({"mode": "levels_only", "days": len(dates), "scanned": 0,
+                   "rows": 0, "elapsed_s": round(time.time() - t_start, 1)})
+        return 0
+
+    from concurrent.futures import ProcessPoolExecutor
+    ex = ProcessPoolExecutor(max_workers=args.procs) if args.procs > 1 else None
+    res = []
+    try:
+        n_todo = len(todo)
+        for i, d in enumerate(todo):
+            prog.write(progress=round(i * 100 / n_todo, 1),
+                       message=f"回补全档位快照 {d}（{i+1}/{n_todo}）")
+
+            def _on_batch(done, total, _i=i, _d=d):
+                frac = (_i + (done / total if total else 1)) / n_todo
+                prog.write(progress=round(frac * 100, 1),
+                           message=f"回补全档位快照 {_d}（{_i+1}/{n_todo}）· {done}/{total} 批")
+
+            r = scan_one_day_levels(conn, d, codes, ex, args.procs, on_batch=_on_batch)
+            res.append(r)
+            _log(f"回补 {d}：{r['levels']} 行，{r['elapsed_s']}s")
+    finally:
+        if ex is not None:
+            ex.shutdown(wait=True)
+    result = {"mode": "levels_only", "days": len(dates), "scanned": len(todo),
+              "rows": sum(x["levels"] for x in res),
+              "dates": [x["scan_date"] for x in res],
+              "elapsed_s": round(time.time() - t_start, 1)}
+    prog.done(result)
+    _log(f"levels-only 完成：回补 {len(todo)} 天 / {result['rows']} 行")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="回补历史深析扫描日 + 补建跟踪单")
     ap.add_argument("--days", type=int, default=30, help="回补最近 N 个交易日（默认 30）")
@@ -190,6 +328,9 @@ def main():
     ap.add_argument("--procs", type=int, default=DEFAULT_PROCS, help=f"进程数（默认 {DEFAULT_PROCS}，1=串行）")
     ap.add_argument("--progress-file", default=None, help="进度 JSON 文件路径")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
+    ap.add_argument("--levels-only", action="store_true",
+                    help="只回补 stock_deep_daily_level 全档位快照（方案A时间线数据源），"
+                         "不写 stock_deep_signal、不建跟踪单、不推进出场")
     args = ap.parse_args()
 
     prog_path = args.progress_file or os.path.join(
@@ -200,6 +341,12 @@ def main():
 
     from config.settings import SIGNAL_MODEL_MODE, require_signal_model_ready
     require_signal_model_ready()
+    if args.levels_only and SIGNAL_MODEL_MODE != "legacy":
+        # 方案A裁定1：全 level 写入钩子在 shadow/unified 下需同步到 signal_runtime
+        # 聚合点，本模式只服务 legacy 历史回补，不做半套重放。
+        prog.fail("--levels-only 暂只支持 legacy 模式（SIGNAL_MODEL_MODE=" + SIGNAL_MODEL_MODE + "）")
+        _log("--levels-only 在非 legacy 模式下不支持，退出")
+        return 1
     if SIGNAL_MODEL_MODE != "legacy":
         # 统一模型下历史扫描写 replay，不投影旧表；跟踪单闭环属 C，重放不得建立前向成绩。
         from core.signal_runtime import replay_signal_range
@@ -218,6 +365,9 @@ def main():
             prog.fail("目标区间内没有交易日")
             _log("没有可回补的交易日")
             return 1
+
+        if args.levels_only:
+            return _run_levels_only(conn, dates, args, prog, t_start)
 
         # 已存在扫描结果的日期跳过（重跑安全）
         have = {r[0] for r in conn.execute(
