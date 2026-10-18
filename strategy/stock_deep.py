@@ -892,6 +892,10 @@ def compute_position_stats(df: pd.DataFrame, advice: list, *,
             "hold_days": d.get("hold_days"),
             "return_pct": d.get("current_pnl_pct"),
             "status": "clear" if res.get("status") == "clear" else "holding",
+            # 审计角标（量化工程师裁定3精修·管理A并入本轮）：三点价来源透传
+            # scan_signal=当日落库 / recompute_fallback=当日快照无候选行回退重算 /
+            # None=无快照口径的旧调用方。只透传不改任何计算，前端明细行按此加角标。
+            "plan_source": a.get("plan_source"),
         })
     if not trades:
         return None

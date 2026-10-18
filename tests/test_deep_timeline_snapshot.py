@@ -194,6 +194,8 @@ def test_timeline_overlay_snapshot_vs_recompute(conn):
     ps = res["position_stats"]
     if ps:
         assert {t["signal_date"] for t in ps["trades"]} == {d_buy}
+        # plan_source 审计透传：d_buy 三点价来自当日落库候选行
+        assert {t["plan_source"] for t in ps["trades"]} == {"scan_signal"}
 
 
 # ─────────────────────────────────────────────
@@ -217,14 +219,17 @@ def test_position_stats_recompute_exclusion(conn):
     # 无 source（外部研究脚本旧口径）→ 照常进样本，行为不变
     stats_legacy = sd.compute_position_stats(df, [dict(row)], include_curve=False)
     assert stats_legacy and stats_legacy["n_trades"] == 1
+    assert stats_legacy["trades"][0]["plan_source"] is None   # 旧调用方无该字段 → None
     # source=recompute → 硬规则排除 → 无任何可回测信号返回 None
     stats_recompute = sd.compute_position_stats(
         df, [dict(row, source="recompute")], include_curve=False)
     assert stats_recompute is None
-    # source=scan_snapshot → 进样本
+    # source=scan_snapshot → 进样本；plan_source 审计字段逐笔透传（裁定3精修小改）
     stats_snapshot = sd.compute_position_stats(
-        df, [dict(row, source="scan_snapshot")], include_curve=False)
+        df, [dict(row, source="scan_snapshot", plan_source="recompute_fallback")],
+        include_curve=False)
     assert stats_snapshot and stats_snapshot["n_trades"] == 1
+    assert stats_snapshot["trades"][0]["plan_source"] == "recompute_fallback"
 
 
 # ─────────────────────────────────────────────
