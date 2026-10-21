@@ -354,3 +354,82 @@ class TestPlanAndDeviationApi:
             "intent_reason": "破位了"})
         j = d.get_json()["data"]
         assert j["is_deviation"] is False and j["exempt"] is True and j["delay_seconds"] == 0
+
+
+# ─────────────────────────────────────────────
+# 判例回填（_job_discipline_night 夜检消费）
+# ─────────────────────────────────────────────
+class TestCaseFileBackfill:
+    def _archive_case(self, c, *, code="600002", status="executed"):
+        t0 = datetime.now() - timedelta(days=40)
+        tid = disc.insert_deviation_ticket(
+            c, plan_id=None, code=code, action="buy", qty=100, price_ref=10.0,
+            amount_ref=1000, rules=["D1"], tier="24h",
+            intent_reason="回填测试", submitted_at=t0)["ticket_id"]
+        c.execute("UPDATE deviation_ticket SET status='released' WHERE id=?", (tid,))
+        if status == "executed":
+            c.execute("UPDATE deviation_ticket SET status='executed' WHERE id=?", (tid,))
+        c.execute("""INSERT INTO case_file (ticket_id, code, outcome, ref_price, ref_amount,
+                     qty, archived_at, content_hash) VALUES (?,?,?,?,?,?,?,?)""",
+                  (tid, code, status, 10.0, 1000, 100,
+                   datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "h"))
+        return tid, t0
+
+    @staticmethod
+    def _seed_days(c, code, start, n, low_override=None):
+        days = pd.bdate_range(start=start + timedelta(days=1), periods=n).strftime("%Y-%m-%d")
+        for i, d in enumerate(days):
+            low = (low_override or {}).get(i, 9.5)
+            c.execute("INSERT OR IGNORE INTO daily_price (code, trade_date, close, high, low) "
+                      "VALUES (?,?,?,?,?)", (code, d, 10.5, 10.6, low))
+
+    def test_executed_fills_ret_and_worst_then_idempotent(self):
+        with _conn() as c:
+            tid, t0 = self._archive_case(c)
+            self._seed_days(c, "600002", t0, 25, low_override={12: 8.0})
+        with _conn() as c:
+            r = disc.backfill_case_files(c)
+        assert r == {"scanned": 1, "filled_cells": 4}   # 3 个收益格 + 最大逆行
+        with _conn() as c:
+            cf = c.execute("SELECT * FROM case_file WHERE ticket_id=?", (tid,)).fetchone()
+        for n in (5, 10, 20):
+            assert cf[f"exec_ret_{n}"] == pytest.approx(0.05, abs=1e-6)
+            assert cf[f"counterfactual_ret_{n}"] is None
+        assert cf["worst_adverse_ret"] == pytest.approx(-0.2, abs=1e-6)
+        with _conn() as c:   # 二次跑不应触发「NULL→值一次写入」触发器
+            assert disc.backfill_case_files(c) == {"scanned": 0, "filled_cells": 0}
+
+    def test_insufficient_days_then_worst_waits_for_20d_window(self):
+        with _conn() as c:
+            tid, t0 = self._archive_case(c, code="600003")
+            self._seed_days(c, "600003", t0, 12, low_override={8: 8.0})
+        with _conn() as c:
+            r = disc.backfill_case_files(c)
+        assert r["filled_cells"] == 2                     # 只有 5/10 日可算
+        with _conn() as c:
+            cf = c.execute("SELECT * FROM case_file WHERE ticket_id=?", (tid,)).fetchone()
+        assert cf["exec_ret_20"] is None and cf["worst_adverse_ret"] is None
+        with _conn() as c:                                 # 补足 20 个交易日后再跑
+            self._seed_days(c, "600003", t0, 25)
+        with _conn() as c:
+            r = disc.backfill_case_files(c)
+        assert r["filled_cells"] == 2                     # 20 日收益 + 最大逆行各一次
+        with _conn() as c:
+            cf = c.execute("SELECT * FROM case_file WHERE ticket_id=?", (tid,)).fetchone()
+        assert cf["exec_ret_20"] == pytest.approx(0.05, abs=1e-6)
+        assert cf["worst_adverse_ret"] == pytest.approx(-0.2, abs=1e-6)
+
+    def test_counterfactual_branch_fills_without_exec_cols(self):
+        with _conn() as c:
+            tid, t0 = self._archive_case(c, code="600004", status="expired")
+            self._seed_days(c, "600004", t0, 25)
+        with _conn() as c:
+            assert disc.backfill_case_files(c)["filled_cells"] == 4
+        with _conn() as c:
+            cf = c.execute("SELECT * FROM case_file WHERE ticket_id=?", (tid,)).fetchone()
+        for n in (5, 10, 20):
+            assert cf[f"counterfactual_ret_{n}"] == pytest.approx(0.05, abs=1e-6)
+            assert cf[f"exec_ret_{n}"] is None
+        assert cf["worst_adverse_ret"] == pytest.approx(-0.05, abs=1e-6)
+        with _conn() as c:
+            assert disc.backfill_case_files(c) == {"scanned": 0, "filled_cells": 0}

@@ -654,29 +654,41 @@ def _return_window(conn, code: str, ref_price: float, from_date: str, n_days: in
 
 
 def backfill_case_files(conn) -> dict:
-    """对终态判例回填 5/10/20 日 exec/counterfactual 与最大逆行（NULL→值一次写入）。"""
+    """对终态判例回填 5/10/20 日 exec/counterfactual 与最大逆行（NULL→值一次写入）。
+
+    最大逆行按 20 日观察窗在数据齐备时一次落地：case_file 触发器只允许 NULL→值写一次，
+    若先用 5/10 日短窗写入会永久锁死更差的 20 日逆行（且第二次重写会被触发器拒绝）。
+    """
     filled = scanned = 0
     with conn as c:
         cases = c.execute(
             "SELECT cf.*, t.submitted_at, t.status FROM case_file cf "
             "JOIN deviation_ticket t ON t.id=cf.ticket_id "
-            "WHERE cf.counterfactual_20 IS NULL OR cf.exec_pnl_pct_20 IS NULL").fetchall()
+            "WHERE (t.status='executed' AND (cf.exec_ret_5 IS NULL OR cf.exec_ret_10 IS NULL "
+            "  OR cf.exec_ret_20 IS NULL OR cf.worst_adverse_ret IS NULL)) "
+            "OR (t.status<>'executed' AND (cf.counterfactual_ret_5 IS NULL "
+            "  OR cf.counterfactual_ret_10 IS NULL OR cf.counterfactual_ret_20 IS NULL "
+            "  OR cf.worst_adverse_ret IS NULL))").fetchall()
         for cf in cases:
             scanned += 1
             executed = cf["status"] == "executed"
             for n in (5, 10, 20):
                 target = f"exec_ret_{n}" if executed else f"counterfactual_ret_{n}"
-                if cf[target if target in cf.keys() else "id"] is not None:
+                if cf[target] is not None:
                     continue
-                ret, adverse = _return_window(c, cf["code"], cf["ref_price"] or 0,
-                                              str(cf["submitted_at"])[:10], n)
+                ret, _ = _return_window(c, cf["code"], cf["ref_price"] or 0,
+                                        str(cf["submitted_at"])[:10], n)
                 if ret is None:
                     continue
                 c.execute(f"UPDATE case_file SET {target}=? WHERE id=?", (round(ret, 6), cf["id"]))
-                if adverse is not None and cf["worst_adverse_ret"] is None:
+                filled += 1
+            if cf["worst_adverse_ret"] is None:
+                _, adverse = _return_window(c, cf["code"], cf["ref_price"] or 0,
+                                            str(cf["submitted_at"])[:10], 20)
+                if adverse is not None:
                     c.execute("UPDATE case_file SET worst_adverse_ret=? WHERE id=?",
                               (round(adverse, 6), cf["id"]))
-                filled += 1
+                    filled += 1
     return {"scanned": scanned, "filled_cells": filled}
 
 
