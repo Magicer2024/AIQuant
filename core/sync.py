@@ -76,7 +76,7 @@ def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") ->
     各数据源原始单位与换算：
         baostock : volume=股,   amount=元    → 无需换算
         akshare  : volume=手,   amount=元    → volume ×100 转股
-        tencent  : 无volume,    amount=万元  → amount ×10000 转元；volume 用 amount/close 估算(股)
+        tencent  : amount列实为成交量(手)，无成交额 → volume=手×100；amount 用 volume×close 估算
     """
     if df.empty:
         return 0
@@ -106,13 +106,19 @@ def _write_daily_price(code: str, df: pd.DataFrame, source: str = "baostock") ->
         # 腾讯直连（core/tx_kline.py）：模块内已统一 volume=股 / amount=元，无需换算
         pass
     elif source == "tencent":
-        # 腾讯 stock_zh_a_hist_tx: amount 单位是"万元"，转成元
+        # 腾讯 stock_zh_a_hist_tx 的 amount 列实为「成交量(手)」，不是成交额（2026-10 实测）：
+        # 175,897 对应 2026-06-26 的 175,897 手。成交额接口不提供，用 volume(股)×close 估算。
+        if "volume" not in df.columns:
+            df["volume"] = 0.0
         if "amount" in df.columns:
-            df["amount"] = df["amount"].fillna(0) * 10000
-        # 腾讯不返回 volume，用 成交额(元)/收盘价 估算成交量(股)
-        if all(col in df.columns for col in ("volume", "amount", "close")):
-            mask = (df["volume"].fillna(0) == 0) & (df["amount"] > 0) & (df["close"] > 0)
-            df.loc[mask, "volume"] = df.loc[mask, "amount"] / df.loc[mask, "close"]
+            lots = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+            vol = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+            mask = (vol == 0) & (lots > 0)
+            if mask.any():
+                df.loc[mask, "volume"] = lots[mask] * 100.0
+                df.loc[mask, "amount"] = (df.loc[mask, "volume"]
+                                          * pd.to_numeric(df.loc[mask, "close"],
+                                                          errors="coerce").fillna(0))
 
     # —— 2. 写入前清洗：拦截负价格/OHLC错位/负成交量等脏值 ——
     try:
@@ -604,35 +610,36 @@ def _format_code_for_tencent(code: str) -> str:
 
 
 def _sync_one_stock_tencent(code: str, start_date: str, end_date: str, verbose: bool = False) -> bool:
-    """腾讯财经备用数据源（akshare stock_zh_a_hist_tx）"""
+    """腾讯财经备用数据源（akshare stock_zh_a_hist_tx）。
+
+    接口列 date/open/close/high/low/amount，其中 amount 实为成交量(手)（2026-10 实测），
+    不是成交额。这里统一换算为 volume=股、amount=元(估算)，涨跌幅用前收计算
+    （多取 10 个自然日暖机，避免首行 pct=0）。
+    """
     import akshare as ak
     tx_code = _format_code_for_tencent(code)
+    warm_start = (datetime.strptime(start_date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
     df = ak.stock_zh_a_hist_tx(
         symbol=tx_code,
-        start_date=start_date, end_date=end_date, adjust="qfq"
+        start_date=warm_start, end_date=end_date, adjust="qfq"
     )
     if df is not None and not df.empty:
-        # 腾讯源列名: date, open, close, high, low, amount
-        # 补充缺失列
-        if 'volume' not in df.columns:
-            df['volume'] = 0.0
-        if 'turnover' not in df.columns:
-            df['turnover'] = 0.0
-        if 'pct_change' not in df.columns:
-            # 用 close 和 open 估算涨跌幅
-            df['pct_change'] = ((df['close'] - df['open']) / df['open'].replace(0, float('nan')) * 100).fillna(0)
-        df.rename(columns={
-            "date": "date", "open": "open", "close": "close",
-            "high": "high", "low": "low", "volume": "volume",
-            "amount": "amount", "pct_change": "pct_change", "turnover": "turnover"
-        }, inplace=True)
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
+        # amount 列 → 成交量(手)，再转股；成交额用 股数×收盘价 估算（接口不提供）
+        df = df.rename(columns={"amount": "volume_lot"})
+        df["volume"] = pd.to_numeric(df["volume_lot"], errors="coerce").fillna(0) * 100.0
+        df["amount"] = df["volume"] * pd.to_numeric(df["close"], errors="coerce").fillna(0)
+        df["pct_change"] = (df["close"].pct_change() * 100).fillna(0)
+        df["turnover"] = 0.0
+        df["date"] = pd.to_datetime(df["date"])
+        # 暖机行只用于算涨跌幅，不落库/不入 Qlib
+        df = df[df["date"] >= pd.Timestamp(datetime.strptime(start_date, "%Y%m%d"))].copy()
+        if df.empty:
+            return False
+        df.set_index("date", inplace=True)
         df_qlib = df.reset_index().rename(columns={"date": "trade_date"})
         append_daily_data(code, df_qlib)
-        # 腾讯 stock_zh_a_hist_tx：amount=万元、无 volume —— 必须走 source="tencent"
-        # 分支（amount ×10000 转元 + volume 用 amount/close 估算股），否则会写进万元/0。
-        n = _write_daily_price(code, df, source="tencent")
+        # 已在上面完成手→股/成交额换算，走 tencent_direct（模块内已统一单位，不再二次换算）
+        n = _write_daily_price(code, df, source="tencent_direct")
         if verbose:
             print(f"  [{code}] 腾讯财经 OK (+{n} 行)")
         return True
