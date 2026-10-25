@@ -392,7 +392,7 @@ def _format_code_for_baostock(code: str) -> str:
     
     规则：
     - 600/601/603/688 开头 → sh.600000（上交所）
-    - 000/001/002/003/300 开头 → sz.000001（深交所）
+    - 000/001/002/003/30x 开头 → sz.000001（深交所创业板含 300/301/302）
     - 430/830/870/920 开头 → bj.920000（北交所）
     """
     # 如果已经是 baostock 格式（小写前缀），直接返回
@@ -413,7 +413,7 @@ def _format_code_for_baostock(code: str) -> str:
     # 根据代码前缀判断交易所（baostock 使用小写前缀）
     if code.startswith(('600', '601', '603', '605', '688', '689')):
         return f"sh.{code}"
-    elif code.startswith(('000', '001', '002', '003', '300', '301')):
+    elif code.startswith(('000', '001', '002', '003', '300', '301', '302', '303')):
         return f"sz.{code}"
     elif code.startswith(('430', '830', '870', '920')):
         return f"bj.{code}"

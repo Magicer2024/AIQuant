@@ -33,3 +33,40 @@ def test_other_stock_rejected():
 def test_degenerate_values_rejected():
     assert not _scaled_match(_stored(0, 10.5, 9.8, 10.2), 10.0, 10.5, 9.8, 10.2)
     assert not _scaled_match(_stored(10.0, 10.5, 9.8, 0), 10.0, 10.5, 9.8, 10.2)
+
+
+def test_chinext_302_code_maps_to_shenzhen():
+    """302 开头是深市创业板新号段：曾落进「默认 sh.」→ baostock 永远查不到，
+    302132 整段历史因此走腾讯兜底（换手率/涨跌幅全 0）。"""
+    from core.sync import _format_code_for_baostock
+    from tools.fix_tencent_amount_bug import _bs_code
+
+    assert _format_code_for_baostock("302132") == "sz.302132"
+    assert _bs_code("302132") == "sz.302132"
+
+
+def test_close_anchored_relaxation_accepts_small_ohlc_drift():
+    """2026-10-23 全市场回补遗留 189 行：收盘按 q 折算完全吻合，
+    只有开/高偏低 1%~2%（历史写入精度），严格 1% 闸门会误伤。"""
+    from tools.backfill_pct_turnover import _close_anchored_match
+
+    # 603165 2025-01-02 实况：库内 9.779/10.259/9.609/9.709，baostock 12.30/12.78/12.13/12.23
+    assert _close_anchored_match(_stored(9.779, 10.259, 9.609, 9.709),
+                                 12.30, 12.78, 12.13, 12.23)
+    # 最差 2.07% 的上限内
+    assert _close_anchored_match(_stored(10.0, 10.5, 9.8, 10.2),
+                                 10.0, 10.71, 9.8, 10.2)
+
+
+def test_close_anchored_relaxation_still_rejects_real_mismatch():
+    from tools.backfill_pct_turnover import _close_anchored_match
+
+    # 开盘偏 5%（超出 3% 上限）
+    assert not _close_anchored_match(_stored(10.0, 10.5, 9.8, 10.2),
+                                     10.5, 10.5, 9.8, 10.2)
+    # 最低价偏 4%
+    assert not _close_anchored_match(_stored(10.0, 10.5, 9.8, 10.2),
+                                     10.0, 10.5, 10.2, 10.2)
+    # 收盘对不上（q 无法解释）时的退化入参
+    assert not _close_anchored_match(_stored(10.0, 10.5, 9.8, 10.2),
+                                     0.0, 10.5, 9.8, 10.2)

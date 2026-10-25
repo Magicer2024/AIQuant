@@ -24,9 +24,11 @@ tools/fix_tencent_amount_bug.py —— 修复腾讯兜底路径写坏的成交�
   2) 缩放：库内 OHLC 若只是与不复权差「一个复权系数 q」（除权除息后的正常
      现象），则 open/high/low/close 全部按 q 折算后逐项比对 ≤1% → 视为同一股
      同日，量额（与复权基准无关）照取。实测首批 216 行走的是这条路。
-  3) 腾讯兜底：baostock 无数据的（如 2026-05 上市新股 302132），用腾讯
+  3) 腾讯兜底：baostock 确实查不到的行，用腾讯
      stock_zh_a_hist_tx(qfq) 的 amount(手)×100 作 volume，成交额按
      volume×(高+低+收)/3 估算，涨跌幅用前收计算；turnover 无法获得保持 0。
+     （注：302132 曾因 302 前缀未映射到深市而误判为「baostock 无数据」，
+      映射修正后其量额/换手/涨跌幅已由 tools/repair_stock_bs_fields.py 重取。）
 
 用法：
   python tools/fix_tencent_amount_bug.py                 # dry-run：只统计，不写库
@@ -62,7 +64,7 @@ def _bs_code(code: str) -> str:
         return f"sh.{code}"
     if code.startswith(("430", "830", "870", "920")):
         return f"bj.{code}"
-    if code.startswith(("000", "001", "002", "003", "300", "301")):
+    if code.startswith(("000", "001", "002", "003", "300", "301", "302", "303")):
         return f"sz.{code}"
     return f"sh.{code}"
 
