@@ -1352,6 +1352,9 @@ async function loadTodayPicks(isFallback) {
         box.innerHTML = HORIZON_GROUPS.map(g => renderPickGroup(g, groups[g.key] || [])).join('');
         // 出场跟踪嵌入到对应周期小板块底下（与 pickDate 无关——出场跟踪是「7月20日起累计」，
         // 切换推荐日期不影响出场统计，故只拉一次缓存到 _exitTrackData）
+        // 2026-10-26：该接口冷启动实测 62s、热态 6s，此前返回前这块是空白，
+        // 看起来像「跟踪历史不见了」。先铺占位，失败给可点重试，不再静默吞异常。
+        HORIZON_GROUPS.forEach(g => setPickExitPlaceholder(g.key, 'loading'));
         try {
             if (!window._exitTrackData) {
                 const er = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice',
@@ -1359,13 +1362,42 @@ async function loadTodayPicks(isFallback) {
                 window._exitTrackData = (er && er.data) || {};
             }
             HORIZON_GROUPS.forEach(g => renderPickExitEmbed(g.key, window._exitTrackData));
-        } catch (e) { /* 出场跟踪嵌入失败不阻断推荐展示 */ }
+        } catch (e) {
+            HORIZON_GROUPS.forEach(g => setPickExitPlaceholder(g.key, 'error'));
+        }
     } catch(e) {
         if (box) box.innerHTML = panelError('loadTodayPicks');
     }
 }
 
 // 出场跟踪嵌入：找到对应 hz 的 .pick-exit-mount，把迷你版渲染进去
+// 占位态（loading/error）：接口重计算 6~62s，不能让这一段空白无提示
+function setPickExitPlaceholder(hz, state) {
+    var mount = document.querySelector('#todayPicks .pick-group[data-hz="' + hz + '"] .pick-exit-mount');
+    if (!mount) return;
+    var meta = EXIT_HORIZON_META[hz] || { label: hz };
+    if (state === 'error') {
+        mount.innerHTML = '<div class="pick-exit-empty">' + meta.label + '出场跟踪加载失败（接口超时或服务忙）'
+            + ' · <a href="javascript:void(0)" onclick="retryPickExit()" style="color:var(--accent)">点此重试</a></div>';
+        return;
+    }
+    mount.innerHTML = '<div class="pick-exit-empty">' + meta.label
+        + '出场跟踪加载中…（需重算出场状态，首次可能数十秒）</div>';
+}
+
+// 失败重试：清掉缓存后重新拉一次出场跟踪（不动推荐数据）
+async function retryPickExit() {
+    window._exitTrackData = null;
+    HORIZON_GROUPS.forEach(function (g) { setPickExitPlaceholder(g.key, 'loading'); });
+    try {
+        var er = await RequestManager.fetch('exitTrack', API + '/investor/exit_advice', {cacheTtl: 0});
+        window._exitTrackData = (er && er.data) || {};
+        HORIZON_GROUPS.forEach(function (g) { renderPickExitEmbed(g.key, window._exitTrackData); });
+    } catch (e) {
+        HORIZON_GROUPS.forEach(function (g) { setPickExitPlaceholder(g.key, 'error'); });
+    }
+}
+
 function renderPickExitEmbed(hz, d) {
     var mount = document.querySelector('#todayPicks .pick-group[data-hz="' + hz + '"] .pick-exit-mount');
     if (!mount) return;

@@ -102,6 +102,19 @@ def _ensure_personal_tables():
 
 # 出场跟踪编排已下沉 core/services/exit_tracking.py（T7）
 from core.services.exit_tracking import build_exit_advice_payload
+from utils.cache import ttl_cache
+
+
+@ttl_cache(60)
+def _exit_advice_cached():
+    """出场跟踪全量视图的 60s 结果缓存（2026-10-26）。
+
+    实测热态 6s、冷启动 62s（首次要建 regime 序列 + 全量价格帧），而前端
+    今日推荐/跟踪两个 tab 每次挂载都会拉一次。缓存只放在路由层：回测/诊断
+    工具直接调 build_exit_advice_payload，会在同一进程里改参数反复执行，
+    缓存进服务层会让网格回测拿到上一组参数的结果。
+    """
+    return build_exit_advice_payload()
 
 
 @investor_bp.route("/today", methods=["GET"])
@@ -196,7 +209,7 @@ def exit_advice():
     core.services.exit_tracking.build_exit_advice_payload（与今日推荐/复盘同口径）。
     """
     try:
-        return ok(build_exit_advice_payload())
+        return ok(_exit_advice_cached())
     except Exception as e:
         return fail(f"出场建议评估失败: {e}", 500)
 
