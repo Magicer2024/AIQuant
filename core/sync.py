@@ -196,6 +196,16 @@ BASE_INTERVAL    = 0.05         # baostock 无频率限制，0.05秒即可
 BATCH_SIZE       = 100          # 每批处理股票数
 INTER_BATCH_DELAY = 0.5         # 每批次间隔（秒）
 
+# 同步幂等：某交易日行情「已完整入库」的覆盖率门槛。
+# 单一真源：daily_sync(min_coverage) 与 daily_sync_by_date 的幂等护栏共用，
+# 避免两处阈值漂移；绝对行数下限防止分母异常时把少量数据误判为完整。
+SYNC_MIN_COVERAGE = 0.9
+SYNC_MIN_ABS_ROWS = 1000
+# 第二道护栏：行情齐但信号未产出 = 上轮重算链失败，不能跳过。
+# 2026-11-06 只读基线：近 27 个交易日 stock_signal 每日 331~692 行、零缺失，
+# 取 50（约 6 倍余量）只用于识别「重算完全没跑」，不判定信号质量。
+SYNC_MIN_SIGNAL_ROWS = 50
+
 # ─────────────────────────────────────────────
 # 交易日判断工具
 # ─────────────────────────────────────────────
@@ -455,6 +465,11 @@ def sync_one_stock(code: str, start_date: str = HISTORY_START,
 
     注意：baostock 的 query_history_k_data_plus 不是线程安全的，
     如果在多线程环境中使用，需要确保每个线程有自己的登录会话
+
+    2026-11-06 现场核查：本函数每次调用自带 login/logout，**仅适用于**
+    init_sync（一次性全量初始化）、单股修复与 __main__ 调试。每日批量链
+    daily_sync 用单次会话 + 内联查询，循环内不调用本函数；请勿在批量循环里
+    复用，否则会退化为逐股登录（旧评审所称「baostock 反复登录」并不在生产链）。
 
     :param auto_login: 为 True 时自动 login/logout；为 False 时依赖外部已登录的会话，
                        适合批量调用场景（外部统一 login，批量查询后再 logout）
@@ -808,7 +823,7 @@ def _clear_sync_cache(start_date: str, end_date: str):
 
 
 def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 1,
-               min_coverage: float = 0.9, target: str = "all",
+               min_coverage: float = SYNC_MIN_COVERAGE, target: str = "all",
                recalc: bool = True) -> dict:
     """
     每天运行一次：增量拉取当日行情（单线程版本，baostock 不支持多线程）
@@ -898,6 +913,9 @@ def daily_sync(verbose: bool = True, progress_callback=None, max_workers: int = 
         end_date = end_date.strftime("%Y-%m-%d")
 
         # Always re-sync at least the last 5 calendar days to catch bad data
+        # 2026-11-06 说明：本函数是东财快路径失败时的 baostock 兜底（慢路径），
+        # 现场 sync_log 显示近一个月未触发；保留 5 自然日回拉是上游脏数据自愈设计，
+        # 不要删，也照旧不影响主链 daily_sync_by_date。
         min_start = (today - timedelta(days=5)).strftime("%Y-%m-%d")
         if start_date > min_start:
             start_date = min_start
@@ -2028,6 +2046,13 @@ def _run_post_recalc_hooks() -> dict:
         print(f"  推荐结果追踪: {result['outcome_updated']} 条评估更新")
     except Exception as e:
         print(f"  [WARN] 推荐结果追踪失败（不影响主流程）: {e}")
+    # 筹码影子组评估：独立 try，仅写 recommend_outcome_shadow；与线上评估隔离，
+    # 影子侧任何异常不得影响线上推荐/复盘（2026-11-08 第十四轮 P0 修复调用断档）。
+    try:
+        from core.outcome_tracker import evaluate_shadow_outcomes
+        evaluate_shadow_outcomes()
+    except Exception as e:
+        print(f"  [WARN] 影子组评估失败（不影响主流程）: {e}")
     try:
         from strategy.optimizer import run_post_sync as _optimizer_run
         opt = _optimizer_run()
@@ -2141,6 +2166,13 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
             from core.outcome_tracker import insert_new_outcomes, evaluate_outcomes
             insert_new_outcomes()
             evaluate_outcomes()
+            # 影子评估独立旁路：异常只告警，不影响线上投影/同步结果
+            try:
+                from core.outcome_tracker import evaluate_shadow_outcomes
+                evaluate_shadow_outcomes()
+            except Exception as e:
+                if verbose:
+                    print(f"  [WARN] 影子组评估失败（不影响主流程）: {e}")
         from core.repository.price_repo import refresh_latest_price
         refresh_latest_price(codes if target == "watchlist" else None)
         return result
@@ -2289,6 +2321,14 @@ def recalc_incremental_signals(trade_dates: list[str] | None = None,
     except Exception as e:
         if verbose:
             print(f"  [WARN] 复盘追踪失败（不影响主流程）: {e}")
+
+    # ── 筹码影子组评估（第十四轮 P0）：独立 try 旁路，只写影子表 ──
+    try:
+        from core.outcome_tracker import evaluate_shadow_outcomes
+        evaluate_shadow_outcomes()
+    except Exception as e:
+        if verbose:
+            print(f"  [WARN] 影子组评估失败（不影响主流程）: {e}")
 
     # ── 刷新 latest_price 物化表 ──
     # 增量重算会重写 daily_price 分数列并生成当日新信号；若不刷新，物化表会
@@ -2508,10 +2548,70 @@ def recalc_all_scores(progress_callback=None, target: str = "all", *, replay_dat
 # ─────────────────────────────────────────────
 # 按日批量同步（东财 push2his，一次 HTTP 拉全 A，秒级完成）
 # ─────────────────────────────────────────────
+def _normalize_trade_date(value: str) -> str:
+    """把 trade_dates 的 'YYYYMMDD' / 'YYYY-MM-DD' 统一成库内 'YYYY-MM-DD'。
+
+    幂等查询必须用与 daily_price.trade_date 相同的格式，否则查不到行、
+    护栏会静默失效（每次都重新拉全 A）。非法日期直接抛错，不静默降级。
+    """
+    s = str(value or "").strip().replace("/", "-")
+    if "-" in s:
+        parts = s.split("-")
+    elif len(s) == 8 and s.isdigit():
+        parts = [s[:4], s[4:6], s[6:]]
+    else:
+        raise ValueError(f"非法交易日期: {value!r}")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"非法交易日期: {value!r}")
+    y, m, d = (int(p) for p in parts)
+    try:
+        date(y, m, d)  # 统一校验月/日范围与闰年
+    except ValueError:
+        raise ValueError(f"非法交易日期: {value!r}") from None
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
+def _date_already_synced(conn, trade_date: str, *, target: str = "all",
+                         wl_set=None,
+                         min_coverage: float = SYNC_MIN_COVERAGE,
+                         min_abs_rows: int = SYNC_MIN_ABS_ROWS,
+                         min_signal_rows: int = SYNC_MIN_SIGNAL_ROWS) -> bool:
+    """某交易日「行情齐 + 信号齐」（同步幂等护栏）。
+
+    判据是 daily_price 该日 DISTINCT code 的覆盖率，**不是** sync_log 记录 ——
+    上次同步可能失败但已写日志。第二道条件是 stock_signal 该日有落库：
+    行情写成功但重算链失败时，必须让第二次触发把重算补上，不能被护栏永久挡住。
+    target=watchlist 时自选股可能只有几只，不做信号行数检查。
+    纯查询、不写库；调用方负责在异常时保守地继续拉取。
+    """
+    day = _normalize_trade_date(trade_date)
+    covered = conn.execute(
+        "SELECT COUNT(DISTINCT code) FROM daily_price WHERE trade_date = ?", (day,)
+    ).fetchone()[0]
+    if covered < min_abs_rows:
+        return False
+    if target == "watchlist" and wl_set is not None:
+        expected = len(wl_set)
+    else:
+        expected = conn.execute(
+            "SELECT COUNT(*) FROM stock_info WHERE is_active = 1"
+        ).fetchone()[0]
+    if not (expected and covered >= expected * min_coverage):
+        return False
+    if min_signal_rows and target == "all":
+        sig_rows = conn.execute(
+            "SELECT COUNT(*) FROM stock_signal WHERE trade_date = ?", (day,)
+        ).fetchone()[0]
+        if sig_rows < min_signal_rows:
+            return False
+    return True
+
+
 def daily_sync_by_date(trade_dates: list[str] | None = None,
                         verbose: bool = True,
                         progress_callback=None,
-                        target: str = "all") -> dict:
+                        target: str = "all",
+                        skip_if_synced: bool = True) -> dict:
     """
     盘后/盘前推荐主入口：按交易日批量同步，一次 HTTP 拉全 A
 
@@ -2521,7 +2621,11 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
     :param target: "all"（全市场，默认）/ "watchlist"（仅自选股）
                   拉取仍是全 A（东财接口粒度），仅在写入层按 target 过滤；
                   策略分重算范围也按 target 过滤。
-    :return: {"dates": [...], "rows": N, "elapsed_s": x.x, "target": ...}
+    :param skip_if_synced: 幂等护栏（默认开）。该交易日 daily_price 覆盖率达标时
+                  跳过 HTTP 拉取与写库；置 False 可强制重拉（手动修订数据用）。
+                  全部日期都跳过时 total_rows=0，后续重算链按既有逻辑不触发。
+    :return: {"dates": [...], "rows": N, "elapsed_s": x.x, "target": ...,
+              "detail": {...}, "skipped_dates": [...]}
     """
     target = target if target in ("all", "watchlist") else "all"
 
@@ -2548,13 +2652,35 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
     t0 = time.time()
     total_rows = 0
     results = {}
+    skipped_dates: list[str] = []
 
     # 提前计算 watchlist codes 集合（O(1) 查找）
     wl_set = None
     if target == "watchlist":
         wl_set = set(get_watchlist_codes())
 
-    for trade_date in trade_dates:
+    for di, trade_date in enumerate(trade_dates, 1):
+        # 幂等护栏：该交易日行情已完整入库 → 跳过整轮 HTTP + 写库 + 重算。
+        # 判据是 daily_price 覆盖率而非 sync_log（上次可能失败但已记日志）。
+        if skip_if_synced:
+            try:
+                with get_conn() as conn:
+                    already = _date_already_synced(conn, trade_date,
+                                                   target=target, wl_set=wl_set)
+                if already:
+                    skipped_dates.append(trade_date)
+                    results[trade_date] = {"rows": 0, "skipped": "already_synced"}
+                    if verbose:
+                        print(f"\n>>> 批量同步 {trade_date} 已完整入库，跳过"
+                              f"（force / skip_if_synced=False 可强制重拉）")
+                    if progress_callback:
+                        progress_callback("date_done", di, len(trade_dates))
+                    continue
+            except Exception as e:
+                # 检查失败时保守地继续拉取；不静默吞异常
+                if verbose:
+                    print(f"  [WARN] 幂等检查失败，按未同步继续拉取: {e}")
+
         if verbose:
             print(f"\n>>> 批量同步 {trade_date}（东财 push2his，一次 HTTP，target={target}）")
 
@@ -2585,8 +2711,7 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
                 }
                 total_rows += fb_rows
                 if progress_callback:
-                    progress_callback("date_done", trade_dates.index(trade_date) + 1,
-                                      len(trade_dates))
+                    progress_callback("date_done", di, len(trade_dates))
                 continue
             except Exception as fb_e:
                 if verbose:
@@ -2620,7 +2745,7 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
             results[trade_date] = {"rows": 0, "error": str(e)}
 
         if progress_callback:
-            progress_callback("date_done", trade_dates.index(trade_date) + 1, len(trade_dates))
+            progress_callback("date_done", di, len(trade_dates))
 
     # ── 同步本次交易日龙虎榜（供隔日动量 + 强势突破硬过滤）──
     # 历史 bug 修复：本函数（调度器 18:00 走的东财快速路径）原先不含龙虎榜抓取，
@@ -2702,7 +2827,8 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
         print(f"\n>>> 批量同步完成  耗时: {elapsed:.1f}s  共 {total_rows} 行  target={target}")
 
     return {"dates": trade_dates, "rows": total_rows, "elapsed_s": round(elapsed, 1),
-            "detail": results, "target": target}
+            "detail": results, "target": target,
+            "skipped_dates": skipped_dates}
 
 
 def _batch_write_daily_price(df: pd.DataFrame) -> int:
@@ -2758,20 +2884,9 @@ def _batch_write_daily_price(df: pd.DataFrame) -> int:
               pct_change=excluded.pct_change, turnover=excluded.turnover
         """, records)
 
-    # 同步到 Qlib
-    try:
-        from qlib_engine.data_bridge import batch_append_daily
-        qlib_records = [{
-            "code": r["code"],
-            "trade_date": r["trade_date"],
-            "open": r["open"], "high": r["high"], "low": r["low"],
-            "close": r["close"], "volume": r["volume"], "amount": r["amount"],
-            "pct_change": r["pct_change"], "turnover": r["turnover"],
-        } for r in records]
-        batch_append_daily(qlib_records)
-    except Exception:
-        pass  # Qlib 失败不影响主流程
-
+    # 2026-11-06 下线：此处曾把 list[dict] 传给期待 Dict[str, DataFrame] 的
+    # batch_append_daily，恒抛 AttributeError 被 except:pass 吞掉；QLIB_ENABLED=False
+    # 时本就无意义。签名正确的增量桥接见本文件顶层 append_daily_data 调用。
     return len(records)
 
 
@@ -2783,12 +2898,8 @@ def _recompute_strategy_scores_for_updated(trade_dates: list[str], verbose: bool
     """
     target = target if target in ("all", "watchlist") else "all"
 
-    try:
-        from qlib_engine.data_bridge import init_qlib as _qinit
-        _qinit()
-    except Exception:
-        pass
-
+    # 2026-11-06 下线：此处从 data_bridge 导入不存在的 init_qlib（真实符号在
+    # qlib_engine/__init__.py:34），恒 ImportError 被吞；顶层 :39 已有正确导入与调用。
     # 取所有需要重算的 code
     # trade_dates 可能是 '%Y%m%d'（daily_sync_by_date 默认构造）或 '%Y-%m-%d'，
     # 表内 trade_date 为 '%Y-%m-%d'——不归一会导致 IN 查询 0 行、策略分重算被静默跳过
