@@ -752,7 +752,7 @@ async function loadHomeTab(container) {
                     <button class="seg-btn" data-hz="mid" onclick="setPicksSegment('mid')">中线</button>
                     <button class="seg-btn" data-hz="long" onclick="setPicksSegment('long')">长线</button>
                 </div>
-                <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、建议买入价、止盈止损价">复制</button>
+                <button class="btn btn-sm" id="btnCopyTodayPicks" onclick="copyTodayPicks()" title="一键复制当前日期推荐的股票、代码、突破确认价、参考买入价（观察）、止盈止损价">复制</button>
                 <input type="date" id="pickDate" class="field-ctl" value="" autocomplete="off" onchange="loadTodayPicks().then(function(){ applyPicksSegment(); })">
                 <span class="text-muted" style="font-size:var(--fs-2)" title="基于量价 + 主力 + 趋势综合评估 · 默认简略，点小板块右上角「详情」展开完整推荐（点击卡片看 K 线）">默认简略 · 点「详情」展开 ⓘ</span>
             </div>
@@ -3795,7 +3795,7 @@ function renderPickCard(it) {
                         gapHtml = `<div class="price-sub confirm-safe" title="回放统计：价差>5%的买入价远离推荐日以来高点（多为低吸票），次日开盘买入胜率约49%，追高风险小；但若为连续大涨后的高位票请结合K线判断">✅ 距阶段高点较远 · 价差 ${gapPct.toFixed(1)}%</div>`;
                     }
                 } else {
-                    gapHtml = `<div class="price-sub confirm-safe" title="该信号不适用突破确认（如隔日动量次日开盘入场），按建议买入价直接执行">✅ 无需突破确认 · 按建议价入场</div>`;
+                    gapHtml = `<div class="price-sub confirm-safe" title="该信号不适用突破确认（如隔日动量次日开盘入场），按参考买入价直接执行">✅ 无需突破确认 · 按建议价入场</div>`;
                 }
             }
             const rr     = ap.risk_reward_ratio;
