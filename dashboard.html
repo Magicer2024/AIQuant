@@ -1516,7 +1516,7 @@ function renderPickMiniRow(it, hz) {
         </div>
         <div class="pm-score">${it.fusion_score != null ? it.fusion_score : '--'}</div>
         ${lastHtml}
-        <div class="pm-price pm-buy" title="${pullback ? (pbPx ? `回踩买点 ${pbPx}：推荐日后 5 个交易日内价格触及即按 ${pbPx} 建仓，未触及则放弃（不追高）` : '回踩买点（5 个交易日内触及才建仓）') : '建议买入'}">${num(ap.entry_price)}</div>
+        <div class="pm-price pm-buy" title="${pullback ? (pbPx ? `回踩买点 ${pbPx}：推荐日后 5 个交易日内价格触及即按 ${pbPx} 建仓，未触及则放弃（不追高）` : '回踩买点（5 个交易日内触及才建仓）') : '参考买入价（观察）'}">${num(ap.entry_price)}</div>
         <div class="pm-price pm-tp" title="止盈目标">${num(ap.take_profit)}</div>
         <div class="pm-price pm-stop" title="止损">${num(ap.stop_loss)}</div>
         <div class="pm-rr" title="盈亏比">${rrHtml}</div>
@@ -1568,7 +1568,7 @@ function buildPickGroupLines(list) {
         const tp      = ap.take_profit   != null ? ap.take_profit.toFixed(2)   : '--';
         const confirm = it.confirm_trigger != null ? it.confirm_trigger.toFixed(2) : '--';
         return (i + 1) + '. ' + (it.name || it.code) + ' ' + (it.code || '') +
-            '｜建议买入 ' + entry +
+            '｜参考买入价（观察） ' + entry +
             '｜止盈 ' + tp +
             '｜止损 ' + stop +
             '｜突破确认 ' + confirm;
@@ -3790,7 +3790,7 @@ function renderPickCard(it) {
                     } else if (gapPct <= 1) {
                         gapHtml = `<div class="price-sub confirm-danger" title="近两年6.6万条短线信号回放：价差≤1%时次日开盘买入胜率仅约12%，买入价接近推荐日以来最高点，追高风险大">⚠ 买入价已在阶段高位 · 价差 ${gapPct.toFixed(1)}%</div>`;
                     } else if (gapPct <= 5) {
-                        gapHtml = `<div class="price-sub confirm-gap" title="突破确认价相对建议买入价的上浮幅度：价差越小说明买入价越接近阶段高点，追高风险越大">价差 ${gapPct.toFixed(1)}%</div>`;
+                        gapHtml = `<div class="price-sub confirm-gap" title="突破确认价相对参考买入价的上浮幅度：价差越小说明买入价越接近阶段高点，追高风险越大">价差 ${gapPct.toFixed(1)}%</div>`;
                     } else {
                         gapHtml = `<div class="price-sub confirm-safe" title="回放统计：价差>5%的买入价远离推荐日以来高点（多为低吸票），次日开盘买入胜率约49%，追高风险小；但若为连续大涨后的高位票请结合K线判断">✅ 距阶段高点较远 · 价差 ${gapPct.toFixed(1)}%</div>`;
                     }
@@ -3930,7 +3930,7 @@ function renderPickCard(it) {
                     ${exitHtml}
                     <div class="action-prices">
                         <div class="price-cell buy">
-                            <div class="price-lbl">${isPullback ? '回踩买点' : '建议买入'}</div>
+                            <div class="price-lbl">${isPullback ? '回踩买点' : '参考买入价（观察）'}</div>
                             <div class="price-val">${entry}</div>
                             ${it.latest_close!=null?`<div class="price-sub" title="最新收盘价${it.latest_date?`：${it.latest_date}`:''}（该股最近一个有行情的交易日，非盘中实时价）">最新 <b class="${(it.latest_pct||0)>=0?'idx-up':'idx-down'}">${Number(it.latest_close).toFixed(2)}</b>${pctHtml?' '+pctHtml:''}</div>`:''}
                             ${isPullback?`<div class="price-sub confirm-waiting" title="回踩确认入场：推荐日后 5 个交易日内，价格回踩触及 ${entry} 才按该价建仓；一直不触及则视为未成交、放弃（涨上去不追高）">⏳ 5 日内回踩 ${entry} 才建仓 · 不追高</div>`:''}
