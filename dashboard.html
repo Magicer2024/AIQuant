@@ -3796,7 +3796,7 @@ function renderPickCard(it) {
                         gapHtml = `<div class="price-sub confirm-safe" title="回放统计：价差>5%的买入价远离推荐日以来高点（多为低吸票），次日开盘买入胜率约49%，追高风险小；但若为连续大涨后的高位票请结合K线判断">✅ 距阶段高点较远 · 价差 ${gapPct.toFixed(1)}%</div>`;
                     }
                 } else {
-                    gapHtml = `<div class="price-sub confirm-safe" title="该信号不适用突破确认（如隔日动量次日开盘入场），按参考买入价直接执行">✅ 无需突破确认 · 按建议价入场</div>`;
+                    gapHtml = `<div class="price-sub confirm-safe" title="该信号不适用突破确认（如隔日动量次日开盘入场），按参考买入价直接执行">✅ 无需突破确认 · 按参考价入场</div>`;
                 }
             }
             const rr     = ap.risk_reward_ratio;
