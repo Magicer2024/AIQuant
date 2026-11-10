@@ -1,0 +1,177 @@
+{
+ "caliber": "trade-weighted mean entry day per signal month (rounded to nearest trading day), index forward H-bar close-to-close",
+ "coarse_check": {
+  "CSI1000": {
+   "06-01_to_11-10_pct": -21.16,
+   "06-01_+20d_pct": -15.21
+  },
+  "CSI300": {
+   "06-01_to_11-10_pct": -16.21,
+   "06-01_+20d_pct": -5.29
+  }
+ },
+ "B1_H20_by_month": {
+  "2026-06": {
+   "n": 1285,
+   "mean_entry_day": "2026-06-18",
+   "CSI1000_fwd20": -11.82,
+   "CSI1000_matched20": -10.68,
+   "CSI300_fwd20": -4.85,
+   "CSI300_matched20": -4.76
+  },
+  "2026-07": {
+   "n": 1081,
+   "mean_entry_day": "2026-07-21",
+   "CSI1000_fwd20": 3.55,
+   "CSI1000_matched20": -1.79,
+   "CSI300_fwd20": -3.18,
+   "CSI300_matched20": -1.47
+  },
+  "2026-08": {
+   "n": 1891,
+   "mean_entry_day": "2026-08-12",
+   "CSI1000_fwd20": -2.64,
+   "CSI1000_matched20": -0.43,
+   "CSI300_fwd20": -3.04,
+   "CSI300_matched20": -2.66
+  },
+  "2026-09": {
+   "n": 1314,
+   "mean_entry_day": "2026-09-15",
+   "CSI1000_fwd20": -11.56,
+   "CSI1000_matched20": -11.2,
+   "CSI300_fwd20": -9.3,
+   "CSI300_matched20": -7.61
+  },
+  "2026-10": {
+   "n": 367,
+   "mean_entry_day": "2026-10-12",
+   "CSI1000_fwd20": -6.3,
+   "CSI1000_matched20": -7.93,
+   "CSI300_fwd20": -5.34,
+   "CSI300_matched20": -5.73
+  }
+ },
+ "B1_H30_by_month": {
+  "2026-06": {
+   "n": 1283,
+   "mean_entry_day": "2026-06-18",
+   "CSI1000_fwd30": -14.59,
+   "CSI1000_matched30": -11.55,
+   "CSI300_fwd30": -7.66,
+   "CSI300_matched30": -6.27
+  },
+  "2026-07": {
+   "n": 1081,
+   "mean_entry_day": "2026-07-21",
+   "CSI1000_fwd30": 4.69,
+   "CSI1000_matched30": -4.16,
+   "CSI300_fwd30": -3.94,
+   "CSI300_matched30": -3.69
+  },
+  "2026-08": {
+   "n": 1886,
+   "mean_entry_day": "2026-08-12",
+   "CSI1000_fwd30": -2.87,
+   "CSI1000_matched30": -2.69,
+   "CSI300_fwd30": -5.37,
+   "CSI300_matched30": -5.25
+  },
+  "2026-09": {
+   "n": 838,
+   "mean_entry_day": "2026-09-08",
+   "CSI1000_fwd30": -16.72,
+   "CSI1000_matched30": -14.25,
+   "CSI300_fwd30": -11.34,
+   "CSI300_matched30": -10.61
+  }
+ },
+ "B1_H40_by_month": {
+  "2026-06": {
+   "n": 1285,
+   "mean_entry_day": "2026-06-18",
+   "CSI1000_fwd40": -12.67,
+   "CSI1000_matched40": -11.52,
+   "CSI300_fwd40": -7.75,
+   "CSI300_matched40": -7.11
+  },
+  "2026-07": {
+   "n": 1081,
+   "mean_entry_day": "2026-07-21",
+   "CSI1000_fwd40": 3.98,
+   "CSI1000_matched40": -6.06,
+   "CSI300_fwd40": -5.89,
+   "CSI300_matched40": -6.43
+  },
+  "2026-08": {
+   "n": 1885,
+   "mean_entry_day": "2026-08-12",
+   "CSI1000_fwd40": -14.06,
+   "CSI1000_matched40": -11.21,
+   "CSI300_fwd40": -11.01,
+   "CSI300_matched40": -10.21
+  },
+  "2026-09": {
+   "n": 410,
+   "mean_entry_day": "2026-09-03",
+   "CSI1000_fwd40": -13.43,
+   "CSI1000_matched40": -14.18,
+   "CSI300_fwd40": -10.84,
+   "CSI300_matched40": -11.09
+  }
+ },
+ "D_curve": {
+  "cohort_n": 4661,
+  "mean_entry_day": "2026-07-31",
+  "points": {
+   "1": {
+    "CSI1000_fwd1": 0.06,
+    "CSI1000_matched1": -1.32,
+    "CSI300_fwd1": -0.98,
+    "CSI300_matched1": -0.47
+   },
+   "2": {
+    "CSI1000_fwd2": 2.88,
+    "CSI1000_matched2": -1.63,
+    "CSI300_fwd2": 0.28,
+    "CSI300_matched2": -0.23
+   },
+   "3": {
+    "CSI1000_fwd3": 5.9,
+    "CSI1000_matched3": -1.75,
+    "CSI300_fwd3": 1.52,
+    "CSI300_matched3": -0.12
+   },
+   "5": {
+    "CSI1000_fwd5": 8.54,
+    "CSI1000_matched5": -3.55,
+    "CSI300_fwd5": 2.32,
+    "CSI300_matched5": -1.39
+   },
+   "10": {
+    "CSI1000_fwd10": 9.81,
+    "CSI1000_matched10": -6.79,
+    "CSI300_fwd10": 1.69,
+    "CSI300_matched10": -2.96
+   },
+   "20": {
+    "CSI1000_fwd20": 9.82,
+    "CSI1000_matched20": -4.16,
+    "CSI300_fwd20": 0.8,
+    "CSI300_matched20": -3.27
+   },
+   "30": {
+    "CSI1000_fwd30": 5.55,
+    "CSI1000_matched30": -6.4,
+    "CSI300_fwd30": -2.36,
+    "CSI300_matched30": -5.64
+   },
+   "40": {
+    "CSI1000_fwd40": 3.53,
+    "CSI1000_matched40": -10.22,
+    "CSI300_fwd40": -5.3,
+    "CSI300_matched40": -8.46
+   }
+  }
+ }
+}
