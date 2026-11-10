@@ -43,8 +43,13 @@
    写 `risk_events`（level=critical）；`scheduler/runner.py` 同步把 sync_log 记为
    `GUARD_FAIL`（success=0、failed=行数），不再伪装成功。
 
-测试：`tests/test_data_integrity.py` 11 项（检测/告警/字段映射/幂等/编排/降级），
-既有 sync/scheduler 相关 68 项回归通过。
+测试（以下数字均可在本分支 40ed31a 的 worktree 内直接复现；此前写的"68 项"
+取自脏主工作区、含不在本分支的在途文件，数字不可复现，已更正）：
+- `pytest tests/test_data_integrity.py` → 11 passed（检测/告警/字段映射/幂等/编排/降级）
+- `pytest tests/test_data_integrity.py tests/test_scheduler_runner.py tests/test_scheduler_lock.py tests/test_sync_progress.py tests/test_sync_retry.py tests/test_sync_stats.py tests/test_recalc_stages.py tests/test_db_write.py` → 53 passed（定向回归，8 文件全集）
+- 全量 `pytest tests` → 629 passed / 3 failed / 17 skipped；3 项失败均为
+  test_task1c_data_layer 既有失败（纯 HEAD 1adee51 与本分支双树复现一致，
+  测试A 验收 G6 亦以 git archive 基线独立确认）
 
 ## P1 看门狗（仅方案，不排期——调度侧归 DO）
 
