@@ -2654,6 +2654,33 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
     results = {}
     skipped_dates: list[str] = []
 
+    # ── P0 缺日自愈（2026-11-10 管理A批准，docs/review 留档）──
+    # 调度进程整天没跑过时，本函数此前只同步"当日"，缺口永久残留
+    # （10-29/11-06 全市场缺行即此根因）。自愈只补 daily_price/index_daily
+    # 行情，绝不补跑 stock_signal——事后造信号会污染复盘。失败不阻断主链。
+    # 仅 target="all" 触发：watchlist 盘前/盘后快路径不承受全市场扫库与补拉延迟。
+    integrity_report: dict = {}
+    if target == "all":
+        if verbose:
+            print(">>> 数据完整性自愈检查（近 60 交易日缺日扫描）...")
+        try:
+            from core.data_integrity import self_heal as _self_heal
+            _skip = set()
+            for _t in trade_dates:
+                _t = str(_t)
+                _skip.add(f"{_t[:4]}-{_t[4:6]}-{_t[6:8]}" if len(_t) >= 8 and _t[:8].isdigit() else _t[:10])
+            with get_conn() as _conn:
+                integrity_report = _self_heal(_conn, lookback_days=60, skip_dates=_skip)
+            _healed = [b for b in integrity_report.get("backfilled", []) if b.get("ok")]
+            if verbose and integrity_report.get("missing"):
+                print(f"  自愈: 发现缺日 {len(integrity_report['missing'])} 个，"
+                      f"成功补回 {len(_healed)} 个"
+                      + (f"（失败 {len(integrity_report['missing']) - len(_healed)}）"
+                         if len(_healed) < len(integrity_report['missing']) else ""))
+        except Exception as e:
+            print(f"  [WARN] 缺日自愈失败（不阻断主同步）: {e}")
+            integrity_report = {"ok": False, "error": str(e)[:200]}
+
     # 提前计算 watchlist codes 集合（O(1) 查找）
     wl_set = None
     if target == "watchlist":
@@ -2822,13 +2849,33 @@ def daily_sync_by_date(trade_dates: list[str] | None = None,
             if verbose:
                 print(f"  [WARN] latest_price 刷新失败: {e}")
 
+    # ── P0 当日行数护栏（2026-11-10 管理A批准）──
+    # 写库后当日行数 < 活跃股票数×90% → risk_events 告警。
+    # 只报警不拦截；调用方（scheduler）据 guard 结果在 sync_log 标记 GUARD_FAIL。
+    # 仅 target="all"：watchlist 模式当日只写自选子集，按全市场行数判定必假警。
+    guard_report: dict = {}
+    if target == "all":
+        try:
+            from core.data_integrity import check_daily_row_guard as _row_guard
+            with get_conn() as _conn2:
+                for _t in trade_dates:
+                    _s = str(_t)
+                    _d = f"{_s[:4]}-{_s[4:6]}-{_s[6:8]}" if len(_s) >= 8 and _s[:8].isdigit() else _s[:10]
+                    guard_report[_d] = _row_guard(_conn2, _d)
+            _bad = [d for d, g in guard_report.items() if not g.get("ok")]
+            if _bad and verbose:
+                print(f"  [GUARD FAIL] 行数护栏未达标: {_bad}")
+        except Exception as e:
+            print(f"  [WARN] 行数护栏检查失败（不阻断）: {e}")
+
     elapsed = time.time() - t0
     if verbose:
         print(f"\n>>> 批量同步完成  耗时: {elapsed:.1f}s  共 {total_rows} 行  target={target}")
 
     return {"dates": trade_dates, "rows": total_rows, "elapsed_s": round(elapsed, 1),
             "detail": results, "target": target,
-            "skipped_dates": skipped_dates}
+            "skipped_dates": skipped_dates,
+            "integrity": integrity_report, "guard": guard_report}
 
 
 def _batch_write_daily_price(df: pd.DataFrame) -> int:

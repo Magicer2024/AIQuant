@@ -205,17 +205,28 @@ def run_sync_blocking(task_id=None, owner_token=None):
             f"全市场同步完成 [all]: {rows} 行, 耗时 {elapsed}s"
         )
         # 写入 sync_log 表（持久化同步记录）
+        # 2026-11-10 P0 行数护栏（管理A批准）：当日行数 < 活跃数×90% 时
+        # data_integrity 已写 risk_events；这里把 sync_log 标记为 GUARD_FAIL，
+        # 不再按 success 记账，避免"日志看着成功、数据整天缺失"。
+        guard = result.get('guard') or {}
+        guard_fail = [d for d, g in guard.items() if not g.get("ok")]
         try:
             log_sync(
                 sync_type="scheduler_all",
                 total=db_stats()["股票列表数"],
-                success=rows,
-                failed=0,
+                success=0 if guard_fail else rows,
+                failed=rows if guard_fail else 0,
                 duration_s=elapsed,
-                note=f"target=all, dates={result.get('dates', [])}",
+                note=(f"target=all, dates={result.get('dates', [])}"
+                      + (f", GUARD_FAIL={guard_fail}" if guard_fail else "")),
             )
         except Exception:
             pass
+        if guard_fail:
+            SYNC_STATUS["last_result"] = (
+                f"⚠️ 行数护栏失败 {guard_fail}：当日行情行数不足活跃股票 90%，"
+                f"已写 risk_events（原记录 {rows} 行）"
+            )
 
         SYNC_STATUS["last_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _retry_count = 0  # 成功后重置重试计数
