@@ -21,7 +21,7 @@ import pandas as pd
 
 # ── 复用主项目已有的指标与数据库 ──
 from core.db import get_conn
-from strategy.indicators import calc_ma, calc_macd, calc_rsi, calc_kdj
+from strategy.indicators import calc_ma, calc_macd, calc_rsi, calc_kdj, calc_atr
 # ── E2c：保守成交约束（一字板/开盘封板/停牌/涨跌停），与建仓计划、rule_engine 共用口径 ──
 from utils.trade_constraints import classify_fill_bar, can_fill, board_limit_pct
 # ── E2：研究回测默认资金（与个人参考账户 1 万分离命名，不强制研究回测改 1 万）──
@@ -326,6 +326,17 @@ class BacktestParams:
     commission_rate: float = DEFAULT_COMMISSION
     stamp_tax_rate: float = DEFAULT_STAMP_DUTY
     slippage_rate: float = DEFAULT_SLIPPAGE
+    # ── 入场端 alpha 立项·阶段0 新增：ATR 自适应止损 / 移动止盈入参 ──
+    # 默认全部 None = 与 1adee51 基线引擎行为逐笔一致（口径自检门要求）。
+    # ATR 口径锁死 strategy.indicators.calc_atr（TR 简单均值，period=14，生产线口径）。
+    atr_stop_mult: Optional[float] = None      # 止损价 = 入场价 − mult × ATR14(入场前一交易日)
+    atr_stop_min_pct: Optional[float] = None   # 止损宽度下限（如 0.05），防 ATR 过窄
+    atr_stop_max_pct: Optional[float] = None   # 止损宽度上限（如 0.15），防 ATR 过宽
+    trail_arm_pct: Optional[float] = None      # 移动止盈启动线：收盘浮盈 ≥ 该值后武装
+    trail_drawdown_pct: Optional[float] = None # 固定回撤宽度：收盘 ≤ 峰值收盘×(1−该值) 出场
+    trail_atr_mult: Optional[float] = None     # ATR 回撤宽度：收盘 ≤ 峰值收盘 − mult×ATR14(当日)，给出时优先于固定值
+    warmup_days: int = 0                      # 指标预热：向前多加载 N 个交易日行情（trade_dates 仍严格落在 start~end），
+                                              # walk-forward 分窗回测防止窗口首段 MA/RSI 无前值；默认 0=行为与基线一致
     exclude_st: bool = True
     exclude_kcb: bool = True
     exclude_cyb: bool = False
@@ -420,6 +431,23 @@ class VisualBacktestEngine:
             except Exception:
                 pass
 
+    # ──────── 阶段0：ATR 出场入参 helper ────────
+    def _uses_atr_exits(self) -> bool:
+        p = self.params
+        return p.atr_stop_mult is not None or p.trail_atr_mult is not None
+
+    def _entry_stop_price(self, atr_prev: Optional[float], fill_price: float) -> Optional[float]:
+        """入场时定格止损价：宽度 = clamp(mult×ATR14_prev/价, min_pct, max_pct)。"""
+        p = self.params
+        if p.atr_stop_mult is None or atr_prev is None or (isinstance(atr_prev, float) and math.isnan(atr_prev)):
+            return None
+        width = p.atr_stop_mult * float(atr_prev) / fill_price
+        if p.atr_stop_min_pct is not None:
+            width = max(width, p.atr_stop_min_pct)
+        if p.atr_stop_max_pct is not None:
+            width = min(width, p.atr_stop_max_pct)
+        return fill_price * (1.0 - width)
+
     # ──────── 公共入口 ────────
     def run(self, conditions: List[Dict[str, Any]]) -> Dict[str, Any]:
         params = self.params
@@ -433,8 +461,12 @@ class VisualBacktestEngine:
             return self._empty("无活跃股票，请先在【管理】中初始化 stock_info")
         self._report(stage="init", progress=6, message=f"股票池共 {len(all_codes)} 只，开始加载行情...")
 
-        # 2) 批量拉取日线
-        daily = _load_all_daily(params.start_date, params.end_date, all_codes)
+        # 2) 批量拉取日线（warmup_days>0：向前多加载行情仅供指标预热，交易窗口仍严格限定 start~end）
+        load_start = params.start_date
+        if params.warmup_days:
+            load_start = (pd.Timestamp(params.start_date) -
+                          pd.Timedelta(days=int(params.warmup_days * 1.7) + 3)).strftime("%Y-%m-%d")
+        daily = _load_all_daily(load_start, params.end_date, all_codes)
         if daily.empty:
             return self._empty("区间内无行情数据，请先同步 daily_price")
         stock_info = _load_stock_info(all_codes)
@@ -448,6 +480,12 @@ class VisualBacktestEngine:
             df = df.set_index("trade_date").sort_index()
             df = _add_indicators(df, indicator_need)
             stock_data[code] = df
+        # 阶段0：仅当启用 ATR 类出场入参时才补算 ATR14（默认关闭，基线行为零开销零改变）。
+        # ATR14_PREV=上一交易日 ATR，作为入场止损基准，排除入场日自身行情，无前视。
+        if self._uses_atr_exits():
+            for df in stock_data.values():
+                df["ATR14"] = calc_atr(df["high"], df["low"], df["close"], period=14)
+                df["ATR14_PREV"] = df["ATR14"].shift(1)
         if self.cancel_flag.is_set():
             return self._empty("已取消")
 
@@ -600,6 +638,7 @@ class VisualBacktestEngine:
                         total_cost = cost + commission
                     cash -= total_cost
                     info = info_map.get(code, {})
+                    _atr_prev = row.get("ATR14_PREV")
                     positions[code] = {
                         "shares": shares,
                         "cost": cost + commission,        # 入账成本（计入佣金）
@@ -607,6 +646,11 @@ class VisualBacktestEngine:
                         "entry_price": fill_price,
                         "name": info.get("name", code),
                         "entry_signal_date": plan.get("signal_date", ""),
+                        "stop_price": self._entry_stop_price(
+                            float(_atr_prev) if _atr_prev is not None and pd.notna(_atr_prev) else None,
+                            fill_price),
+                        "peak_close": float(row["close"]) if pd.notna(row.get("close")) else fill_price,
+                        "trail_armed": False,
                     }
                 pending_buys.clear()
 
@@ -627,11 +671,31 @@ class VisualBacktestEngine:
                 if hold_days < 1:
                     continue
                 sell_reason = None
-                if p.stop_loss_pct is not None and ret_pct <= p.stop_loss_pct:
+                _stop_price = pos.get("stop_price")
+                if _stop_price is not None:
+                    if close <= _stop_price:
+                        sell_reason = "stop_loss"
+                elif p.stop_loss_pct is not None and ret_pct <= p.stop_loss_pct:
                     sell_reason = "stop_loss"
-                elif p.take_profit_pct is not None and ret_pct >= p.take_profit_pct:
+                # 阶段0 移动止盈：武装后按「峰值收盘 − 回撤位」判定，优先序 止损 > 移动止盈 > 固定止盈 > 到期
+                if sell_reason is None and p.trail_arm_pct is not None:
+                    peak = pos.get("peak_close")
+                    peak = close if peak is None else max(float(peak), close)
+                    pos["peak_close"] = peak
+                    if not pos.get("trail_armed") and peak >= pos["entry_price"] * (1.0 + p.trail_arm_pct):
+                        pos["trail_armed"] = True
+                    if pos.get("trail_armed"):
+                        if p.trail_atr_mult is not None:
+                            _atr_today = row.get("ATR14")
+                            if _atr_today is not None and pd.notna(_atr_today):
+                                if close <= peak - p.trail_atr_mult * float(_atr_today):
+                                    sell_reason = "trailing_stop"
+                        elif p.trail_drawdown_pct is not None:
+                            if close <= peak * (1.0 - p.trail_drawdown_pct):
+                                sell_reason = "trailing_stop"
+                if sell_reason is None and p.take_profit_pct is not None and ret_pct >= p.take_profit_pct:
                     sell_reason = "take_profit"
-                elif p.max_hold_days is not None and hold_days >= p.max_hold_days:
+                if sell_reason is None and p.max_hold_days is not None and hold_days >= p.max_hold_days:
                     sell_reason = "max_hold_days"
                 if sell_reason is None:
                     continue
@@ -721,6 +785,7 @@ class VisualBacktestEngine:
                         continue
                     cash -= total_cost
                     info = info_map.get(code, {})
+                    _atr_prev = row.get("ATR14_PREV")
                     positions[code] = {
                         "shares": shares,
                         "cost": cost + commission,
@@ -728,6 +793,11 @@ class VisualBacktestEngine:
                         "entry_price": fill_price,
                         "name": info.get("name", code),
                         "entry_signal_date": dt.strftime("%Y-%m-%d"),
+                        "stop_price": self._entry_stop_price(
+                            float(_atr_prev) if _atr_prev is not None and pd.notna(_atr_prev) else None,
+                            fill_price),
+                        "peak_close": close,
+                        "trail_armed": False,
                     }
                     daily_buys += 1
 
