@@ -30,6 +30,7 @@ Thumbs.db
 *.db-shm
 *.bak
 data_cache/
+data_snapshots/
 .sync_cache/
 reports/
 .cache/
