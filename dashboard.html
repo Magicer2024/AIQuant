@@ -5,9 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIQuant · 量化终端</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/dashboard.css?v=20261112a">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
@@ -1307,11 +1304,12 @@ async function showFactorDetail(code, name) {
     var series = rows.map(function(r) { return r.fusion_score; });
     var inst = ChartManager.get('factorTrend', document.getElementById('factorTrendChart'));
     inst.setOption({
-        tooltip: { trigger: 'axis' },
+        // 挂主题 token：tooltip 深底浅字、轴线/文字走 chart token（原为 echarts 默认浅色）
+        tooltip: { trigger: 'axis', backgroundColor: cssVar('--chart-panel', '#0C1124'), borderColor: cssVar('--chart-split', '#111832'), textStyle: { color: cssVar('--chart-title', '#DDE4F0') } },
         grid: { left: 40, right: 20, top: 20, bottom: 50 },
-        xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
-        yAxis: { type: 'value', name: '融合分', min: 0, max: 50 },
-        series: [{ name: '融合分', type: 'line', smooth: true, data: series, areaStyle: {} }],
+        xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10, color: cssVar('--chart-axis', '#8b99bb') } },
+        yAxis: { type: 'value', name: '融合分', min: 0, max: 50, axisLabel: { color: cssVar('--chart-axis', '#8b99bb') }, nameTextStyle: { color: cssVar('--chart-muted', '#9CA3C4') }, splitLine: { lineStyle: { color: cssVar('--chart-split', '#111832') } } },
+        series: [{ name: '融合分', type: 'line', smooth: true, data: series, lineStyle: { color: cssVar('--chart-line-1', '#00D4F0') }, itemStyle: { color: cssVar('--chart-line-1', '#00D4F0') }, areaStyle: { color: cssVar('--chart-line-1', '#00D4F0'), opacity: 0.15 } }],
     });
     if (!window._factorTrendResizeBound) {
         window._factorTrendResizeBound = true;
@@ -5271,7 +5269,9 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
     var xAxisArr = [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { color: C.axis, fontSize: 10, formatter: function(v) { return String(v).slice(5); } }, axisLine: { lineStyle: { color: C.grid } } }];
     var yAxisArr = [{ id: 'price', scale: true, gridIndex: 0, axisLabel: { color: C.axis }, splitLine: { lineStyle: { color: C.split } } }];
     var seriesArr = [
-        { id: 'kline', type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barWidth: '75%', barMaxWidth: 26 }
+        { id: 'kline', type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0, barWidth: '75%', barMaxWidth: 26,
+          // 挂主题 token（原为 echarts 内置默认 #eb5454/#47b262）：涨红 #ff5555 / 跌绿 #2ee59d，红涨绿跌不翻
+          itemStyle: { color: C.up, color0: C.down, borderColor: C.up, borderColor0: C.down } }
     ];
 
     // 动态计算每个副图的 top 位置
@@ -5328,9 +5328,13 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
     var _mkPx = function(v) { return (v == null || isNaN(v)) ? '--' : Number(v).toFixed(2); };
 
     var opt = {
-        title: { text: '', left: 'center', textStyle: { color: C.title, fontSize: 14, fontFamily: "'JetBrains Mono', monospace" } },
+        title: { text: '', left: 'center', textStyle: { color: C.title, fontSize: 14, fontFamily: "ui-monospace, 'Cascadia Mono', Consolas, 'Liberation Mono', monospace" } },
         tooltip: {
             trigger: 'axis',
+            // 挂主题 token：深底浅字（原为 echarts 默认白底，深色 UI 里弹白块）
+            backgroundColor: C.panel,
+            borderColor: C.split,
+            textStyle: { color: C.title },
             axisPointer: { type: 'cross' },
             // 默认 0.4s 位移动画 + 内容变高时翻到光标另一侧，是移动时“闪一下”的根源：
             // 经过 B/S 蜡烛时 tooltip 多出几行计划价/判因，高度变化导致翻转闪烁。动画关掉、
@@ -6298,7 +6302,7 @@ function rpRenderNavChart() {
         chart.setOption({
             animation: false,
             color: [cssVar('--text-secondary', '#8a93a6'), cssVar('--accent', '#2f6fed')],
-            tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '--' : Number(v).toFixed(3); } },
+            tooltip: { trigger: 'axis', backgroundColor: cssVar('--chart-panel', '#0C1124'), borderColor: cssVar('--chart-split', '#111832'), textStyle: { color: cssVar('--chart-title', '#DDE4F0') }, valueFormatter: function (v) { return v == null ? '--' : Number(v).toFixed(3); } },
             legend: { top: 0, textStyle: { color: cssVar('--text-secondary', '#555'), fontSize: 11 } },
             grid: { left: 46, right: 18, top: 30, bottom: 26 },
             xAxis: { type: 'category', data: baseDates, axisLabel: { color: cssVar('--text-muted', '#999'), fontSize: 10 }, axisLine: { lineStyle: { color: cssVar('--border', '#ddd') } } },
