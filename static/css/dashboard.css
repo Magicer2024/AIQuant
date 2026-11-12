@@ -571,9 +571,9 @@ tr:hover td {
     transition: transform 0.22s ease-out;
 }
 .kline-overlay.open .kline-popup { transform: translateX(0); }
-/* 个股深度 · 详情抽屉（P3：460px 右侧抽屉，与 K 线抽屉同组件同动效） */
+/* 个股深度 · 详情抽屉（宽版：min(1100px,96vw)，照 rp-popup spec §7.4 先例；原 460px 窄版 K线不可读，Yu Fang seq=366 / 管理A seq=368） */
 .sd-deep-popup {
-    width: 460px; max-width: 94vw; height: 100%; max-height: 100vh;
+    width: min(1100px, 96vw); max-width: 96vw; height: 100%; max-height: 100vh;
     background: var(--bg-panel);
     border: 0; border-left: 1px solid var(--border);
     border-radius: 0; overflow-y: auto;
@@ -583,10 +583,10 @@ tr:hover td {
     transition: transform 0.22s ease-out;
 }
 .kline-overlay.open .sd-deep-popup { transform: translateX(0); }
-/* 460px 窄版：详情内 2 列/3 列网格纵排，避免横向挤压 */
+/* 宽版抽屉：指标卡响应式栅格，宽屏自动 2-4 列（管理A派单口径 auto-fit minmax(240px,1fr)） */
 .sd-deep-popup .sd-grid-2col,
-.sd-deep-popup .sd-plan { grid-template-columns: 1fr; }
-.sd-deep-popup .sd-signal { grid-template-columns: 1fr; }
+.sd-deep-popup .sd-plan { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.sd-deep-popup .sd-signal { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .sd-deep-popup > .close-btn { position: absolute; top: 12px; right: 16px; z-index: 20;
     background: var(--bg-elevated); border: 1px solid var(--border);
     color: var(--text-secondary); font-size: var(--fs-4); cursor: pointer;
@@ -1967,6 +1967,10 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
     }
     .kline-overlay.open .kline-popup,
     .kline-overlay.open .sd-deep-popup { transform: translateY(0); }
+    /* 宽版指标卡 auto-fit 栅格在 ≤600px bottom sheet 内回退窄版单列（管理A seq=388 要求） */
+    .sd-deep-popup .sd-grid-2col,
+    .sd-deep-popup .sd-plan,
+    .sd-deep-popup .sd-signal { grid-template-columns: 1fr; }
     /* 市场速览 6 胶囊 → 横滚 */
     .index-grid { display: flex; overflow-x: auto; gap: 10px; padding-bottom: 6px; scrollbar-width: none; }
     .index-grid::-webkit-scrollbar { display: none; }

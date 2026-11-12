@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIQuant · 量化终端</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261112a">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261113a">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -3421,11 +3421,16 @@ function renderStockDeepChart(data) {
     var inx = _sdBuildKlineInputs(data);
     if (!inx) return;
     var activeCount = Object.keys(_sdIndicators).filter(function(k) { return _sdIndicators[k]; }).length;
-    var baseH = window.innerWidth < 480 ? 280 : (window.innerWidth < 768 ? 360 : 440);
-    var h = Math.min(baseH + (activeCount - 1) * 90, window.innerWidth < 768 ? 520 : 800);
+    // 抽屉宽版（min(1100px,96vw)，管理A seq=388 修订口径）：容器高上限 min(88vh,900px)；
+    // 阈值与 _fitKlineNarrowLayout 的 560px 窄版分界一致，窄屏/非抽屉路径原值逐字不动。
+    var _sdChartW = dom && dom.getBoundingClientRect ? dom.getBoundingClientRect().width : 0;
+    var wideDeep = _sdDeepMode && _sdChartW >= 560;
+    var wideCap = Math.min(Math.round(window.innerHeight * 0.88), 900);
+    var baseH = window.innerWidth < 480 ? 280 : (window.innerWidth < 768 ? 360 : (wideDeep ? 800 : 440));
+    var h = Math.min(baseH + (activeCount - 1) * 90, window.innerWidth < 768 ? 520 : (wideDeep ? wideCap : 800));
     dom.style.height = h + 'px';
     var chart = ChartManager.get('stockdeep', dom);
-    var opt = buildKlineOption(inx.kdata, inx.dates, inx.ohlc, inx.volData, inx.marks, _sdIndicators, inx.trackMarks);
+    var opt = buildKlineOption(inx.kdata, inx.dates, inx.ohlc, inx.volData, inx.marks, _sdIndicators, inx.trackMarks, wideDeep ? h : 0);
     opt.title.text = (data.code ? (data.code + ' · ' + (data.name || '')) : '') + '  K线';
     chart.__sdMarks = inx.marks;
     chart.__sdDates = inx.dates;
@@ -5230,7 +5235,7 @@ var klineIndicators = { vol: true, macd: false, kdj: false };
 /**
  * 根据当前激活的指标，动态构建 ECharts 配置
  */
-function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, trackMarks) {
+function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, trackMarks, wideH) {
     var C = {
         // fallback 为纯回退值（CSS 变量缺失时才生效）
         axis: cssVar('--chart-axis', '#6B7A9A'),
@@ -5256,6 +5261,14 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
     if (subCharts.length === 0) { subCharts.push('vol'); ind.vol = true; }
 
     var subCount = subCharts.length;
+    // 宽抽屉态（管理A seq=392 v2 口径，仅 ECharts 布局参数）：grid 改 px 分配——
+    // 主图 = round((h−76)×0.62)、副图均分剩余（副图间隙与主副间隙各 WGap），
+    // 左右边距 left 64 / right 16（十亿级量轴长标签不裁切）；窄态/非抽屉百分比逻辑逐字不动。
+    var wide = typeof wideH === 'number' && wideH > 0;
+    var WTOP = 36, WSLIDER = 40, WGap = 8;
+    var mainPx = wide ? Math.round((wideH - WTOP - WSLIDER) * 0.62) : 0;
+    var subStartPx = wide ? (WTOP + mainPx + WGap) : 0;
+    var eachSubPx = wide ? Math.max(24, Math.floor((wideH - WSLIDER - subStartPx - WGap * (subCount - 1)) / subCount)) : 0;
     // 主图占固定 55% 高度，剩余空间平分给副图
     var mainHeight = '55%';
     // 副图从 60% 开始，底部预留 6% 给 dataZoom 滑块，避免最后一个副图被挡住
@@ -5264,7 +5277,7 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
     var eachSubHeight = Math.floor((availableSubPct - gap * (subCount - 1)) / subCount);
 
     // 构建 grid 数组
-    var grids = [{ left: '10%', right: '10%', top: 50, height: mainHeight }];
+    var grids = [wide ? { left: 64, right: 16, top: WTOP, height: mainPx } : { left: '10%', right: '10%', top: 50, height: mainHeight }];
     // 日期标签只显示 MM-DD、不旋转，压缩主图与副图之间的空白带
     var xAxisArr = [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { color: C.axis, fontSize: 10, formatter: function(v) { return String(v).slice(5); } }, axisLine: { lineStyle: { color: C.grid } } }];
     var yAxisArr = [{ id: 'price', scale: true, gridIndex: 0, axisLabel: { color: C.axis }, splitLine: { lineStyle: { color: C.split } } }];
@@ -5280,7 +5293,8 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
     for (var i = 0; i < subCharts.length; i++) {
         var topVal = (subStartTop + i * (eachSubHeight + gap)) + '%';
         var gridIdx = i + 1;
-        grids.push({ left: '10%', right: '10%', top: topVal, height: eachSubHeight + '%' });
+        grids.push(wide ? { left: 64, right: 16, top: subStartPx + i * (eachSubPx + WGap), height: eachSubPx }
+                        : { left: '10%', right: '10%', top: topVal, height: eachSubHeight + '%' });
         xAxisArr.push({ type: 'category', data: dates, gridIndex: gridIdx, axisLabel: { show: false }, axisLine: { lineStyle: { color: C.grid } } });
         yAxisArr.push({ scale: true, gridIndex: gridIdx, axisLabel: { color: C.axis, fontSize: 10 }, splitLine: { show: false }, splitNumber: 2 });
 
@@ -5477,8 +5491,9 @@ function buildKlineOption(kdata, dates, ohlc, volData, marks, indicatorState, tr
 
         opt.graphic = [{
             type: 'group',
-            left: '12%',
-            top: macdGridTop + 2 + '%',
+            // 宽态 grid top 是 px 数（非百分比），graphic 定位必须同用 px，否则 "449%" 飞出画布
+            left: wide ? 72 : '12%',
+            top: wide ? (macdGridTop + 6) : (macdGridTop + 2 + '%'),
             children: [
                 // 参数标签
                 { type: 'text', left: 0, top: 0, style: {
