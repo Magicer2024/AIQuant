@@ -244,3 +244,4 @@ function refreshChartTheme() {
 - **A3**：实现完成后 grep 归零检查：§3 清单所列浅色字面量（`#8a5a00 #b3261e #eef1f6 #e3e8f0 #b26a00 #ffab40 #7baaff #5b88c2` 及 toast/seg 白字）在 css 与 html 中 **0 残留**；唯一豁免 = confirm-cta 的 `#ffd24a/#ff9500/#1a1408`（规格明确保留）与 `_sdSignalColor` 的 `'#ffaa3c'`（规格允许保留）。
 - **A4**：不得把 CSS 改异步加载（§6 时序前提）；不得新增 `[data-theme]` 或切换器；刻度 token 一列不动。
 - **A5**：commit 范围 = 本规格 + mock + `static/css/dashboard.css` + `dashboard.html` 的视觉层改动；**不改任何文案、DOM 结构、数据口径**；任务分支 `task/cyberpunk-theme-20261112`，不推 main。
+- **A6（测试A 验收注记，管理A 采纳）**：confirm-cta 的 12.70 是渐变**起始色** `#ffd24a` 的对比度，**尾色 `#ff9500` 实算 8.32**；将来引用该格时以 **8.32 为保守值**，不得把 12.70 当最差情形。两者均 ≥4.5，不影响判定。
