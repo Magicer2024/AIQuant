@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>赛博朋克改版 · Before/After 静态 mock（UIA 2026-11-12）</title>
+<style>
+  /* ══ 共用骨架（非主题部分）══ */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { display:grid; grid-template-columns:1fr 1fr; gap:0; min-height:100vh; }
+  .col  { padding:26px 30px; position:relative; overflow:hidden; }
+  .col-label { position:sticky; top:0; z-index:50; display:inline-block; padding:4px 12px;
+    font:700 12px ui-monospace,Consolas,monospace; letter-spacing:.08em; border-radius:999px; margin-bottom:18px; }
+  h2.sect { font-size:13px; letter-spacing:.06em; margin:22px 0 8px; opacity:.75;
+    font-family:ui-monospace,Consolas,monospace; text-transform:uppercase; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; font-weight:600; padding:7px 10px; font-size:11px; letter-spacing:.04em;
+    font-family:ui-monospace,Consolas,monospace; }
+  td { padding:7px 10px; font-variant-numeric:tabular-nums; }
+  .mono { font-family:ui-monospace,Consolas,monospace; }
+
+  /* ══════════════ BEFORE：现行浅色（light_final_spec_20261017 §1 实值）══════════════ */
+  .before {
+    --bg-root:#f2f5f9; --bg-panel:#ffffff; --bg-cell:#f5f7fb; --bg-hover:#eef2f8;
+    --border:#d9e0ea; --hairline:rgba(16,24,40,.07);
+    --text-primary:#1c2333; --text-secondary:#4a5468; --text-muted:#5a677f;
+    --accent:#0060df; --grad:linear-gradient(120deg,#0060df,#007aff);
+    --positive:#d70015; --negative:#0a7a2f;
+    --status-good:#067647; --status-warn:#996100; --tint-good:#e3f7e8; --tint-warn:#fff2dd;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 2px 8px rgba(16,24,40,.04);
+    background:var(--bg-root); color:var(--text-primary);
+  }
+  /* ══════════════ AFTER：赛博朋克深色（本规格 §2 实值）══════════════ */
+  .after {
+    --bg-root:#05070d; --bg-panel:#0b1120; --bg-cell:#121b30; --bg-hover:#16213a;
+    --border:#24304e; --hairline:rgba(125,170,230,.12);
+    --text-primary:#e6eeff; --text-secondary:#aebcdc; --text-muted:#8b99bb;
+    --accent:#00d4f0; --grad:linear-gradient(120deg,#00d4f0,#ff2ec4);
+    --positive:#ff5555; --negative:#2ee59d;
+    --status-good:#2ee59d; --status-warn:#ffb454; --tint-good:#113334; --tint-warn:#322b28;
+    --shadow:0 1px 2px rgba(0,0,0,.5),0 8px 24px rgba(0,0,0,.35);
+    background:var(--bg-root); color:var(--text-primary);
+  }
+  /* D1 网格背景（纯CSS，实页用 body::before；mock 用容器::before 等价演示） */
+  .after::before { content:''; position:absolute; inset:0; pointer-events:none; z-index:0;
+    background:repeating-linear-gradient(0deg,rgba(0,212,240,.05) 0 1px,transparent 1px 40px),
+               repeating-linear-gradient(90deg,rgba(0,212,240,.05) 0 1px,transparent 1px 40px); }
+  /* D2 扫描线 */
+  .after::after { content:''; position:absolute; inset:0; pointer-events:none; z-index:40;
+    background:repeating-linear-gradient(0deg,rgba(125,239,255,.028) 0 1px,transparent 1px 3px);
+    mix-blend-mode:screen; }
+  .after > * { position:relative; z-index:1; }
+
+  /* ── 共用组件样式（两边同结构，只吃各自变量）── */
+  .brand { font:700 20px ui-monospace,Consolas,monospace; letter-spacing:.1em; text-transform:uppercase; }
+  .brand em { font-style:normal; background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .after .brand em { text-shadow:0 0 18px rgba(0,212,240,.25); }
+  .hero { background:var(--bg-panel); border:1px solid var(--border); border-radius:14px;
+    box-shadow:var(--shadow); padding:14px 18px; margin-top:14px; }
+  .hero-title { font-size:16px; font-weight:700; color:var(--text-primary); }
+  .disclose { font-size:12px; color:var(--text-muted); font-family:ui-monospace,Consolas,monospace;
+    width:100%; margin-top:6px; line-height:1.6; }
+  .panel { background:var(--bg-panel); border:1px solid var(--border); border-radius:14px;
+    box-shadow:var(--shadow); padding:16px 18px; margin-top:14px; position:relative; transition:border-color .3s, box-shadow .3s; }
+  .panel::before { content:''; position:absolute; top:-1px; left:20px; right:20px; height:1px;
+    background:linear-gradient(90deg,transparent,var(--accent),transparent); opacity:.15; }
+  .after .panel:hover { border-color:#2f4b7c; box-shadow:0 0 0 1px rgba(0,212,240,.28),0 0 20px rgba(0,212,240,.12); }
+  .after .panel::before { opacity:.35; background:var(--grad); }
+  .badge { display:inline-flex; align-items:center; gap:5px; font:600 11px ui-monospace,Consolas,monospace;
+    padding:3px 10px; border-radius:10px; }
+  .b-good { color:var(--status-good); background:var(--tint-good); }
+  .b-warn { color:var(--status-warn); background:var(--tint-warn); }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--status-good); display:inline-block; }
+  .after .dot { box-shadow:0 0 8px var(--status-good); }
+  .cells { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px; }
+  .cell { background:var(--bg-cell); border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  .cell .lbl { font-size:11px; color:var(--text-muted); letter-spacing:.04em; }
+  .cell .val { font-size:20px; font-weight:700; margin-top:4px; font-family:ui-monospace,Consolas,monospace;
+    font-variant-numeric:tabular-nums; }
+  .up { color:var(--positive); } .down { color:var(--negative); }
+  th { color:var(--text-muted); border-bottom:1px solid var(--border); }
+  td { border-bottom:1px solid var(--hairline); color:var(--text-secondary); }
+  td.k { color:var(--text-primary); }
+  .seg { display:inline-flex; gap:2px; padding:2px; background:var(--bg-cell); border:1px solid var(--border);
+    border-radius:999px; margin-top:12px; }
+  .seg span { padding:4px 14px; border-radius:999px; font-size:12px; color:var(--text-secondary); }
+  .seg .on { background:var(--accent); font-weight:600; }
+  .before .seg .on { color:#fff; }          /* 现状：白字系统蓝 5.62 */
+  .after  .seg .on { color:#04222c; }       /* 新版：深字霓虹青 9.19 */
+  .note { font-size:11px; margin-top:18px; line-height:1.7; }
+  .before .col-label { background:#e3f7e8; color:#067647; }
+  .after  .col-label { background:#113334; color:#2ee59d; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ============ BEFORE ============ -->
+  <div class="col before">
+    <span class="col-label">BEFORE · 现行浅色（任务12 P1 定版）</span>
+    <div class="brand">AIQUANT <em>观察台</em></div>
+
+    <h2 class="sect">Hero · 合规披露</h2>
+    <div class="hero">
+      <div class="hero-title">个人投研观察台 · 所有推荐与买卖价位均为研究候选和观察名单，不是交易信号，不构成投资建议。</div>
+      <div class="disclose">页面收益为毛口径；按个人账户约 0.8% 真实往返成本回算 2026 年 6–11 月样本，扣成本后净期望为负（主推 top4 约 -1.2%/笔，全池约 -2.7%/笔）。本工具是研究与观察名单，不是交易信号。</div>
+    </div>
+
+    <h2 class="sect">徽标（双层制：14% tint + 深字）</h2>
+    <div class="panel">
+      <span class="badge b-good"><span class="dot"></span>观察·偏多</span>&nbsp;
+      <span class="badge b-warn">拟加仓</span>
+    </div>
+
+    <h2 class="sect">今日推荐 · 参考价口径</h2>
+    <div class="panel">
+      <div class="seg"><span class="on">今日</span><span>短线</span><span>中线</span><span>长线</span></div>
+      <div class="cells">
+        <div class="cell"><div class="lbl">参考买入价（观察）</div><div class="val up">12.34</div></div>
+        <div class="cell"><div class="lbl">止盈目标</div><div class="val up">13.96</div></div>
+        <div class="cell"><div class="lbl">止损</div><div class="val down">11.45</div></div>
+      </div>
+      <table style="margin-top:12px">
+        <tr><th>名称/代码</th><th>涨幅</th><th>涨跌色（R1：红涨绿跌）</th></tr>
+        <tr><td class="k">贵州燃气 600903</td><td class="up">+3.21%</td><td class="up">红=涨</td></tr>
+        <tr><td class="k">某某股份 000987</td><td class="down">−1.84%</td><td class="down">绿=跌</td></tr>
+      </table>
+    </div>
+
+    <div class="note" style="color:var(--text-muted)">对比度实测：muted 5.70 / 徽标good 5.47+ / seg白字蓝底 5.62（均 ≥4.5）。</div>
+  </div>
+
+  <!-- ============ AFTER ============ -->
+  <div class="col after">
+    <span class="col-label">AFTER · 赛博朋克深色（本规格 v1.0 实值）</span>
+    <div class="brand">AIQUANT <em>观察台</em></div>
+
+    <h2 class="sect">Hero · 合规披露（文本零改动）</h2>
+    <div class="hero">
+      <div class="hero-title">个人投研观察台 · 所有推荐与买卖价位均为研究候选和观察名单，不是交易信号，不构成投资建议。</div>
+      <div class="disclose">页面收益为毛口径；按个人账户约 0.8% 真实往返成本回算 2026 年 6–11 月样本，扣成本后净期望为负（主推 top4 约 -1.2%/笔，全池约 -2.7%/笔）。本工具是研究与观察名单，不是交易信号。</div>
+    </div>
+
+    <h2 class="sect">徽标（双层制反转：16% tint + 霓虹字）</h2>
+    <div class="panel">
+      <span class="badge b-good"><span class="dot"></span>观察·偏多</span>&nbsp;
+      <span class="badge b-warn">拟加仓</span>
+    </div>
+
+    <h2 class="sect">今日推荐 · 参考价口径</h2>
+    <div class="panel">
+      <div class="seg"><span class="on">今日</span><span>短线</span><span>中线</span><span>长线</span></div>
+      <div class="cells">
+        <div class="cell"><div class="lbl">参考买入价（观察）</div><div class="val up">12.34</div></div>
+        <div class="cell"><div class="lbl">止盈目标</div><div class="val up">13.96</div></div>
+        <div class="cell"><div class="lbl">止损</div><div class="val down">11.45</div></div>
+      </div>
+      <table style="margin-top:12px">
+        <tr><th>名称/代码</th><th>涨幅</th><th>涨跌色（R1 不变：红涨绿跌）</th></tr>
+        <tr><td class="k">贵州燃气 600903</td><td class="up">+3.21%</td><td class="up">红=涨</td></tr>
+        <tr><td class="k">某某股份 000987</td><td class="down">−1.84%</td><td class="down">绿=跌</td></tr>
+      </table>
+    </div>
+
+    <div class="note" style="color:var(--text-muted)">装饰层演示：D1 网格底 / D2 扫描线 / D3 hover 本卡片看青辉光 / D4 品牌渐变+辉光 / D5 等宽数字 / D6 徽标点脉冲。对比度实测：muted 6.61 / 徽标good 8.28 / seg深字 9.19 / 涨红 5.99 / 跌绿 11.49（全 ≥4.5）。</div>
+  </div>
+</div>
+</body>
+</html>

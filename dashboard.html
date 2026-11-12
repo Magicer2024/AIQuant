@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261017j">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261112a">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -132,7 +132,7 @@
         .sd-track-table td.name-td{font-family:inherit;white-space:normal}
         .sd-st{display:inline-block;padding:1px 7px;border-radius:9px;font-size:var(--fs-1);white-space:nowrap}
         .sd-st-holding{background:var(--tint-accent);color:var(--accent)}
-        .sd-st-watching{background:var(--tint-warn);color:#8a5a00}
+        .sd-st-watching{background:var(--tint-warn);color:var(--status-warn)}
         .sd-st-closed{background:var(--tint-good);color:var(--status-good)}
         .sd-st-expired{background:rgba(16,24,40,.06);color:var(--text-secondary)}
         .sd-op{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:4px;font-size:var(--fs-1);padding:3px 9px;cursor:pointer;margin-right:4px}
@@ -1812,8 +1812,8 @@ function renderReversalStats(s, enabled) {
                 </div></details>
             </div>
             <div style="margin-bottom:6px;padding:6px 11px;border-radius:6px;background:rgba(217,119,6,0.07);border:1px solid rgba(217,119,6,0.30);font-size:var(--fs-1);color:var(--text-secondary);line-height:1.6">
-                <b style="color:#8a5a00">⚠ 收益集中于创业板（未开通不可交易）</b> · 可交易子集明显更弱
-                <details style="display:inline-block;margin-left:6px;vertical-align:baseline"><summary style="display:inline;cursor:pointer;color:#8a5a00">详情</summary><div style="margin-top:6px;line-height:1.7">
+                <b style="color:var(--status-warn)">⚠ 收益集中于创业板（未开通不可交易）</b> · 可交易子集明显更弱
+                <details style="display:inline-block;margin-left:6px;vertical-align:baseline"><summary style="display:inline;cursor:pointer;color:var(--status-warn)">详情</summary><div style="margin-top:6px;line-height:1.7">
                 实盘跟踪 951→<b>485</b> 条按主板口径重算后，
                 创业板子样本 n=466 胜率 <b>58.9%</b>／均 +2.38%（PF 1.99），
                 主板子样本 n=485 胜率 <b>47.1%</b>／均 +0.79% ⇒
