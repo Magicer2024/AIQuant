@@ -32,6 +32,11 @@
     /* 辅助色（氛围渐变/图表线2，图形用途 ≥3:1 即可） */
     --accent-2: #ff2ec4; --accent-2-rgb: 255, 46, 196;   /* 5.77/4.91，刻意收紧不作正文 */
     --accent-3: #b96bff; --accent-3-rgb: 185, 107, 255;  /* 5.93/5.04 */
+    /* ── 文字分类角色 token（2026-11-13-text-color-hierarchy-spec §1/§4）：值全部复用既有达标 hex，禁改 hex ── */
+    --cat-data:      var(--accent);      /* 青  #00d4f0 数据数值 */
+    --cat-structure: var(--accent-3);    /* 紫  #b96bff 结构/趋势（涨停若上文字层须另择色，见规格§2） */
+    --cat-timing:    var(--accent-2);    /* 品红 #ff2ec4 节奏/时机（仅短标签） */
+    --cat-dim:       var(--cool);        /* 蓝  #4db8ff 维度/标识（跌停蓝不用于文字） */
     /* 涨跌色（R1：只染价格收益；A股红涨绿跌不变，色相未翻） */
     --positive: #ff5555; --positive-rgb: 255, 85, 85;   /* 涨=红 5.99/5.09（旧 #d70015 深底仅1.5不可用） */
     --negative: #2ee59d; --negative-rgb: 46, 229, 157;  /* 跌=霓虹绿 11.49/9.76 */
@@ -179,7 +184,7 @@ html { scroll-behavior: smooth; }
 }
 .anchor-bar::-webkit-scrollbar { display: none; }
 .anchor-group {
-    flex: none; font-size: var(--fs-1); color: var(--text-muted);
+    flex: none; font-size: var(--fs-1); color: var(--cat-structure);   /* T14：分组标签=结构紫 */
     letter-spacing: 0.06em; margin: 0 10px 0 2px;
 }
 .anchor-bar a {
@@ -273,7 +278,7 @@ html { scroll-behavior: smooth; }
 .data-status-cell .state.run   { color: var(--accent-bright); }
 .data-status-cell .time {
     font-size: var(--fs-1);
-    color: var(--text-muted);
+    color: var(--cat-timing);   /* T12：同步时间=品红短标签 */
     margin-top: 4px;
     font-family: var(--font-mono);
 }
@@ -319,12 +324,14 @@ html { scroll-behavior: smooth; }
 }
 .metric-card .val {
     font-family: var(--font-mono); font-size: var(--fs-5); font-weight: 600;
-    color: var(--text-primary); letter-spacing: -0.02em;
+    color: var(--cat-data); letter-spacing: -0.02em;   /* T2a：中性数值=青（规格 §4，正负覆盖见下四行，R1 优先） */
 }
 .metric-card .val.positive { color: var(--positive); }
 .metric-card .val.negative { color: var(--negative); }
+.metric-card .val.idx-up   { color: var(--positive); }   /* R1fix：收益为正=红（修复 idx-up (0,1,0) 被 .metric-card .val (0,2,0) 压制的既有缺陷，管理A seq=417 授权） */
+.metric-card .val.idx-down { color: var(--negative); }   /* R1fix：收益为负=绿 */
 .metric-card .lbl {
-    font-size: var(--fs-1); color: var(--text-muted);
+    font-size: var(--fs-1); color: var(--cat-structure);   /* T1：指标名=结构紫 */
     margin-top: 4px; letter-spacing: 0.04em; font-weight: 500;
 }
 .metric-card.primary {
@@ -598,7 +605,7 @@ tr:hover td {
 .sd-deep-popup #sdDeepChart { display: block !important; height: 0; margin-top: 4px; }
 .sd-deep-popup #sdDeepIndicators { display: flex !important; gap: 6px; padding: 6px 22px 0; }
 .sd-deep-popup #sdDeepIndicators .indicator-btn { padding: 4px 12px; font-size: var(--fs-2);
-    background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+    background: transparent; border: 1px solid var(--border); color: var(--cat-structure);   /* T16：指标名=结构紫（hover/选中态不动，选中仍青） */
     border-radius: 4px; cursor: pointer; }
 .sd-deep-popup #sdDeepIndicators .indicator-btn:hover { border-color: var(--accent); color: var(--text-primary); }
 .sd-deep-popup #sdDeepIndicators .indicator-btn.active { background: rgba(var(--accent-rgb),.16); color: var(--accent); border-color: var(--accent); }
@@ -608,7 +615,7 @@ tr:hover td {
     padding: 36px 20px; gap: 14px; text-align: center;
     background: var(--bg-elevated); border: 1px dashed var(--border); border-radius: 8px; }
 .sd-panel-hero .sd-hero-name { font-size: var(--fs-4); font-weight: 600; color: var(--text-primary); }
-.sd-panel-hero .sd-hero-code { font-size: var(--fs-2); color: var(--text-muted); font-family: var(--font-mono); margin-left: 6px; font-weight: 400; }
+.sd-panel-hero .sd-hero-code { font-size: var(--fs-2); color: var(--cat-dim); font-family: var(--font-mono); margin-left: 6px; font-weight: 400; }   /* T7：代码标识=蓝 */
 .sd-panel-hero .sd-hero-hint { font-size: var(--fs-2); color: var(--text-secondary); }
 .sd-panel-hero .btn { padding: 8px 18px; font-size: var(--fs-3); }
 .sd-panel-empty { padding: 40px 18px; text-align: center; font-size: var(--fs-3); color: var(--text-secondary); }
@@ -893,8 +900,8 @@ tr:hover td {
 }
 .sum-row:hover { background: var(--bg-panel-hover); }
 .sum-row .sum-name { font-weight: 600; color: var(--text-primary); }
-.sum-row .sum-code { font-family: var(--font-mono); font-size: var(--fs-1); color: var(--text-muted); }
-.sum-row .sum-val { margin-left: auto; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.sum-row .sum-code { font-family: var(--font-mono); font-size: var(--fs-1); color: var(--cat-dim); }   /* T4：代码标识=蓝 */
+.sum-row .sum-val { margin-left: auto; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--cat-data); }   /* T3：汇总数值=青 */
 .sum-row .sum-val + .sum-val { margin-left: 0; }
 .sum-foot { padding-top: 10px; }
 
@@ -941,7 +948,7 @@ tr:hover td {
     transform: translateY(-2px);
 }
 .idx-clickable { cursor: pointer; }
-.idx-name { font-size: var(--fs-2); color: var(--text-secondary); margin-bottom: 4px; }
+.idx-name { font-size: var(--fs-2); color: var(--cat-structure); margin-bottom: 4px; }   /* T13：指数名=结构紫 */
 .idx-price { font-size: var(--fs-5); font-weight: 700; color: var(--text-primary); font-family: var(--font-mono); }
 .idx-pct { font-size: var(--fs-3); margin-top: 2px; font-family: var(--font-mono); }
 .idx-trend { font-size: var(--fs-1); color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono); }
@@ -977,9 +984,9 @@ tr:hover td {
     margin-bottom: 10px; padding-bottom: 8px;
     border-bottom: 1px dashed rgba(var(--border-rgb),0.5);
 }
-.pick-group-head .hz-desc { font-size: var(--fs-1); color: var(--text-muted); }
+.pick-group-head .hz-desc { font-size: var(--fs-1); color: var(--cat-timing); }   /* T11：周期描述=品红短标签 */
 .pick-group-head .hz-spacer { flex: 1; }
-.pick-group-count { font-size: var(--fs-2); color: var(--text-muted); }
+.pick-group-count { font-size: var(--fs-2); color: var(--cat-data); }   /* T8：计数=青 */
 /* 右上角「详情 / 收起」按钮 */
 .pick-detail-btn {
     margin-left: 4px;
@@ -1035,7 +1042,7 @@ tr:hover td {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .pm-sig { font-size: var(--fs-2); flex-shrink: 0; }
-.pm-code { font-size: var(--fs-1); color: var(--text-muted); font-family: var(--font-mono); margin-top: 1px; }
+.pm-code { font-size: var(--fs-1); color: var(--cat-dim); font-family: var(--font-mono); margin-top: 1px; }   /* T5：代码标识=蓝 */
 .pm-score, .pm-price { font-family: var(--font-mono); text-align: right; }
 .pm-score { font-size: var(--fs-4); font-weight: 800; color: var(--accent); }
 .pm-price { font-size: var(--fs-3); }
@@ -1151,7 +1158,7 @@ tr:hover td {
     display: flex; justify-content: space-between; align-items: flex-start;
 }
 .action-name { font-size: var(--fs-3); font-weight: 700; color: var(--text-primary); }
-.action-code { font-size: var(--fs-1); color: var(--text-muted); margin-top: 2px; font-family: var(--font-mono); }
+.action-code { font-size: var(--fs-1); color: var(--cat-dim); margin-top: 2px; font-family: var(--font-mono); }   /* T6：代码标识=蓝 */
 .action-score { text-align: center; }
 .score-num {
     font-family: var(--font-mono);
@@ -1357,7 +1364,7 @@ table.exit-table .exit-risk.wide { color: #ffaa3c; }
     box-shadow: 0 0 0 1px rgba(var(--accent-rgb),0.3);
 }
 .entry-tag {
-    font-size: var(--fs-1); color: var(--text-muted);
+    font-size: var(--fs-1); color: var(--cat-timing);   /* T10：入场时机=品红短标签 */
     letter-spacing: 0.04em;
 }
 .entry-val {

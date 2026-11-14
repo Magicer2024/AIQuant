@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIQuant · 量化终端</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261113a">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20261114a">
     <style id="stockDeepCss">
         .sd-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
         .sd-search{flex:1;min-width:220px;max-width:420px;padding:8px 12px;background:var(--bg-root);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-size:var(--fs-3)}
@@ -4288,7 +4288,7 @@ async function loadRecHistory() {
                 const avgHtml = avg != null
                     ? `<div style="font-size:var(--fs-1);margin-top:3px" class="${avg>=0?'idx-up':'idx-down'}">${label} 平均收益 ${avg>=0?'+':''}${avg}%</div>`
                     : '';
-                return `<div class="metric-card secondary"><div class="val" style="color:var(--text-primary)">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span> ${badge}</div>${avgHtml}</div>`;
+                return `<div class="metric-card secondary"><div class="val">${s.win_rate}%</div><div class="lbl">${label} 胜率 <span style="opacity:.7">(${s.win}/${s.n})</span> ${badge}</div>${avgHtml}</div>`;
             };
             const avgCls = summary.avg_return >= 0 ? 'idx-up' : 'idx-down';
             const avgSign = summary.avg_return >= 0 ? '+' : '';
@@ -4304,7 +4304,7 @@ async function loadRecHistory() {
                 </div>
                 <div class="metrics-row" style="margin-bottom:12px">
                     <div class="metric-card secondary"><div class="val">${summary.total}</div><div class="lbl">连续推荐段数</div></div>
-                    <div class="metric-card primary"><div class="val" style="color:var(--text-primary)">${summary.win_rate}%</div><div class="lbl">最终胜率 ${summary.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
+                    <div class="metric-card primary"><div class="val">${summary.win_rate}%</div><div class="lbl">最终胜率 ${summary.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
                     <div class="metric-card primary"><div class="val ${avgCls}">${avgSign}${summary.avg_return}%</div><div class="lbl">平均收益</div></div>
                     <div class="metric-card primary"><div class="val">${pf.toFixed(2)}</div><div class="lbl">盈亏比</div></div>
                     <div class="metric-card secondary"><div class="val ${bestCls}">+${summary.best_return}%</div><div class="lbl">最佳</div></div>
@@ -4396,7 +4396,7 @@ async function loadOptimizerPanel() {
         if (s) {
             html += `<div class="metrics-row" style="margin-bottom:12px">
                 <div class="metric-card secondary"><div class="val">${s.total}</div><div class="lbl">近30天短线推荐</div></div>
-                <div class="metric-card primary"><div class="val" style="color:var(--text-primary)">${s.win_rate}%</div><div class="lbl">胜率 ${s.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
+                <div class="metric-card primary"><div class="val">${s.win_rate}%</div><div class="lbl">胜率 ${s.win_rate>=50?'<span class="badge badge-good">达标</span>':'<span class="badge badge-warn">偏低</span>'}</div></div>
                 <div class="metric-card primary"><div class="val ${s.avg_return>=0?'idx-up':'idx-down'}">${s.avg_return>=0?'+':''}${s.avg_return}%</div><div class="lbl">平均收益</div></div>
                 <div class="metric-card secondary"><div class="val">${s.profit_factor}</div><div class="lbl">盈亏比</div></div>
                 <div class="metric-card secondary"><div class="val">${s.stop_hit}</div><div class="lbl">触发止损 <span class="badge badge-bad">亏损离场</span></div></div>
